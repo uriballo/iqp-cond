@@ -233,6 +233,66 @@ def test_mmd_rejects_a_mismatched_encoder() -> None:
         )
 
 
+def test_mmd_rejects_generator_and_params_shape_mismatches() -> None:
+    """The loss reports width failures itself instead of failing in an einsum."""
+    rng = np.random.default_rng(15)
+    ansatz = iqc.complete_ansatz(4)
+    encoders = iqc.encoder(iqc.PRODUCT, rng.uniform(0.4, 2.4, size=(2, 4)))
+    targets = rng.integers(0, 2, size=(2, 16, 4)).astype(np.float64)
+    params = np.zeros(ansatz.n_parameters)
+    key = jax.random.PRNGKey(0)
+
+    narrow = iqc.encoder(iqc.PRODUCT, rng.uniform(0.4, 2.4, size=(2, 3)))
+    with pytest.raises(ValueError, match="generators cover 4"):
+        iqc.mmd(
+            params,
+            ansatz.generators,
+            narrow,
+            targets[:, :, :3],
+            key,
+            sigmas=(1.0,),
+            n_ops=8,
+            n_samples=16,
+        )
+    with pytest.raises(ValueError, match="params must have shape"):
+        iqc.mmd(
+            np.zeros(3),
+            ansatz.generators,
+            encoders,
+            targets,
+            key,
+            sigmas=(1.0,),
+            n_ops=8,
+            n_samples=16,
+        )
+    with pytest.raises(ValueError, match="generators must have shape"):
+        iqc.mmd(
+            params,
+            ansatz.generators[0],
+            encoders,
+            targets,
+            key,
+            sigmas=(1.0,),
+            n_ops=8,
+            n_samples=16,
+        )
+
+    def loss(current_params: jax.Array, current_generators: jax.Array) -> jax.Array:
+        return iqc.mmd(
+            current_params,
+            current_generators,
+            narrow,
+            jnp.asarray(targets[:, :, :3]),
+            key,
+            sigmas=(1.0,),
+            n_ops=8,
+            n_samples=16,
+        ).loss
+
+    with pytest.raises(ValueError, match="generators cover 4"):
+        jax.jit(loss)(params, ansatz.generators)
+
+
 def test_mmd_rejects_mixed_or_missing_mask_sources() -> None:
     rng = np.random.default_rng(13)
     ansatz = iqc.complete_ansatz(3)

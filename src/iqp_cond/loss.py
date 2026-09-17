@@ -93,15 +93,32 @@ def target_moments(
 
 
 def _validate_loss_inputs(
+    params: jnp.ndarray,
+    generators: jnp.ndarray,
     targets: jnp.ndarray,
     encoders: Encoder,
     n_samples: int,
 ) -> int:
-    """Shared shape checks; returns the number of target (visible) qubits."""
+    """Shared shape checks; returns the number of target (visible) qubits.
+
+    Only static properties are inspected, so the checks stay valid while the
+    trainer traces ``mmd`` under ``jax.jit``.  They mirror the checked
+    estimator's messages, because the loss itself must call the unchecked
+    kernel.
+    """
     if targets.ndim != 3:
         raise ValueError(
             "targets must have shape (n_conditions, n_targets, n_visible)",
         )
+    if generators.ndim != 2:
+        raise ValueError("generators must have shape (n_generators, n_qubits)")
+    if encoders.n_qubits != generators.shape[1]:
+        raise ValueError(
+            f"encoder acts on {encoders.n_qubits} qubits but generators "
+            f"cover {generators.shape[1]}",
+        )
+    if params.shape != (generators.shape[0],):
+        raise ValueError("params must have shape (n_generators,)")
     n_conditions, _, n_data_qubits = targets.shape
     if encoders.n_conditions != n_conditions:
         raise ValueError(
@@ -210,6 +227,8 @@ def mmd(
     this is the paper's estimator form and avoids resampling once per
     bandwidth.  The default resamples per (bandwidth, condition) entry.
     """
+    params = jnp.asarray(params, dtype=jnp.float64)
+    generators = jnp.asarray(generators, dtype=jnp.float64)
     targets = jnp.asarray(targets, dtype=jnp.float64)
     if sample_chunk is not None and sample_chunk < 1:
         raise ValueError("sample_chunk must be positive")
@@ -220,7 +239,13 @@ def mmd(
             raise ValueError("n_ops must be positive")
     elif sigmas is not None or n_ops is not None:
         raise ValueError("sigmas and n_ops belong to the key mask source only")
-    n_data_qubits = _validate_loss_inputs(targets, encoders, n_samples)
+    n_data_qubits = _validate_loss_inputs(
+        params,
+        generators,
+        targets,
+        encoders,
+        n_samples,
+    )
     n_conditions = targets.shape[0]
     n_ancillas = encoders.n_qubits - n_data_qubits
 
