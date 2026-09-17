@@ -223,3 +223,35 @@ def test_fixed_per_bandwidth_widths_keep_refreshed_banks_one_shape() -> None:
     assert second.widths == widths
     assert first.masks.shape == second.masks.shape
     assert jax.tree_util.tree_structure(first) == jax.tree_util.tree_structure(second)
+
+
+def test_bank_reproduces_the_conditional_mask_law() -> None:
+    """Bank weights must recover ``P(a | a != 0)`` after removing the mass factor.
+
+    A public-path check of the batched sampler: on a tiny register every
+    nonidentity mask is reachable, so the weight of a mask divided by the
+    nonidentity mass is its analytic conditional probability.
+    """
+    import math
+
+    n_visible, n_ops, sigma = 3, 200_000, 2.0
+    bank = iqc.operator_bank((sigma,), n_ops, 1, n_visible, seed=0)
+    masks, weights = bank.entry(0, 0)
+    masks = np.asarray(masks)
+    weights = np.asarray(weights)
+    assert masks.shape[0] == 2**n_visible - 1  # every nonidentity mask, once
+
+    p = float(iqc.mmd_operator_probability(sigma))
+    nonidentity_mass = 1.0 - (1.0 - p) ** n_visible
+    codes = (masks * 2 ** np.arange(n_visible)).sum(axis=1).astype(int)
+    empirical = weights / nonidentity_mass
+    analytic = np.array(
+        [
+            p ** bin(code).count("1")
+            * (1.0 - p) ** (n_visible - bin(code).count("1"))
+            / nonidentity_mass
+            for code in codes
+        ],
+    )
+    assert float(np.max(np.abs(empirical - analytic))) < 5e-3
+    assert math.isclose(float(weights.sum()), nonidentity_mass, rel_tol=1e-12)

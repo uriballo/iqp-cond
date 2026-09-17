@@ -127,6 +127,7 @@ def _condition_mmd(
     n_ancillas: int,
     n_samples: int,
     key: jax.Array,
+    gemm_dtype: jnp.dtype | None = None,
 ) -> jnp.ndarray:
     """Weighted sum of per-mask squared moment differences for one condition.
 
@@ -144,6 +145,7 @@ def _condition_mmd(
         weights,
         n_ancillas,
         samples,
+        gemm_dtype=gemm_dtype,
     )
 
 
@@ -156,6 +158,7 @@ def _condition_mmd_from_samples(
     weights: jnp.ndarray,
     n_ancillas: int,
     samples: jnp.ndarray,
+    gemm_dtype: jnp.dtype | None = None,
 ) -> jnp.ndarray:
     """Same weighted sum over one already-drawn reference sample set."""
     n_samples = samples.shape[1]
@@ -166,6 +169,7 @@ def _condition_mmd_from_samples(
         model_masks,
         encoder,
         samples,
+        gemm_dtype=gemm_dtype,
     )
     target_means, target_squares = target_moments(target_condition, visible_masks)
     sums = jnp.sum(model.sample_values, axis=1)
@@ -185,6 +189,7 @@ def sampled_mmd(
     sigmas: tuple[float, ...],
     n_ops: int,
     n_samples: int,
+    gemm_dtype: jnp.dtype | None = None,
 ) -> ConditionalMMDResult:
     """Estimate the multiscale squared MMD with masks drawn from ``key``.
 
@@ -227,6 +232,7 @@ def sampled_mmd(
                     n_ancillas,
                     n_samples,
                     keys[cursor],
+                    gemm_dtype=gemm_dtype,
                 ),
             )
             cursor += 1
@@ -250,6 +256,7 @@ def banked_mmd(
     key: jax.Array,
     *,
     shared_samples: bool = False,
+    gemm_dtype: jnp.dtype | None = None,
 ) -> ConditionalMMDResult:
     """Estimate the multiscale squared MMD with a fixed compressed operator bank.
 
@@ -297,6 +304,7 @@ def banked_mmd(
                     bank.entry(bandwidth, condition)[1],
                     n_ancillas,
                     samples,
+                    gemm_dtype=gemm_dtype,
                 )
                 for bandwidth in range(bank.n_bandwidths)
             ]
@@ -321,6 +329,7 @@ def banked_mmd(
                         n_ancillas,
                         n_samples,
                         keys[cursor],
+                        gemm_dtype=gemm_dtype,
                     ),
                 )
                 cursor += 1

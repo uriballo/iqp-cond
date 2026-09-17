@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -137,3 +138,37 @@ def test_unchecked_kernel_is_jittable(
         ).values
 
     assert jax.jit(estimate)(params).shape == (N_CONDITIONS, 1)
+
+
+def test_mixed_precision_gemm_stays_close_to_float64(
+    setup: tuple[iqc.Ansatz, iqc.Encoder, np.ndarray],
+) -> None:
+    """Casting only the phase contraction to float32 keeps float64 accuracy."""
+    ansatz, encoders, _targets = setup
+    masks = np.array([[1.0, 0.0, 1.0], [0.0, 1.0, 1.0]])
+    params = np.linspace(-0.4, 0.4, ansatz.n_parameters)
+    key = jax.random.PRNGKey(3)
+
+    reference = iqc.estimate_pauli_z(
+        params,
+        ansatz.generators,
+        masks,
+        encoders,
+        key,
+        4096,
+    )
+    mixed = iqc.estimate_pauli_z(
+        params,
+        ansatz.generators,
+        masks,
+        encoders,
+        key,
+        4096,
+        gemm_dtype=jnp.float32,
+    )
+    deviation = float(
+        np.max(np.abs(np.asarray(mixed.values) - np.asarray(reference.values))),
+    )
+    # Nonzero pins the cast as active; the bound pins it as harmless.
+    assert 0.0 < deviation < 1e-5
+    assert np.asarray(mixed.values).shape == np.asarray(reference.values).shape

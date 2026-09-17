@@ -382,3 +382,36 @@ def test_shared_samples_banked_mmd_keeps_the_result_shape() -> None:
         np.asarray(per_entry.per_condition),
         atol=0.05,
     )
+
+
+def test_mixed_precision_gemm_banked_mmd_stays_close_to_float64() -> None:
+    """The trainer's mixed-precision knob does not move the objective."""
+    rng = np.random.default_rng(51)
+    ansatz = iqc.complete_ansatz(4)
+    encoders = iqc.encoder(iqc.PRODUCT, rng.uniform(0.4, 2.4, size=(2, 4)))
+    targets = rng.integers(0, 2, size=(2, 64, 4)).astype(np.float64)
+    params = rng.normal(0.0, 0.3, size=ansatz.n_parameters)
+    bank = iqc.operator_bank(SIGMAS, 64, 2, 4, seed=9)
+    key = jax.random.PRNGKey(5)
+
+    reference = iqc.banked_mmd(
+        params,
+        ansatz.generators,
+        encoders,
+        targets,
+        bank,
+        512,
+        key,
+    )
+    mixed = iqc.banked_mmd(
+        params,
+        ansatz.generators,
+        encoders,
+        targets,
+        bank,
+        512,
+        key,
+        gemm_dtype=jnp.float32,
+    )
+    deviation = abs(float(mixed.loss) - float(reference.loss))
+    assert 0.0 < deviation < 1e-5

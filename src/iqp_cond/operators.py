@@ -15,6 +15,7 @@ duplicates are represented once with their exact empirical multiplicity.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -114,6 +115,24 @@ def sample_nonidentity_masks(
     return unique, weights
 
 
+def _conditional_weight_cdf(n_qubits: int, sigma: float) -> np.ndarray:
+    """CDF of the Hamming weight conditioned on ``k >= 1``."""
+    p = float(mmd_operator_probability(sigma))
+    k = np.arange(n_qubits + 1, dtype=np.float64)
+    log_binomial = np.asarray(
+        [
+            math.lgamma(n_qubits + 1)
+            - math.lgamma(i + 1)
+            - math.lgamma(n_qubits - i + 1)
+            for i in range(n_qubits + 1)
+        ],
+    )
+    log_pmf = log_binomial + k * math.log(p) + (n_qubits - k) * math.log1p(-p)
+    pmf = np.exp(log_pmf)[1:]
+    cdf = np.cumsum(pmf)
+    return cdf / cdf[-1]
+
+
 def _sample_nonidentity_codes(
     rng: np.random.Generator,
     n_ops: int,
@@ -121,35 +140,26 @@ def _sample_nonidentity_codes(
     sigma: float,
     n_conditions: int,
 ) -> np.ndarray:
-    """Draw nonidentity masks for every condition at once, as integer codes.
+    """Draw nonidentity masks for every condition as little-endian codes.
 
-    One binomial proposal covers all conditions per round; only the accepted
-    rows are copied out.  Codes are little-endian integers, so compression is a
-    single ``np.unique`` over the whole (condition, draw) batch instead of one
-    lexicographic row sort per entry, which is what dominates the NumPy bank
-    build.
+    The draw is exact and rejection-free: the Hamming weight comes from the
+    binomial law conditioned on ``k >= 1`` by inverse CDF, and the bitstring is
+    a uniformly random ``k``-subset taken from one order statistic of ``n``
+    uniforms.  Every draw is accepted, so the cost does not degrade as sigma
+    grows and the nonidentity mass concentrates on the identity.
+
+    Codes are integers so compression is a single ``np.unique`` over the whole
+    (condition, draw) batch instead of one lexicographic row sort per entry.
     """
-    p = float(mmd_operator_probability(sigma))
+    cdf = _conditional_weight_cdf(n_qubits, sigma)
     powers = 1 << np.arange(n_qubits, dtype=np.int64)
-    codes = np.zeros((n_conditions, n_ops), dtype=np.int64)
-    filled = np.zeros(n_conditions, dtype=np.int64)
-    while True:
-        missing = n_ops - filled
-        if not bool(np.any(missing > 0)):
-            break
-        chunk = int(max(2 * int(missing.max()), 64))
-        proposal = rng.binomial(1, p, size=(n_conditions, chunk, n_qubits))
-        nonidentity = proposal.any(axis=2)
-        for condition in range(n_conditions):
-            need = int(missing[condition])
-            if need <= 0:
-                continue
-            rows = proposal[condition][nonidentity[condition]]
-            take = min(need, rows.shape[0])
-            if take:
-                start = int(filled[condition])
-                codes[condition, start : start + take] = rows[:take] @ powers
-                filled[condition] = start + take
+    rows = np.arange(n_ops)
+    codes = np.empty((n_conditions, n_ops), dtype=np.int64)
+    for condition in range(n_conditions):
+        weights = np.searchsorted(cdf, rng.random(n_ops), side="right") + 1
+        ranks = rng.random((n_ops, n_qubits))
+        threshold = np.sort(ranks, axis=1)[rows, weights - 1]
+        codes[condition] = (ranks <= threshold[:, None]) @ powers
     return codes
 
 

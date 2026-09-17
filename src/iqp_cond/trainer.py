@@ -63,6 +63,11 @@ class TrainingConfig:
     draws per condition and bandwidth that feed the compressed operator banks.
     Under the default per-step refresh a training bank is built before every
     update; the validation bank is drawn once.
+
+    ``gemm_dtype`` runs the phase contraction in a reduced dtype (for example
+    ``jnp.float32``) and casts the result back to float64, which is the mixed
+    precision mode that pays off on GPUs; the reductions stay float64.  The
+    default keeps every operation in float64.
     """
 
     steps: int = 2_000
@@ -75,6 +80,7 @@ class TrainingConfig:
     n_iqp_samples: int = 8_192
     validation_n_ops: int = 256
     validation_n_iqp_samples: int = 16_384
+    gemm_dtype: jnp.dtype | None = None
 
 
 @dataclass(frozen=True)
@@ -258,6 +264,7 @@ def train(
             # bandwidths (the paper's form); the retained path keeps the
             # campaign's per-entry draw layout bit for bit.
             shared_samples=mask_refresh == STEP,
+            gemm_dtype=config.gemm_dtype,
         ).loss
 
     value_and_gradient = jax.jit(jax.value_and_grad(training_loss))
@@ -271,6 +278,7 @@ def train(
             validation_bank,
             config.validation_n_iqp_samples,
             jax.random.PRNGKey(seed + 1_000_000),
+            gemm_dtype=config.gemm_dtype,
         ).loss
 
     evaluate_validation = jax.jit(validation_loss)

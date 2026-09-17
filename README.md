@@ -236,6 +236,14 @@ pure-JAX path is ~1.7×. Per-step refresh is both the unbiased and the fastest
 default. Protocol, timings, and reproduction commands:
 `experiments/library_perf/`.
 
+On accelerators, set `TrainingConfig(gemm_dtype=jnp.float32)` (or pass
+`gemm_dtype` to `banked_mmd` / `sampled_mmd`): only the phase contraction runs
+in float32 and the result is cast back to float64, so the loss and gradient stay
+float64-precise. It is the dominant lever on GPUs — the sibling `iqpopt-gpu`
+benchmark reports 15–28× for the same estimator structure — and is already
+worth 7.5% (production) to 21.5% (paper scale) on CPU with ~1e-7 gradient error.
+The default stays float64 so published numbers reproduce bit-for-bit.
+
 Peak memory is dominated by the `(samples, masks, qubits)` reduction inside the
 per-condition evaluation, so it scales roughly as
 `n_iqp_samples × distinct_masks × n_qubits × 16` bytes. Lower

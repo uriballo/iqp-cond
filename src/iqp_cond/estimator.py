@@ -70,12 +70,27 @@ def _phase_differences(
     generators: jnp.ndarray,
     masks: jnp.ndarray,
     samples: jnp.ndarray,
+    gemm_dtype: jnp.dtype | None = None,
 ) -> jnp.ndarray:
-    """Return ``Delta_a f_theta(z)`` for every sample and mask."""
+    """Return ``Delta_a f_theta(z)`` for every sample and mask.
+
+    ``gemm_dtype`` runs only the ``(samples, generators) x (masks, generators)``
+    contraction in a reduced dtype and casts the result back to float64, so the
+    exponentiation and every reduction stay precise.  This is the mixed
+    precision mode that gives large speedups on GPUs, whose float64 throughput
+    is a small fraction of float32; on CPU it measured neutral.
+    """
     sample_parities = jnp.einsum("bsn,mn->bsm", samples, generators)
     sample_characters = 1.0 - 2.0 * jnp.mod(sample_parities, 2.0)
     op_parities = jnp.mod(jnp.einsum("rn,mn->rm", masks, generators), 2.0)
     weighted_flips = -2.0 * op_parities * params[None, :]
+    if gemm_dtype is not None:
+        phases = jnp.einsum(
+            "bsm,rm->bsr",
+            sample_characters.astype(gemm_dtype),
+            weighted_flips.astype(gemm_dtype),
+        )
+        return phases.astype(jnp.float64)
     return jnp.einsum("bsm,rm->bsr", sample_characters, weighted_flips)
 
 
@@ -86,6 +101,8 @@ def estimate_pauli_z(
     encoders: Encoder,
     key: jax.Array,
     n_samples: int,
+    *,
+    gemm_dtype: jnp.dtype | None = None,
 ) -> ExpectationEstimate:
     """Estimate Pauli-Z expectations for one or more conditions.
 
@@ -126,6 +143,7 @@ def estimate_pauli_z(
         encoders,
         key,
         n_samples,
+        gemm_dtype=gemm_dtype,
     )
 
 
@@ -136,6 +154,8 @@ def estimate_pauli_z_unchecked(
     encoders: Encoder,
     key: jax.Array,
     n_samples: int,
+    *,
+    gemm_dtype: jnp.dtype | None = None,
 ) -> ExpectationEstimate:
     """Unchecked estimator kernel, safe to trace under ``jax.jit``.
 
@@ -151,6 +171,7 @@ def estimate_pauli_z_unchecked(
         masks,
         encoders,
         samples,
+        gemm_dtype=gemm_dtype,
     )
 
 
@@ -160,6 +181,8 @@ def estimate_pauli_z_from_samples(
     masks: jnp.ndarray,
     encoders: Encoder,
     samples: jnp.ndarray,
+    *,
+    gemm_dtype: jnp.dtype | None = None,
 ) -> ExpectationEstimate:
     """Estimator kernel over pre-drawn reference samples.
 
@@ -170,7 +193,13 @@ def estimate_pauli_z_from_samples(
     :meth:`Encoder.sample`.
     """
     ratios = encoders.amplitude_ratios(samples, masks)
-    phases = _phase_differences(params, generators, masks, samples)
+    phases = _phase_differences(
+        params,
+        generators,
+        masks,
+        samples,
+        gemm_dtype=gemm_dtype,
+    )
     sample_values = jnp.real(ratios * jnp.exp(1j * phases))
     values = jnp.mean(sample_values, axis=1)
     return ExpectationEstimate(values, sample_values, samples.shape[1])
