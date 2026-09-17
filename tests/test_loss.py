@@ -397,6 +397,51 @@ def test_shared_samples_keeps_the_result_shape() -> None:
     )
 
 
+def test_shared_samples_reuses_one_draw_per_condition_with_fresh_masks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fresh-mask path honors shared_samples: one encoder draw per condition."""
+    rng = np.random.default_rng(43)
+    ansatz = iqc.complete_ansatz(3)
+    encoders = iqc.encoder(iqc.PRODUCT, rng.uniform(0.4, 2.4, size=(2, 3)))
+    targets = rng.integers(0, 2, size=(2, 16, 3)).astype(np.float64)
+    params = np.zeros(ansatz.n_parameters)
+    calls: list[int] = []
+
+    original_sample = iqc.ProductEncoder.sample
+
+    def counting_sample(
+        self: iqc.ProductEncoder,
+        key: jax.Array,
+        n_samples: int,
+    ) -> jnp.ndarray:
+        calls.append(1)
+        return original_sample(self, key, n_samples)
+
+    monkeypatch.setattr(iqc.ProductEncoder, "sample", counting_sample)
+
+    def evaluate(shared: bool) -> float:
+        calls.clear()
+        return float(
+            iqc.mmd(
+                params,
+                ansatz.generators,
+                encoders,
+                targets,
+                jax.random.PRNGKey(0),
+                sigmas=(1.0, 2.0, 4.0),
+                n_ops=8,
+                n_samples=16,
+                shared_samples=shared,
+            ).loss,
+        )
+
+    assert np.isfinite(evaluate(True))
+    assert len(calls) == 2
+    assert np.isfinite(evaluate(False))
+    assert len(calls) == 2 * 3
+
+
 def test_sample_chunk_matches_the_monolithic_objective() -> None:
     """Streaming the sample axis changes only the summation order."""
     rng = np.random.default_rng(61)

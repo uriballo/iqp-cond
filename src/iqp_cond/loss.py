@@ -205,9 +205,10 @@ def mmd(
     sources are exclusive.  One condition is evaluated at a time, so the
     sample/mask buffer covers a single condition instead of the whole batch.
 
-    With ``bank`` and ``shared_samples=True`` each condition draws one
-    reference sample set and evaluates every bandwidth's masks on it, which is
-    the paper's estimator form and avoids resampling once per bandwidth.
+    With ``shared_samples=True`` each condition draws one reference sample set
+    and evaluates every bandwidth's masks on it, whichever mask source is used;
+    this is the paper's estimator form and avoids resampling once per
+    bandwidth.  The default resamples per (bandwidth, condition) entry.
     """
     targets = jnp.asarray(targets, dtype=jnp.float64)
     if sample_chunk is not None and sample_chunk < 1:
@@ -248,7 +249,45 @@ def mmd(
         )
 
     assert sigmas is not None and n_ops is not None
-    n_keys = len(sigmas) * n_conditions * 2
+    n_bandwidths = len(sigmas)
+    if shared_samples:
+        # The paper's estimator form: one reference draw per condition serves
+        # every bandwidth's masks.
+        keys = jax.random.split(key, n_bandwidths * n_conditions + n_conditions)
+        mask_keys = keys[: n_bandwidths * n_conditions]
+        sample_keys = keys[n_bandwidths * n_conditions :]
+        bandwidth_values = []
+        cursor = 0
+        for condition in range(n_conditions):
+            encoder = select_encoder(encoders, condition)
+            samples = encoder.sample(sample_keys[condition], n_samples)
+            condition_values = []
+            for sigma in sigmas:
+                visible_masks, weights = sample_nonidentity_masks_jax(
+                    mask_keys[cursor],
+                    n_ops,
+                    n_data_qubits,
+                    float(sigma),
+                )
+                cursor += 1
+                condition_values.append(
+                    _condition_value(
+                        params,
+                        generators,
+                        encoder,
+                        targets[condition : condition + 1],
+                        visible_masks,
+                        weights,
+                        n_ancillas,
+                        samples,
+                        gemm_dtype,
+                        sample_chunk,
+                    ),
+                )
+            bandwidth_values.append(jnp.stack(condition_values))
+        return _result(jnp.stack(bandwidth_values, axis=1))
+
+    n_keys = n_bandwidths * n_conditions * 2
     keys = jax.random.split(key, max(n_keys, 1))
     bandwidth_values = []
     cursor = 0

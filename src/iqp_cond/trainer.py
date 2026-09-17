@@ -24,8 +24,9 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
+from .initialization import parameters_from_data
 from .model import ConditionalModel
-from .operators import OperatorBank, operator_bank
+from .operators import OperatorBank, expected_bodyness_sigmas, operator_bank
 
 __all__ = [
     "CACHE",
@@ -50,8 +51,18 @@ _BANK_MARGIN = 2
 class TrainingConfig:
     """Optimization and Monte Carlo settings.
 
-    The defaults are a starting point, not a tuned recommendation; the current
-    experiments run around 1000-2000 operators and 500-1000 samples.
+    The defaults follow the paper's protocol where the library can: 2000
+    updates, batches of 256 per condition, initialization from the pooled
+    training data by the mean-covariance prescription, checkpoints every 25
+    steps by validation MMD, and a width-aware bandwidth schedule
+    (``sigmas=None`` resolves through :meth:`resolved_sigmas` to the bodyness
+    targets ``(2, n/4, 0.49 n)``).  The mask and Monte Carlo budgets are
+    lighter than the campaign's so that default runs finish quickly:
+    ``n_ops``/``validation_n_ops`` default to 512 (campaign: 2000 masks), and
+    ``mc_samples``/``validation_mc_samples`` to 1000 (campaign: 8192 reference
+    draws, the smallest calibrated budget passing the estimator gates).  Raise
+    them for production fidelity.  The campaign also retained one mask bank per
+    fit (``mask_refresh="cache"``) instead of redrawing every step.
 
     ``n_ops`` and ``validation_n_ops`` are the number of nonidentity operator
     draws per condition and bandwidth that feed the compressed operator banks.
@@ -62,7 +73,7 @@ class TrainingConfig:
     ``jnp.float32``) and casts the result back to float64, which is the mixed
     precision mode that pays off on GPUs; the reductions stay float64.
 
-    ``sample_chunk`` streams the reference samples in slices, bounding the live
+    ``sample_chunk`` streams the Monte Carlo samples in slices, bounding the live
     ``(samples, masks, qubits)`` ratio tensor.  It pays off at large sample
     budgets and costs a little for small ones, so it is off by default.
     """
@@ -72,14 +83,25 @@ class TrainingConfig:
     learning_rate: float = 1e-2
     final_learning_rate: float = 1e-3
     validation_interval: int = 25
-    sigmas: tuple[float, ...] = (1.0, 2.0, 4.0)
-    n_ops: int = 64
-    n_iqp_samples: int = 8_192
-    validation_n_ops: int = 256
-    validation_n_iqp_samples: int = 16_384
+    sigmas: tuple[float, ...] | None = None
+    n_ops: int = 512
+    mc_samples: int = 1_000
+    validation_n_ops: int = 512
+    validation_mc_samples: int = 1_000
     gemm_dtype: jnp.dtype | None = None
     sample_chunk: int | None = None
     mask_refresh: str = STEP
+
+    def resolved_sigmas(self, n_visible: int) -> tuple[float, ...]:
+        """Return the bandwidth schedule for ``n_visible`` visible qubits.
+
+        Explicit ``sigmas`` win; otherwise the default bodyness targets
+        ``(2, n/4, 0.49 n)`` are converted with
+        :func:`iqp_cond.expected_bodyness_sigmas`.
+        """
+        if self.sigmas is not None:
+            return self.sigmas
+        return expected_bodyness_sigmas(n_visible)
 
     def __post_init__(self) -> None:
         if self.steps < 1:
@@ -90,16 +112,19 @@ class TrainingConfig:
             raise ValueError("learning rates must be positive")
         if self.validation_interval < 1:
             raise ValueError("validation_interval must be positive")
-        if not self.sigmas or any(
-            not math.isfinite(float(sigma)) or float(sigma) <= 0.0
-            for sigma in self.sigmas
+        if self.sigmas is not None and (
+            not self.sigmas
+            or any(
+                not math.isfinite(float(sigma)) or float(sigma) <= 0.0
+                for sigma in self.sigmas
+            )
         ):
             raise ValueError("sigmas must be positive and finite")
         if self.n_ops < 1 or self.validation_n_ops < 1:
             raise ValueError("n_ops and validation_n_ops must be positive")
-        if self.n_iqp_samples < 2 or self.validation_n_iqp_samples < 2:
+        if self.mc_samples < 2 or self.validation_mc_samples < 2:
             raise ValueError(
-                "n_iqp_samples and validation_n_iqp_samples must be at least two",
+                "mc_samples and validation_mc_samples must be at least two",
             )
         if self.sample_chunk is not None and self.sample_chunk < 1:
             raise ValueError("sample_chunk must be positive")
@@ -169,13 +194,14 @@ def _validate_training_inputs(
 
 
 def _refreshed_widths(
+    sigmas: tuple[float, ...],
     config: TrainingConfig,
     model: ConditionalModel,
     seed: int,
 ) -> tuple[int, ...]:
     """Mask-axis widths a refreshed bank will almost never exceed."""
     pilot = operator_bank(
-        config.sigmas,
+        sigmas,
         config.n_ops,
         model.encoders.n_conditions,
         model.visible,
@@ -199,17 +225,30 @@ def train(
     ``"step"`` (default) draws a fresh bank inside every compiled step from a
     per-step key, so each update's expectation equals the true kernel MMD;
     ``"cache"`` draws one compressed NumPy bank and retains it, which
-    reproduces the published campaign's protocol exactly.
-    """
-    from .initialization import random_parameters
+    reproduces the published campaign's mask protocol.  Every update uses the
+    paper's estimator form either way: one reference draw per condition is
+    shared by all masks and bandwidths.
 
+    Without ``initial_params`` the parameters start from the paper's
+    mean-covariance prescription applied to the pooled training conditions,
+    with seeded noise on ancilla-supported rows.  The bandwidth schedule comes
+    from ``config.resolved_sigmas(model.visible)``.
+    """
     training_targets = np.asarray(training_targets, dtype=np.float64)
     validation_targets = np.asarray(validation_targets, dtype=np.float64)
     _validate_training_inputs(model, training_targets, validation_targets)
 
     encoders = model.encoders
+    sigmas = config.resolved_sigmas(model.visible)
     if initial_params is None:
-        params = jnp.asarray(random_parameters(model.ansatz.n_parameters, seed))
+        params = jnp.asarray(
+            parameters_from_data(
+                training_targets.reshape(-1, model.visible),
+                model.ansatz.generators,
+                n_visible=model.visible,
+                seed=seed,
+            ),
+        )
     else:
         candidate = np.asarray(initial_params, dtype=np.float64)
         if candidate.shape != (model.ansatz.n_parameters,):
@@ -237,19 +276,19 @@ def train(
     # One width per bandwidth for every refreshed bank, so the compiled step is
     # built once.  The pilot draw sizes each width; the margin keeps a redraw
     # (which conditions the entry on ``distinct <= width``) rare.
-    max_masks = _refreshed_widths(config, model, seed)
+    max_masks = _refreshed_widths(sigmas, config, model, seed)
     training_bank: OperatorBank | None = None
     if config.mask_refresh == CACHE:
         # Retained for the whole run; the loop never rebuilds it.
         training_bank = operator_bank(
-            config.sigmas,
+            sigmas,
             config.n_ops,
             encoders.n_conditions,
             model.visible,
             seed,
         )
     validation_bank = operator_bank(
-        config.sigmas,
+        sigmas,
         config.validation_n_ops,
         encoders.n_conditions,
         model.visible,
@@ -267,9 +306,9 @@ def train(
                 current_params,
                 target_batch,
                 step_key,
-                sigmas=config.sigmas,
+                sigmas=sigmas,
                 n_ops=config.n_ops,
-                n_samples=config.n_iqp_samples,
+                n_samples=config.mc_samples,
                 shared_samples=True,
                 gemm_dtype=config.gemm_dtype,
                 sample_chunk=config.sample_chunk,
@@ -279,7 +318,7 @@ def train(
             target_batch,
             step_key,
             bank=current_bank,
-            n_samples=config.n_iqp_samples,
+            n_samples=config.mc_samples,
             shared_samples=True,
             gemm_dtype=config.gemm_dtype,
             sample_chunk=config.sample_chunk,
@@ -293,7 +332,7 @@ def train(
             jnp.asarray(validation_targets),
             jax.random.PRNGKey(seed + 1_000_000),
             bank=validation_bank,
-            n_samples=config.validation_n_iqp_samples,
+            n_samples=config.validation_mc_samples,
             gemm_dtype=config.gemm_dtype,
         ).loss
 
@@ -312,7 +351,7 @@ def train(
     for step in range(config.steps):
         if training_bank is None or config.mask_refresh == STEP:
             training_bank = operator_bank(
-                config.sigmas,
+                sigmas,
                 config.n_ops,
                 encoders.n_conditions,
                 model.visible,

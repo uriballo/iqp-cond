@@ -73,7 +73,7 @@ def main() -> None:
             steps=100,
             batch_size=64,
             n_ops=32,
-            n_iqp_samples=1024,
+            mc_samples=1024,
         ),
     )
     print(f"best step {result.best_step}, validation {result.best_validation_loss:.5f}")

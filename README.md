@@ -51,13 +51,18 @@ result = iqc.train(
     train_targets,
     valid_targets,
     seed=0,
-    # Defaults are a starting point; the manuscript experiments run around
-    # 1000-2000 operators and 500-1000 samples.
-    config=iqc.TrainingConfig(steps=50, batch_size=64, n_ops=16, n_iqp_samples=1024),
+    # Shipped defaults: 2000 updates, batch 256, 512 masks per condition and
+    # bandwidth, 1000 Monte Carlo samples, data-based initialization, and the
+    # width-aware bodyness bandwidth schedule.  This quickstart shortens them.
+    config=iqc.TrainingConfig(steps=50, batch_size=64, n_ops=16, mc_samples=1024),
 )
 
 params = result.best_params  # selected on the validation split
 ```
+
+Parameters are initialized by default from the pooled training conditions with
+the IQPopt mean-covariance prescription, so training starts from the target's
+one- and two-body structure rather than noise.
 
 ## Querying expectations
 
@@ -183,8 +188,9 @@ the parameter mask whose generators touch an ancilla, which is what
 
 Advanced building blocks live in `iqp_cond.operators` (mask law, `OperatorBank`,
 `operator_bank`, `bank_from_ragged`, `sample_nonidentity_masks`,
-`sample_nonidentity_masks_jax`, `mmd_operator_probability`); they are not
-re-exported at the top level.
+`sample_nonidentity_masks_jax`, `mmd_operator_probability`); only
+`expected_bodyness_sigmas` is re-exported, because `TrainingConfig` resolves
+its default bandwidths through it.
 
 ## Masks and the MMD estimator
 
@@ -197,21 +203,35 @@ always comes from the call's `key`; the mask source is exactly one of:
 - `bank`: evaluate a prebuilt compressed `OperatorBank`, which is the
   evaluation and campaign-reproduction path.
 
-Skipping the identity mask is exact: it contributes zero to the kernel MMD, so
-spending draws on it only adds variance.  The trainer redraws masks at every
-optimization step (`TrainingConfig.mask_refresh="step"`, the default) so each
-update's expectation equals the true kernel MMD; `mask_refresh="cache"` draws
-one bank and retains it, reproducing the published campaign's protocol.
-Validation always uses one fixed bank, so checkpoint selection stays comparable
-across steps.
+A bandwidth `sigma` induces the mask law `a_i ~ Bernoulli(p_sigma)` with
+`p_sigma = (1 - e^{-1/(2 sigma^2)})/2`, so `E[|a|] = n p_sigma` is the expected
+bodyness. `iqc.expected_bodyness_sigmas(n, targets)` inverts a bodyness target
+into its bandwidth; the library default targets `(2, n/4, 0.49n)`, capped at
+`0.49n` because `p_sigma < 1/2` strictly. The trainer resolves
+`TrainingConfig.sigmas=None` through that helper once it knows the model width;
+the campaign instead targeted `1, (1+0.49n)/2, 0.49n`.
 
-At 12 visible qubits and 5 conditions, one 2000-step fit at the shipped
-defaults takes ~62 s (64 operators, 8192 samples) and ~55 s at 2000 operators /
-1000 samples on an idle 32-core host, with mixed precision
+Skipping the identity mask is exact: it contributes zero to the kernel MMD, so
+spending draws on it only adds variance.  Both mask sources accept
+`shared_samples=True`, which draws one reference sample set per condition and
+evaluates every bandwidth on it; that is the trainer's estimator form and the
+paper's.  The default resamples per (bandwidth, condition) entry.  The trainer
+redraws masks at every optimization step (`TrainingConfig.mask_refresh="step"`,
+the default) so each update's expectation equals the true kernel MMD;
+`mask_refresh="cache"` draws one bank and retains it, reproducing the published
+campaign's protocol.  Validation always uses one fixed bank, so checkpoint
+selection stays comparable across steps.
+
+The shipped defaults are lighter than the campaign's: 512 masks and 1000 Monte
+Carlo samples per condition, against 2000 masks and 8192 samples (the smallest
+budget passing the campaign's preregistered estimator gates). Raise
+`n_ops`/`mc_samples` for production fidelity. At 12 visible qubits and 5
+conditions, one 2000-step fit at the campaign scale takes ~55–62 s on an idle
+32-core host, with mixed precision
 (`TrainingConfig(gemm_dtype=jnp.float32)`) another 6–16% faster. Peak memory is
 dominated by the `(samples, masks, qubits)` reduction inside the per-condition
 evaluation, so it scales roughly as
-`n_iqp_samples × distinct_masks × n_qubits × 16` bytes.
+`mc_samples × distinct_masks × n_qubits × 16` bytes.
 
 ## Precision
 

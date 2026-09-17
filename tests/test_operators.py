@@ -19,6 +19,7 @@ import pytest
 from iqp_cond.operators import (
     OperatorBank,
     bank_from_ragged,
+    expected_bodyness_sigmas,
     mmd_operator_probability,
     operator_bank,
     sample_nonidentity_masks,
@@ -271,3 +272,33 @@ def test_operator_bank_rejects_invalid_inputs() -> None:
         operator_bank((0.0,), 8, 2, 4, seed=0)
     with pytest.raises(ValueError, match="sigmas must not be empty"):
         operator_bank((), 8, 2, 4, seed=0)
+
+
+def test_expected_bodyness_sigmas_inverts_the_mask_law() -> None:
+    """A bodyness target K maps to the sigma whose mean mask weight is K."""
+    n_visible = 12
+    sigmas = expected_bodyness_sigmas(n_visible, targets=(2.0, 3.0, 5.88))
+    for sigma, target in zip(sigmas, (2.0, 3.0, 5.88), strict=True):
+        rebuilt = n_visible * float(mmd_operator_probability(sigma))
+        assert rebuilt == pytest.approx(target, rel=1e-12, abs=1e-12)
+
+
+def test_expected_bodyness_sigmas_defaults_and_cap() -> None:
+    """The default targets are (2, n/4, 0.49 n), capped at 0.49 n."""
+    n_visible = 12
+    default = expected_bodyness_sigmas(n_visible)
+    explicit = expected_bodyness_sigmas(n_visible, targets=(2.0, 3.0, 5.88))
+    assert default == explicit
+
+    # For n = 3 the low target 2 exceeds n/2 and is capped at 0.49 n.
+    capped = expected_bodyness_sigmas(3)
+    assert capped == expected_bodyness_sigmas(3, targets=(1.47, 0.75, 1.47))
+
+
+def test_expected_bodyness_sigmas_rejects_invalid_inputs() -> None:
+    with pytest.raises(ValueError, match="n_visible must be positive"):
+        expected_bodyness_sigmas(0)
+    with pytest.raises(ValueError, match="bodyness targets must be positive"):
+        expected_bodyness_sigmas(8, targets=())
+    with pytest.raises(ValueError, match="bodyness targets must be positive"):
+        expected_bodyness_sigmas(8, targets=(0.0,))

@@ -61,7 +61,7 @@ def main() -> None:
             steps=200,
             batch_size=100,
             n_ops=64,
-            n_iqp_samples=1024,
+            mc_samples=1024,
         ),
     )
     print(f"best step {result.best_step}")

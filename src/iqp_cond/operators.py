@@ -27,11 +27,44 @@ from jax.scipy.special import gammaln
 __all__ = [
     "OperatorBank",
     "bank_from_ragged",
+    "expected_bodyness_sigmas",
     "mmd_operator_probability",
     "operator_bank",
     "sample_nonidentity_masks",
     "sample_nonidentity_masks_jax",
 ]
+
+
+def expected_bodyness_sigmas(
+    n_visible: int,
+    targets: Sequence[float] | None = None,
+) -> tuple[float, ...]:
+    """Return bandwidths whose mask law targets the given mean bodyness.
+
+    The mean mask weight under bandwidth ``sigma`` is ``E[K] = n p_sigma`` with
+    ``p_sigma = (1 - exp(-1/(2 sigma**2))) / 2``, so a bodyness target ``K``
+    inverts to ``sigma = [-2 log(1 - 2K/n)]**-1/2``.  The library default
+    targets ``(2, n/4, 0.49 n)``: a low-order band, a mid band at a quarter of
+    the register, and a band just inside the high-bodyness limit.
+
+    No bandwidth reaches ``K = n/2``, because ``p_sigma < 1/2`` strictly;
+    equality holds only in the degenerate ``sigma -> 0`` limit.  Every target
+    is therefore capped at ``0.49 n``, the campaign's convention for staying
+    inside that boundary, which matters for narrow registers where ``2`` would
+    otherwise exceed ``n/2``.
+    """
+    if n_visible < 1:
+        raise ValueError("n_visible must be positive")
+    if targets is None:
+        targets = (2.0, n_visible / 4.0, 0.49 * n_visible)
+    cap = 0.49 * n_visible
+    values = [min(float(target), cap) for target in targets]
+    if not values or any(target <= 0.0 for target in values):
+        raise ValueError("bodyness targets must be positive")
+    return tuple(
+        float((-2.0 * math.log(1.0 - 2.0 * target / n_visible)) ** -0.5)
+        for target in values
+    )
 
 
 def mmd_operator_probability(sigma: float | jnp.ndarray) -> jnp.ndarray:

@@ -44,9 +44,9 @@ def config() -> iqc.TrainingConfig:
         validation_interval=5,
         sigmas=(1.0, 2.0),
         n_ops=8,
-        n_iqp_samples=32,
+        mc_samples=32,
         validation_n_ops=8,
-        validation_n_iqp_samples=32,
+        validation_mc_samples=32,
     )
 
 
@@ -81,9 +81,9 @@ def test_ancilla_model_trains_against_visible_targets(
         validation_interval=5,
         sigmas=(1.0,),
         n_ops=4,
-        n_iqp_samples=16,
+        mc_samples=16,
         validation_n_ops=4,
-        validation_n_iqp_samples=16,
+        validation_mc_samples=16,
     )
     result = iqc.train(model, training, validation, seed=10, config=config)
     assert np.all(np.isfinite(result.train_losses))
@@ -172,9 +172,9 @@ def test_sample_chunk_training_runs(
         validation_interval=5,
         sigmas=(1.0,),
         n_ops=8,
-        n_iqp_samples=32,
+        mc_samples=32,
         validation_n_ops=8,
-        validation_n_iqp_samples=32,
+        validation_mc_samples=32,
         sample_chunk=16,
     )
     result = iqc.train(model, training, validation, seed=3, config=config)
@@ -197,8 +197,81 @@ def test_training_config_validates_its_fields() -> None:
     with pytest.raises(ValueError, match="n_ops and validation_n_ops"):
         iqc.TrainingConfig(n_ops=0)
     with pytest.raises(ValueError, match="at least two"):
-        iqc.TrainingConfig(n_iqp_samples=1)
+        iqc.TrainingConfig(mc_samples=1)
     with pytest.raises(ValueError, match="sample_chunk must be positive"):
         iqc.TrainingConfig(sample_chunk=0)
     with pytest.raises(ValueError, match="unknown mask_refresh"):
         iqc.TrainingConfig(mask_refresh="sometimes")
+
+
+def test_training_config_defaults_follow_the_library_protocol() -> None:
+    config = iqc.TrainingConfig()
+    assert config.steps == 2000
+    assert config.batch_size == 256
+    assert config.n_ops == 512
+    assert config.validation_n_ops == 512
+    assert config.mc_samples == 1000
+    assert config.validation_mc_samples == 1000
+    assert config.mask_refresh == iqc.STEP
+    assert config.sigmas is None
+    n_visible = 12
+    assert config.resolved_sigmas(n_visible) == iqc.expected_bodyness_sigmas(n_visible)
+    explicit = iqc.TrainingConfig(sigmas=(1.0, 2.0, 4.0))
+    assert explicit.resolved_sigmas(n_visible) == (1.0, 2.0, 4.0)
+
+
+def test_default_sigmas_resolve_and_train(
+    model: iqc.ConditionalModel,
+    targets: tuple[np.ndarray, np.ndarray],
+) -> None:
+    training, validation = targets
+    config = iqc.TrainingConfig(
+        steps=5,
+        batch_size=8,
+        validation_interval=1,
+        n_ops=16,
+        mc_samples=32,
+        validation_n_ops=16,
+        validation_mc_samples=32,
+    )
+    assert config.sigmas is None
+    result = iqc.train(model, training, validation, seed=12, config=config)
+    assert np.all(np.isfinite(result.train_losses))
+    assert np.all(np.isfinite(result.validation_losses))
+
+
+def test_train_initializes_from_the_pooled_training_data(
+    monkeypatch: pytest.MonkeyPatch,
+    model: iqc.ConditionalModel,
+    targets: tuple[np.ndarray, np.ndarray],
+) -> None:
+    """Without initial_params the trainer pools the conditions for initialization."""
+    training, validation = targets
+    from iqp_cond.initialization import parameters_from_data as original
+
+    seen: dict[str, object] = {}
+
+    def spy(data: np.ndarray, generators: np.ndarray, **kwargs: object) -> np.ndarray:
+        seen["data"] = np.asarray(data)
+        seen["kwargs"] = kwargs
+        return original(data, generators, **kwargs)
+
+    monkeypatch.setattr("iqp_cond.trainer.parameters_from_data", spy)
+    config = iqc.TrainingConfig(
+        steps=1,
+        batch_size=8,
+        validation_interval=1,
+        sigmas=(1.0,),
+        n_ops=8,
+        mc_samples=16,
+        validation_n_ops=8,
+        validation_mc_samples=16,
+    )
+    iqc.train(model, training, validation, seed=11, config=config)
+    pooled = seen["data"]
+    assert isinstance(pooled, np.ndarray)
+    assert pooled.shape == (training.shape[0] * training.shape[1], N_QUBITS)
+    kwargs = seen["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["n_visible"] == N_QUBITS
+    assert kwargs["seed"] == 11

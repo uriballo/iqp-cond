@@ -51,6 +51,7 @@ from .estimator import (
 from .initialization import parameters_from_data, random_parameters
 from .loss import ConditionalMMDResult, mmd
 from .model import ConditionalModel
+from .operators import expected_bodyness_sigmas
 from .trainer import CACHE, STEP, TrainingConfig, TrainingResult, train
 
 __all__ = [
@@ -75,6 +76,7 @@ __all__ = [
     "encoder",
     "estimate_pauli_z",
     "estimate_pauli_z_unchecked",
+    "expected_bodyness_sigmas",
     "generators_from_graph",
     "mmd",
     "pad_visible_masks",
