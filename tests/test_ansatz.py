@@ -47,6 +47,27 @@ def test_ansatz_from_generators_rejects_non_binary_rows() -> None:
         iqc.ansatz_from_generators(np.array([1.0, 0.0]))
 
 
+def test_ansatz_constructor_validates_binary_rows() -> None:
+    """Direct construction cannot bypass the bitmask contract."""
+    with pytest.raises(ValueError, match="only zeros and ones"):
+        iqc.Ansatz(generators=np.array([[1.0, 0.5]]))
+    with pytest.raises(ValueError, match="only zeros and ones"):
+        iqc.Ansatz(generators=np.array([[2.0, 0.0]]))
+    with pytest.raises(ValueError, match="only zeros and ones"):
+        iqc.Ansatz(generators=np.array([[np.nan, 1.0]]))
+    with pytest.raises(ValueError, match="shape"):
+        iqc.Ansatz(generators=np.array([1.0, 0.0]))
+    with pytest.raises(ValueError, match="shape"):
+        iqc.Ansatz(generators=np.zeros((0, 3)))
+
+
+def test_ansatz_constructor_coerces_dtype() -> None:
+    ansatz = iqc.Ansatz(generators=np.array([[1, 0], [0, 1]], dtype=np.int32))
+    assert ansatz.generators.dtype == np.float64
+    assert ansatz.n_qubits == 2
+    assert ansatz.n_parameters == 2
+
+
 def test_complete_ansatz_rejects_empty_registers() -> None:
     with pytest.raises(ValueError, match="n_qubits must be positive"):
         iqc.complete_ansatz(0)

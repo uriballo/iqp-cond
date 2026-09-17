@@ -23,17 +23,38 @@ __all__ = [
 ]
 
 
+def _validated_generators(generators: jnp.ndarray | np.ndarray) -> jnp.ndarray:
+    """Return binary generator rows as float64, or raise.
+
+    The diagonal phase ``exp(i sum_j theta_j (-1)^{g_j . z})`` is defined for
+    bitmasks only: the estimator reads rows modulo two, so a non-binary row
+    would silently describe a different generator.  Construction is therefore
+    the place to reject it.
+    """
+    rows = np.asarray(generators)
+    if rows.ndim != 2 or rows.shape[0] < 1 or rows.shape[1] < 1:
+        raise ValueError("generators must have shape (n_parameters, n_qubits)")
+    if not np.isfinite(rows).all() or not np.isin(rows, (0, 1)).all():
+        raise ValueError("generators must contain only zeros and ones")
+    return jnp.asarray(rows, dtype=jnp.float64)
+
+
 @dataclass(frozen=True)
 class Ansatz:
     """A bank of diagonal IQP generator masks.
 
     ``generators`` is ``(n_parameters, n_qubits)`` and binary; ``graph`` is
-    optional provenance for banks built from an interaction graph.
+    optional provenance for banks built from an interaction graph.  The
+    constructor validates the rows, so no path can build an ansatz whose
+    generators the estimator would read mod two.
     """
 
     generators: jnp.ndarray
     name: str = "custom"
     graph: nx.Graph | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "generators", _validated_generators(self.generators))
 
     @property
     def n_qubits(self) -> int:
@@ -66,12 +87,7 @@ def ansatz_from_generators(
     name: str = "custom",
 ) -> Ansatz:
     """Build an ansatz directly from a binary generator bank."""
-    rows = np.asarray(generators)
-    if rows.ndim != 2 or rows.shape[0] < 1 or rows.shape[1] < 1:
-        raise ValueError("generators must have shape (n_parameters, n_qubits)")
-    if not np.isfinite(rows).all() or not np.isin(rows, (0, 1)).all():
-        raise ValueError("generators must contain only zeros and ones")
-    return Ansatz(generators=jnp.asarray(rows, dtype=jnp.float64), name=name)
+    return Ansatz(generators=generators, name=name)
 
 
 def complete_ansatz(n_qubits: int) -> Ansatz:
