@@ -1,7 +1,7 @@
 [project]
 name = "iqp-cond"
 version = "0.1.0"
-description = "Conditional IQP generation with classically tractable reference states."
+description = "Conditional IQP generation with classically tractable encoders."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
@@ -22,6 +22,8 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=9.0.3"]
+# Independent statevector cross-checks; the tests skip when it is absent.
+crosscheck = ["pennylane>=0.45"]
 
 [build-system]
 requires = ["hatchling"]

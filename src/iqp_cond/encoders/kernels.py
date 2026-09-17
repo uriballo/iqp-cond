@@ -1,6 +1,6 @@
-"""Shared kernels for radial (permutation-symmetric) reference states.
+"""Shared kernels for radial (permutation-symmetric) encoder states.
 
-A radial reference has ``|phi(z)|^2 = |phi_{|z|}|^2``, so it is fully described
+A radial encoder has ``|phi(z)|^2 = |phi_{|z|}|^2``, so it is fully described
 by one amplitude per Hamming weight.  Both tractability operations then collapse
 to lookups: sampling draws a weight from ``q(k) = C(n, k) |phi_k|^2`` and picks a
 uniform bitstring of that weight, and a ratio query indexes the same table at
@@ -50,7 +50,7 @@ def radial_shell_samples(
     shell_amplitudes: jnp.ndarray,
     n_samples: int,
 ) -> jnp.ndarray:
-    """Sample bitstrings from a radial reference.
+    """Sample bitstrings from a radial encoder.
 
     Draws a Hamming weight ``k`` from ``q(k) = C(n, k) |phi_k|^2`` and then a
     uniformly random bitstring of that weight.
@@ -116,5 +116,5 @@ def radial_shell_state(shell_amplitudes: jnp.ndarray) -> np.ndarray:
     state = np.asarray(shell_amplitudes, dtype=np.complex128)[:, weights]
     norm = np.linalg.norm(state, axis=-1, keepdims=True)
     if np.any(norm == 0.0):
-        raise ValueError("reference state has zero norm")
+        raise ValueError("encoder state has zero norm")
     return state / norm

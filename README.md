@@ -6,7 +6,7 @@ A conditional IQP model applies **one shared diagonal unitary** to a
 **condition-dependent input state**: the learned circuit never changes with the
 condition, only the state that feeds it. Training uses sampled Pauli-character
 estimates of a multiscale Hamming-RBF maximum mean discrepancy, which is
-classically computable whenever the input state supports two operations:
+classically computable whenever the encoder supports two operations:
 
 - draw bitstrings from its own Born distribution, and
 - evaluate amplitude ratios `phi(z xor a) / phi(z)` for Fourier masks `a`.
@@ -35,9 +35,11 @@ n_qubits, n_conditions = 8, 3
 # One shared generator bank for every condition.
 ansatz = iqc.complete_ansatz(n_qubits)
 
-# One angle per model qubit per condition, plus the condition states it implies.
-angles = np.linspace(0.6, 2.0, n_conditions * n_qubits).reshape(n_conditions, n_qubits)
-references = iqc.reference(iqc.SPIN_FLIP, angles)
+# spin_flip takes one angle per condition, broadcast over the model qubits.
+angles = np.broadcast_to(
+    np.linspace(0.6, 2.0, n_conditions)[:, None], (n_conditions, n_qubits)
+)
+encoders = iqc.encoder(iqc.SPIN_FLIP, angles)
 
 # Bitstring samples from the target family: (conditions, samples, visible qubits).
 rng = np.random.default_rng(0)
@@ -46,7 +48,7 @@ valid_targets = rng.integers(0, 2, size=(n_conditions, 200, n_qubits)).astype(fl
 
 result = iqc.train(
     ansatz,
-    references,
+    encoders,
     train_targets,
     valid_targets,
     seed=0,
@@ -55,13 +57,14 @@ result = iqc.train(
     config=iqc.TrainingConfig(steps=50, batch_size=64, n_ops=16, n_iqp_samples=1024),
 )
 
-params = result.best_params          # selected on the validation split
+params = result.best_params  # selected on the validation split
 ```
 
 ## Querying expectations
 
-At inference only the reference state changes with the condition; the learned
-diagonal stays fixed.
+At inference only the encoder state changes with the condition; the learned
+diagonal stays fixed.  Visible-width masks are padded with identity on the
+ancillas automatically.
 
 ```python
 import jax
@@ -71,31 +74,43 @@ estimate = iqc.estimate_pauli_z(
     params,
     ansatz.generators,
     masks,
-    iqc.reference(iqc.PRODUCT, angles),
+    iqc.encoder(iqc.PRODUCT, angles),
     jax.random.PRNGKey(0),
     n_samples=8192,
 )
-estimate.values           # (conditions, masks)
-estimate.standard_errors  # Monte Carlo uncertainty
+estimate.values  # (conditions, masks)
+estimate.standard_errors  # Monte Carlo uncertainty, computed on request
 ```
 
-## Reference states
+`estimate_pauli_z` validates its inputs.  Inside `jax.jit`, use
+`estimate_pauli_z_unchecked`, which skips the Python-level checks and expects
+model-width masks; the loss uses it for the same reason.
 
-`iqc.reference(family, angles)` takes angles of shape
-`(n_conditions, n_qubits)` and returns an object exposing `sample`,
-`amplitude_ratios`, `select`, and `post_hadamard_amplitudes`. `select(i)` returns
-the same family restricted to condition `i`; the fixed-operator estimator
-evaluates one condition at a time and needs it.
+## Encoders
+
+`iqc.encoder(family, angles)` takes angles of shape `(n_conditions, n_qubits)`
+and returns an object with a `name` and the methods `sample`,
+`amplitude_ratios`, and `select`; that is the whole training interface.
+`select(i)` returns the same encoder restricted to condition `i`; the
+fixed-operator estimator evaluates one condition at a time and needs it.
+
+Both built-ins also implement `post_hadamard_amplitudes` (the optional
+`ExactEncoder` capability) for exact small-system work. A custom family does not
+need it.
 
 | Name | State | Used for |
 |---|---|---|
 | `product` | `RY(a_i)` on each qubit | translated Gaussian target |
 | `spin_flip` | `\|p>^n + X^n \|p>^n`, a spin-flip-symmetric radial state | Curie–Weiss target |
-| `symmetric_reupload`, `calibrated_reupload`, `reupload_l2`, `reupload_l3` | product states with noncommuting single-qubit layers | richer single-qubit maps |
+
+`spin_flip` rotates every qubit by a single angle, so its matrix must be a
+broadcast row: every column equal to the first, or zero (the natural ancilla
+column). A matrix with differing columns raises instead of silently reading only
+column 0.
 
 ### Adding your own
 
-A family is any object with the three interface methods and the two size
+An encoder is any object with the three interface methods and the two size
 properties:
 
 ```python
@@ -108,10 +123,11 @@ import iqp_cond as iqc
 
 
 @dataclass(frozen=True)
-class HadamardFamily:
+class HadamardEncoder:
     """Every condition is |+>^n: uniform bits, unit amplitude ratios."""
 
     angles: jnp.ndarray
+    name: str = "hadamard"
 
     @property
     def n_conditions(self) -> int:
@@ -129,8 +145,8 @@ class HadamardFamily:
     def amplitude_ratios(self, samples: jnp.ndarray, masks: jnp.ndarray) -> jnp.ndarray:
         return jnp.ones((self.n_conditions, samples.shape[1], masks.shape[0]))
 
-    def select(self, condition: int) -> "HadamardFamily":
-        return HadamardFamily(self.angles[condition : condition + 1])
+    def select(self, condition: int) -> "HadamardEncoder":
+        return HadamardEncoder(self.angles[condition : condition + 1])
 
     def post_hadamard_amplitudes(self) -> jnp.ndarray:
         return jnp.full(
@@ -140,13 +156,16 @@ class HadamardFamily:
         )
 
 
-iqc.register_reference("hadamard", lambda angles, **_: HadamardFamily(jnp.asarray(angles)))
-states = iqc.reference("hadamard", angles)
+iqc.register_encoder(
+    "hadamard", lambda angles, **_: HadamardEncoder(jnp.asarray(angles))
+)
+states = iqc.encoder("hadamard", angles)
 ```
 
 Nothing else in the package changes: the estimator, the loss, and the trainer
-consume the interface, not the family. `iqp_cond.references.ReferenceStates` is
-a `Protocol`, so no inheritance is required.
+consume the interface, not the family. `iqp_cond.encoders.Encoder` is a
+`Protocol`, so no inheritance is required, and registering a name that already
+exists raises unless `replace=True`.
 
 ## Ancillas
 
@@ -155,10 +174,8 @@ ordered **visible first, ancillas last**:
 
 - `angles` has one column per *model* qubit, including ancillas;
 - targets keep the visible width only;
-- masks over visible qubits are padded with identity on the ancilla positions
-  automatically by `conditional_mmd` (or explicitly with
-  `iqc.pad_visible_masks`);
-- `iqc.marginalize_ancillas` sums ancilla outcomes out of joint distributions.
+- `estimate_pauli_z` and the loss pad visible masks with identity on the ancilla
+  positions automatically (or explicitly with `iqc.pad_visible_masks`).
 
 Ancilla parameters are not initialized from data. Use
 `initialize_parameters_with_ancillas` to initialize visible parameters from
@@ -169,63 +186,74 @@ sample statistics and draw small seeded noise on ancilla-supported generators.
 | Module | Contents |
 |---|---|
 | `iqp_cond.ansatz` | `Ansatz`, `generators_from_graph`, `complete_ansatz` |
-| `iqp_cond.references` | `ReferenceStates`, `reference`, `register_reference`, `available_families`, built-in families |
-| `iqp_cond.estimator` | `estimate_pauli_z`, `ExpectationEstimate` |
-| `iqp_cond.loss` | `sampled_mmd`, `operator_bank`, `OperatorBank`, `conditional_mmd`, `sample_nonidentity_masks`, `target_moments`, `hamming_rbf` |
+| `iqp_cond.encoders` | `Encoder`, `ExactEncoder`, `encoder`, `register_encoder`, `available_encoders`, built-in families |
+| `iqp_cond.estimator` | `estimate_pauli_z`, `estimate_pauli_z_unchecked`, `ExpectationEstimate` |
+| `iqp_cond.loss` | `sampled_mmd`, `banked_mmd`, `operator_bank`, `OperatorBank`, `bank_from_ragged`, `sample_nonidentity_masks`, `sample_nonidentity_masks_jax`, `target_moments`, `hamming_rbf` |
 | `iqp_cond.trainer` | `TrainingConfig`, `TrainingResult`, `train`, `initialize_parameters` |
 | `iqp_cond.initialization` | `initialize_parameters_from_data`, `initialize_parameters_with_ancillas` |
-| `iqp_cond.ancilla` | `pad_visible_masks`, `marginalize_ancillas`, `ancilla_only_condition_angles` |
+| `iqp_cond.ancilla` | `pad_visible_masks` |
 
-## The two MMD estimators
+## Masks and the MMD estimator
 
-Training minimizes a sampled estimate of the squared MMD, and the library offers
-two estimators with the same target and different cost. `train` uses the first by
-default; `estimator=iqc.PLAIN` selects the second.
+Training minimizes the paper's stochastic operator estimator of the squared
+multiscale Hamming–RBF MMD. Masks are **redrawn at every optimization step**
+(`mask_refresh="step"`, the default), so each update's expectation equals the
+true kernel MMD rather than a single realized mask draw; `mask_refresh="cache"`
+draws one bank and retains it, which is the published campaign's protocol bit
+for bit. Validation always uses one fixed bank, so checkpoint selection stays
+comparable across steps.
 
-**`sampled_mmd` (default)** builds compressed `OperatorBank` objects — `n_ops`
-nonidentity draws per condition and bandwidth, with duplicates collapsed to
-exact multiplicities and the sum rescaled by the nonidentity mass — and
-evaluates one condition at a time. This is the estimator the manuscript's
-Methods describe.
+Each training bank is compressed: masks are drawn from the nonidentity law,
+duplicates are collapsed to exact multiplicities, and the sum is rescaled by the
+nonidentity mass. Skipping the identity mask is exact — it contributes zero to
+the kernel MMD, so spending draws on it only adds variance.
 
-By default the training bank is **redrawn at every epoch** (`mask_refresh="epoch"`),
-so each update's objective is unbiased for the true kernel MMD rather than
-conditioned on one realized bank. Pass `mask_refresh="fit"` to draw once and
-retain it, which is the protocol the published campaign used and saves the
-redraw cost. Validation always uses a bank drawn once, so checkpoint selection
-stays comparable across steps.
+The library exposes both the compressed fixed-bank evaluator and a pure-JAX
+sampler:
 
-**`conditional_mmd` (reference)** draws every mask i.i.d. from the full Bernoulli
-law, identity included, keeps duplicates, and evaluates all conditions together.
-It is unbiased but spends a large share of its budget on a term that is
-identically zero, and its peak allocation grows with the condition count. It is
-kept for reproducing older runs and for the numerical equivalence tests.
+**`banked_mmd`** consumes a prebuilt `OperatorBank`. The trainer builds one per
+step on the host and hands it to the compiled step as a pytree argument, which
+keeps compilation to a single program. This is the fast path, because the bank
+can collapse duplicate masks. With `shared_samples=True` each condition draws
+one reference sample set and evaluates every bandwidth's masks on it, which is
+the paper's estimator form and avoids resampling once per bandwidth; the
+trainer's `"step"` path uses it, `"cache"` keeps the campaign's per-entry draw
+layout.
 
-At 12 visible qubits and 5 conditions, with the default `TrainingConfig`:
+**`sampled_mmd`** draws nonidentity masks inside `jax.jit` from the call's key
+(`sample_nonidentity_masks_jax` is the exact, loop-free sampler behind it). It
+needs no host loop, but it cannot collapse duplicates cheaply, so at equal draw
+budgets it evaluates roughly 1.8× more mask columns and costs about 1.5–2× the
+step time. Use it when the whole training loop must stay on device.
 
-| | `sampled_mmd` | `conditional_mmd` |
-|---|---|---|
-| validation-pass spread (σ = 1 / 2 / 4) | 1.8e-3 / 1.7e-3 / 6.4e-4 | 6.6e-3 / 1.0e-2 / 7.1e-3 |
-| added peak memory, one validation pass | ~0.4 GB | ~0.7 GB |
-| time per validation pass | 108 ms | 217 ms |
+At 12 visible qubits and 5 conditions with the default `TrainingConfig`,
+measured on an idle 32-core x86 host (JAX CPU, float64), one 2000-step fit takes
+**59.8 s** with per-step refresh against **71.0 s** with the retained bank; the
+pure-JAX path is ~1.7×. Per-step refresh is both the unbiased and the fastest
+default. Protocol, timings, and reproduction commands:
+`experiments/library_perf/`.
 
-Refresh cadence was compared directly at 8 visible qubits over 8 seeds: the two
-cadences are statistically indistinguishable on an independent evaluation bank,
-and per-epoch refresh costs wall clock — roughly 0.02 s per rebuilt bank, which
-is ~80% overhead at 500 draws per entry and ~4% at paper-scale settings. It is
-the default because it keeps the training objective unbiased, not because it
-converges faster. Protocol and per-seed numbers: `experiments/mask_refresh/`.
-
-Peak memory is still dominated by the `(samples, masks, qubits)` reduction inside
-the per-condition evaluation, so it scales roughly as
+Peak memory is dominated by the `(samples, masks, qubits)` reduction inside the
+per-condition evaluation, so it scales roughly as
 `n_iqp_samples × distinct_masks × n_qubits × 16` bytes. Lower
 `validation_n_iqp_samples` first; the bank is already compressed.
 
-Not included in this package: exact-distribution evaluation (TVD, Walsh–Hadamard
-transforms) and the benchmark target families. Exact evaluation needs the full
-`2**n` output state, so it is useful only at small sizes, and the target
-families carry experiment-specific constants; both live with the research code
-that consumes this package.
+Not included in this package: exact-distribution evaluation (TVD,
+Walsh–Hadamard transforms, visible marginalization) and the benchmark target
+families. Exact evaluation needs the full `2**n` output state, so it is useful
+only at small sizes, and the target families carry experiment-specific
+constants; both live with the research code that consumes this package.
+
+## Tests
+
+```bash
+uv run pytest          # library suite
+```
+
+`tests/test_pennylane_crosscheck.py` rebuilds the encoder states and the full
+conditional circuit in PennyLane and compares the estimator, the sampler, and
+the amplitude ratios against exact statevector results. It skips unless
+`pennylane` is installed (`pip install .[crosscheck]`).
 
 ## Precision
 

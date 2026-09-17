@@ -1,4 +1,4 @@
-"""Spin-flip-symmetric radial references.
+"""Spin-flip-symmetric radial encoders.
 
 The two-branch construction
 
@@ -27,8 +27,8 @@ from .protocol import as_condition_batch
 
 __all__ = [
     "SPIN_FLIP",
-    "SpinFlipStates",
-    "spin_flip_states",
+    "SpinFlipEncoder",
+    "spin_flip_encoder",
     "two_branch_shell_amplitudes",
 ]
 
@@ -47,7 +47,8 @@ def two_branch_shell_amplitudes(
         ``phi_k = A^(n-k) B^k (1 + (-1)^k)``,
 
     so odd-weight amplitudes vanish and the state is spin-flip symmetric.  The
-    broadcast angle is read from the first qubit (``angles[..., 0]``).
+    broadcast angle is read from the first qubit (``angles[..., 0]``); callers
+    must hand in a broadcast row, which :func:`spin_flip_encoder` validates.
     """
     a = jnp.asarray(angles)
     angle = a if a.ndim == 0 else a[..., 0]
@@ -62,8 +63,8 @@ def two_branch_shell_amplitudes(
 
 
 @dataclass(frozen=True)
-class SpinFlipStates:
-    """Batched spin-flip reference stored as Hamming-shell amplitudes."""
+class SpinFlipEncoder:
+    """Batched spin-flip encoder stored as Hamming-shell amplitudes."""
 
     name: str
     angles: jnp.ndarray
@@ -76,7 +77,7 @@ class SpinFlipStates:
 
     @property
     def n_qubits(self) -> int:
-        """Number of qubits the reference state lives on."""
+        """Number of qubits the encoder state lives on."""
         return int(self.angles.shape[1])
 
     def sample(self, key: jax.Array, n_samples: int) -> jnp.ndarray:
@@ -87,10 +88,10 @@ class SpinFlipStates:
         """Return ``(n_conditions, n_samples, n_masks)`` shell-table ratios."""
         return radial_shell_ratios(samples, masks, self.shell_amplitudes)
 
-    def select(self, condition: int) -> SpinFlipStates:
-        """Return this family restricted to one condition, recomputed.
+    def select(self, condition: int) -> SpinFlipEncoder:
+        """Return this encoder restricted to one condition, recomputed.
 
-        Built directly rather than through :func:`spin_flip_states`: this runs
+        Built directly rather than through :func:`spin_flip_encoder`: this runs
         inside the traced loss, where even a slice of a constant array is a
         tracer and the constructor's Python-level validation cannot run.  The
         parent object was validated when it was built.
@@ -99,15 +100,36 @@ class SpinFlipStates:
             raise IndexError(f"condition {condition} outside the batch")
         row = self.angles[condition : condition + 1]
         shell = two_branch_shell_amplitudes(row, self.n_qubits)
-        return SpinFlipStates(name=self.name, angles=row, shell_amplitudes=shell)
+        return SpinFlipEncoder(name=self.name, angles=row, shell_amplitudes=shell)
 
     def post_hadamard_amplitudes(self) -> jnp.ndarray:
         """Return ``(n_conditions, 2**n_qubits)`` little-endian amplitudes."""
         return radial_shell_state(self.shell_amplitudes)
 
 
-def spin_flip_states(angles: jnp.ndarray) -> SpinFlipStates:
-    """Build the spin-flip reference for every supplied condition."""
-    angles = as_condition_batch(angles)
+def _validated_angles(angles: jnp.ndarray) -> jnp.ndarray:
+    """Return ``(n_conditions, n_qubits)`` angles that define a broadcast row.
+
+    The two-branch state rotates every qubit by a single angle, so a
+    ``(n_conditions, n_qubits)`` matrix is not a per-qubit model: only column 0
+    is ever read.  Rather than return a state the caller did not ask for, every
+    column must equal the first (or be zero, the natural ancilla column).
+    """
+    values = as_condition_batch(angles)
+    if values.shape[1] > 1:
+        first = values[:, :1]
+        if not bool(jnp.all((values == first) | (values == 0.0))):
+            raise ValueError(
+                "spin_flip takes one broadcast angle per condition: every "
+                "qubit column of a (n_conditions, n_qubits) angle matrix must "
+                "equal the first or be zero. A differing column would be "
+                "silently ignored by the two-branch state.",
+            )
+    return values
+
+
+def spin_flip_encoder(angles: jnp.ndarray) -> SpinFlipEncoder:
+    """Build the spin-flip encoder for every supplied condition."""
+    angles = _validated_angles(angles)
     shell = two_branch_shell_amplitudes(angles, angles.shape[1])
-    return SpinFlipStates(name=SPIN_FLIP, angles=angles, shell_amplitudes=shell)
+    return SpinFlipEncoder(name=SPIN_FLIP, angles=angles, shell_amplitudes=shell)

@@ -5,21 +5,26 @@ expansion, so the squared MMD is a weighted sum over Fourier masks whose
 probability under each bandwidth is Bernoulli with
 ``p = (1 - exp(-1/(2 sigma^2))) / 2``.  The loss averages over conditions and
 bandwidths, uses the unbiased ``(B-1)`` normalization for both target and model
-moments, and consumes only quantities the reference makes classically
-computable: sampled masks, sampled bitstrings, and amplitude ratios.
+moments, and consumes only quantities the encoder makes classically computable:
+sampled masks, sampled bitstrings, and amplitude ratios.
 
-Two estimators are provided, and they differ in cost, not in target:
+Two entry points share one condition-level evaluator:
 
-:func:`sampled_mmd` (default for :func:`iqp_cond.train`)
-    Draws nonidentity masks once into a fixed :class:`OperatorBank`, collapses
-    duplicates to their exact multiplicities, rescales by the nonidentity mass,
-    and evaluates one condition at a time.  This is the paper's stochastic
-    operator estimator.
-:func:`conditional_mmd`
-    The reference estimator: draws every mask i.i.d. from the full Bernoulli law
-    including the identity, keeps duplicates, and evaluates all conditions at
-    once.  It is unbiased but spends a large share of its budget on a term that
-    is identically zero, and its peak allocation grows with the condition count.
+:func:`sampled_mmd`
+    Draws nonidentity masks afresh from a JAX key, one draw per condition and
+    bandwidth, exactly as ``iqpopt`` redraws its observables every call.  It
+    needs no host loop but cannot collapse duplicate masks, so at equal draw
+    budgets it evaluates more mask columns than :func:`banked_mmd`.
+:func:`banked_mmd`
+    Consumes a prebuilt compressed :class:`OperatorBank` (duplicates collapsed
+    to multiplicities).  The trainer builds one per step and passes it into the
+    compiled step; this is also the evaluation and campaign-reproduction path,
+    and the one the golden fixtures pin.
+
+Both estimators skip the identity mask exactly: it contributes zero to the
+kernel MMD, so spending draws on it only adds variance.  At realistic budgets
+duplicate nonidentity masks are rare, so :func:`sampled_mmd` needs no explicit
+compression.
 """
 
 from __future__ import annotations
@@ -30,28 +35,25 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 import numpy as np
+from jax.scipy.special import gammaln
 
 from .ancilla import pad_visible_masks
-from .estimator import _estimate_pauli_z
-from .references import ReferenceStates
+from .encoders import Encoder
+from .estimator import estimate_pauli_z_from_samples
 
 __all__ = [
-    "COMPRESSED",
-    "PLAIN",
     "ConditionalMMDResult",
     "OperatorBank",
-    "conditional_mmd",
+    "bank_from_ragged",
+    "banked_mmd",
     "hamming_rbf",
     "mmd_operator_probability",
     "operator_bank",
-    "sample_mmd_operators",
     "sample_nonidentity_masks",
+    "sample_nonidentity_masks_jax",
     "sampled_mmd",
     "target_moments",
 ]
-
-COMPRESSED = "compressed"
-PLAIN = "plain"
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,13 @@ class ConditionalMMDResult:
     loss: jnp.ndarray
     per_condition: jnp.ndarray
     per_bandwidth_condition: jnp.ndarray
+
+
+jax.tree_util.register_dataclass(
+    ConditionalMMDResult,
+    data_fields=["loss", "per_condition", "per_bandwidth_condition"],
+    meta_fields=[],
+)
 
 
 def hamming_rbf(x: jnp.ndarray, y: jnp.ndarray, sigma: float) -> jnp.ndarray:
@@ -74,24 +83,6 @@ def mmd_operator_probability(sigma: float | jnp.ndarray) -> jnp.ndarray:
     """Return the Bernoulli probability for Fourier observable masks."""
     sigma = jnp.asarray(sigma, dtype=jnp.float64)
     return (1.0 - jnp.exp(-1.0 / (2.0 * sigma**2))) / 2.0
-
-
-def sample_mmd_operators(
-    key: jax.Array,
-    n_ops: int,
-    n_qubits: int,
-    sigma: float,
-) -> jnp.ndarray:
-    """Sample Pauli-Z masks for the Hamming-RBF Fourier representation."""
-    if n_ops < 1 or n_qubits < 1:
-        raise ValueError("n_ops and n_qubits must be positive")
-    if sigma <= 0.0:
-        raise ValueError("sigma must be positive")
-    return jax.random.bernoulli(
-        key,
-        p=mmd_operator_probability(sigma),
-        shape=(n_ops, n_qubits),
-    ).astype(jnp.float64)
 
 
 def target_moments(
@@ -114,6 +105,46 @@ def target_moments(
     sums = jnp.sum(target_characters, axis=1)
     unbiased_squares = (sums**2 - n_targets) / (n_targets * (n_targets - 1))
     return means, unbiased_squares
+
+
+def sample_nonidentity_masks_jax(
+    key: jax.Array,
+    n_ops: int,
+    n_visible: int,
+    sigma: float,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Draw ``n_ops`` nonidentity masks from the Hamming-RBF mask law, in JAX.
+
+    The draw is exact and loop-free: the Hamming weight is sampled from
+    ``Binomial(n, p)`` conditioned on ``k >= 1`` by inverse CDF, and a
+    uniformly random ``k``-subset is produced from one order statistic of
+    ``n`` uniforms.  Shapes are static, so the sampler is safe inside a jitted
+    training step and masks refresh with the step key.
+
+    Returns ``(masks, weights)`` with ``masks`` of shape ``(n_ops, n_visible)``
+    and constant weights summing to the nonidentity mass ``1 - (1 - p)**n``,
+    the same law and rescaling as :func:`sample_nonidentity_masks`.
+    """
+    if n_ops < 1 or n_visible < 1:
+        raise ValueError("n_ops and n_visible must be positive")
+    if sigma <= 0.0:
+        raise ValueError("sigma must be positive")
+    p = mmd_operator_probability(sigma)
+    k = jnp.arange(n_visible + 1, dtype=jnp.float64)
+    log_choose = (
+        gammaln(n_visible + 1.0) - gammaln(k + 1.0) - gammaln(n_visible - k + 1.0)
+    )
+    log_pmf = log_choose + k * jnp.log(p) + (n_visible - k) * jnp.log1p(-p)
+    cdf = jnp.cumsum(jnp.exp(log_pmf))
+    nonidentity_mass = 1.0 - cdf[0]
+    uniforms = jax.random.uniform(key, (n_ops,))
+    weights = jnp.searchsorted(cdf, cdf[0] + uniforms * nonidentity_mass, side="right")
+    bits = jax.random.uniform(jax.random.fold_in(key, 1), (n_ops, n_visible))
+    ordered = jnp.sort(bits, axis=1)
+    rows = jnp.arange(n_ops)
+    threshold = ordered[rows, jnp.clip(weights - 1, 0, n_visible - 1)]
+    masks = (bits <= threshold[:, None]).astype(jnp.float64)
+    return masks, jnp.full((n_ops,), nonidentity_mass / n_ops, dtype=jnp.float64)
 
 
 def sample_nonidentity_masks(
@@ -151,6 +182,68 @@ def sample_nonidentity_masks(
     return unique, weights
 
 
+def _sample_nonidentity_codes(
+    rng: np.random.Generator,
+    n_ops: int,
+    n_qubits: int,
+    sigma: float,
+    n_conditions: int,
+) -> np.ndarray:
+    """Draw nonidentity masks for every condition at once, as integer codes.
+
+    One binomial proposal covers all conditions per round; only the accepted
+    rows are copied out.  Codes are little-endian integers, so compression is a
+    single ``np.unique`` over the whole (condition, draw) batch instead of one
+    lexicographic row sort per entry, which is what dominates the NumPy bank
+    build.
+    """
+    p = float(mmd_operator_probability(sigma))
+    powers = 1 << np.arange(n_qubits, dtype=np.int64)
+    codes = np.zeros((n_conditions, n_ops), dtype=np.int64)
+    filled = np.zeros(n_conditions, dtype=np.int64)
+    while True:
+        missing = n_ops - filled
+        if not bool(np.any(missing > 0)):
+            break
+        chunk = int(max(2 * int(missing.max()), 64))
+        proposal = rng.binomial(1, p, size=(n_conditions, chunk, n_qubits))
+        nonidentity = proposal.any(axis=2)
+        for condition in range(n_conditions):
+            need = int(missing[condition])
+            if need <= 0:
+                continue
+            rows = proposal[condition][nonidentity[condition]]
+            take = min(need, rows.shape[0])
+            if take:
+                start = int(filled[condition])
+                codes[condition, start : start + take] = rows[:take] @ powers
+                filled[condition] = start + take
+    return codes
+
+
+def _compress_codes(
+    codes: np.ndarray,
+    n_qubits: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Group-wise unique codes with counts: ``(groups, codes, counts)``."""
+    n_conditions, n_ops = codes.shape
+    groups = np.repeat(np.arange(n_conditions, dtype=np.int64), n_ops)
+    keys = (groups << np.int64(n_qubits)) | codes.ravel()
+    unique, counts = np.unique(keys, return_counts=True)
+    return (
+        unique >> np.int64(n_qubits),
+        unique & ((1 << n_qubits) - 1),
+        counts,
+    )
+
+
+def _decode_codes(codes: np.ndarray, n_qubits: int) -> np.ndarray:
+    """Expand little-endian integer codes back into 0/1 mask rows."""
+    return ((codes[:, None] >> np.arange(n_qubits, dtype=np.int64)) & 1).astype(
+        np.int32
+    )
+
+
 @dataclass(frozen=True)
 class OperatorBank:
     """Compressed Fourier-mask bank, one entry per (bandwidth, condition).
@@ -161,7 +254,7 @@ class OperatorBank:
     nonidentity mass.  Rows past an entry's distinct-mask count are padding — a
     zero mask with a zero weight, which contributes nothing to the weighted sum.
 
-    Padding exists so bank shape is static.  A bank that is *refreshed* during
+    Padding exists so bank shape is static.  A bank that is refreshed during
     training is passed into the compiled step as an argument rather than closed
     over, and a change of shape would force a recompilation; the bank is
     registered as a pytree for the same reason.  Build one from ragged per-entry
@@ -302,7 +395,7 @@ def bank_from_ragged(
 
     The result is padded to one width for every entry and evaluated at that
     width, which is what reproducing an externally built bank requires; use
-    :func:`operator_bank` for the per-bandwidth widths the trainer uses.
+    :func:`operator_bank` for the per-bandwidth widths the fixed-bank path uses.
     """
     if len(masks) != len(sigmas) or len(weights) != len(sigmas):
         raise ValueError("masks and weights need one entry per bandwidth")
@@ -312,8 +405,113 @@ def bank_from_ragged(
     ]
     n_masks = max(entry[0].shape[0] for row in drawn for entry in row)
     return _assemble_bank(
-        sigmas, drawn, n_ops, n_visible, n_masks, (n_masks,) * len(sigmas),
+        sigmas,
+        drawn,
+        n_ops,
+        n_visible,
+        n_masks,
+        (n_masks,) * len(sigmas),
     )
+
+
+def _draw_batched(
+    root: np.random.Generator,
+    sigmas: tuple[float, ...],
+    n_ops: int,
+    n_conditions: int,
+    n_visible: int,
+    caps: tuple[int | None, ...],
+    max_attempts: int,
+) -> list[list[tuple[np.ndarray, np.ndarray]]]:
+    """Draw every (bandwidth, condition) entry with one batched compression."""
+    drawn: list[list[tuple[np.ndarray, np.ndarray]]] = []
+    for bandwidth, sigma in enumerate(sigmas):
+        cap = caps[bandwidth]
+        p = float(mmd_operator_probability(sigma))
+        nonidentity_mass = 1.0 - (1.0 - p) ** n_visible
+        codes = _sample_nonidentity_codes(
+            root,
+            n_ops,
+            n_visible,
+            float(sigma),
+            n_conditions,
+        )
+        groups, unique_codes, counts = _compress_codes(codes, n_visible)
+        row = []
+        for condition in range(n_conditions):
+            selected = groups == condition
+            condition_codes = unique_codes[selected]
+            condition_counts = counts[selected]
+            if cap is not None and condition_codes.shape[0] > cap:
+                # Rare with calibrated caps: redraw this entry only.
+                entry = None
+                for _ in range(max_attempts):
+                    masks, weights = sample_nonidentity_masks(
+                        root,
+                        n_ops,
+                        n_visible,
+                        float(sigma),
+                    )
+                    if masks.shape[0] <= cap:
+                        entry = (masks, weights)
+                        break
+                if entry is None:
+                    raise RuntimeError(
+                        f"no bank entry with at most {cap} distinct masks after "
+                        f"{max_attempts} draws at sigma={sigma}; raise max_masks",
+                    )
+                row.append(entry)
+                continue
+            row.append(
+                (
+                    _decode_codes(condition_codes, n_visible),
+                    nonidentity_mass * condition_counts.astype(np.float64) / n_ops,
+                ),
+            )
+        drawn.append(row)
+    return drawn
+
+
+def _draw_entrywise(
+    root: np.random.Generator,
+    sigmas: tuple[float, ...],
+    n_ops: int,
+    n_conditions: int,
+    n_visible: int,
+    caps: tuple[int | None, ...],
+    max_attempts: int,
+) -> list[list[tuple[np.ndarray, np.ndarray]]]:
+    """Per-entry fallback for registers too wide to key on one integer."""
+    seeds = root.integers(
+        0,
+        2**63 - 1,
+        size=(len(sigmas), n_conditions, max(1, max_attempts)),
+    )
+    drawn: list[list[tuple[np.ndarray, np.ndarray]]] = []
+    for bandwidth, sigma in enumerate(sigmas):
+        cap = caps[bandwidth]
+        row = []
+        for condition in range(n_conditions):
+            entry = None
+            for attempt in range(max_attempts):
+                rng = np.random.default_rng(int(seeds[bandwidth, condition, attempt]))
+                masks, weights = sample_nonidentity_masks(
+                    rng,
+                    n_ops,
+                    n_visible,
+                    float(sigma),
+                )
+                if cap is None or masks.shape[0] <= cap:
+                    entry = (masks, weights)
+                    break
+            if entry is None:
+                raise RuntimeError(
+                    f"no bank entry with at most {cap} distinct masks after "
+                    f"{max_attempts} draws at sigma={sigma}; raise max_masks",
+                )
+            row.append(entry)
+        drawn.append(row)
+    return drawn
 
 
 def operator_bank(
@@ -339,8 +537,8 @@ def operator_bank(
     own entries reached, so a bandwidth whose mask law cannot reach many masks
     does not pay for the widest one.  ``max_masks`` may therefore be one width
     for every bandwidth (an int) or one per bandwidth (a sequence) — the latter
-    is what keeps a refreshed bank's *per-bandwidth* widths fixed while each
-    bandwidth stays as narrow as its own law allows.
+    keeps a refreshed bank's *per-bandwidth* widths fixed while each bandwidth
+    stays as narrow as its own law allows.
     """
     if not sigmas:
         raise ValueError("sigmas must not be empty")
@@ -358,36 +556,28 @@ def operator_bank(
         caps = (int(max_masks),) * len(sigmas)
 
     root = np.random.default_rng(seed)
-    seeds = root.integers(
-        0,
-        2**63 - 1,
-        size=(len(sigmas), n_conditions, max(1, max_attempts)),
-    )
-
-    drawn: list[list[tuple[np.ndarray, np.ndarray]]] = []
-    for bandwidth, sigma in enumerate(sigmas):
-        cap = caps[bandwidth]
-        row = []
-        for condition in range(n_conditions):
-            entry = None
-            for attempt in range(max_attempts):
-                rng = np.random.default_rng(int(seeds[bandwidth, condition, attempt]))
-                masks, weights = sample_nonidentity_masks(
-                    rng,
-                    n_ops,
-                    n_visible,
-                    float(sigma),
-                )
-                if cap is None or masks.shape[0] <= cap:
-                    entry = (masks, weights)
-                    break
-            if entry is None:
-                raise RuntimeError(
-                    f"no bank entry with at most {cap} distinct masks after "
-                    f"{max_attempts} draws at sigma={sigma}; raise max_masks",
-                )
-            row.append(entry)
-        drawn.append(row)
+    if n_visible + max(1, (n_conditions - 1).bit_length()) > 62:
+        # Codes are int64; the batched path packs (group, code) into one int and
+        # falls back when that key would overflow.
+        drawn = _draw_entrywise(
+            root,
+            sigmas,
+            n_ops,
+            n_conditions,
+            n_visible,
+            caps,
+            max_attempts,
+        )
+    else:
+        drawn = _draw_batched(
+            root,
+            sigmas,
+            n_ops,
+            n_conditions,
+            n_visible,
+            caps,
+            max_attempts,
+        )
 
     natural = tuple(max(entry[0].shape[0] for entry in row) for row in drawn)
     if max_masks is None:
@@ -403,80 +593,144 @@ def operator_bank(
     return _assemble_bank(sigmas, drawn, n_ops, n_visible, n_masks, widths)
 
 
-def sampled_mmd(
-    params: jnp.ndarray,
-    generators: jnp.ndarray,
-    references: ReferenceStates,
+def _validate_loss_inputs(
     targets: jnp.ndarray,
-    bank: OperatorBank,
+    encoders: Encoder,
     n_samples: int,
-    key: jax.Array,
-) -> ConditionalMMDResult:
-    """Estimate the multiscale squared MMD with a fixed compressed operator bank.
-
-    One condition is evaluated at a time, so the ``(samples, masks)`` buffer
-    covers a single condition instead of the whole batch; combined with the
-    compressed bank this is what keeps the default configuration inside a
-    sensible memory budget.
-    """
-    targets = jnp.asarray(targets, dtype=jnp.float64)
+) -> int:
+    """Shared shape checks; returns the number of target (visible) qubits."""
     if targets.ndim != 3:
         raise ValueError(
             "targets must have shape (n_conditions, n_targets, n_visible)",
         )
     n_conditions, _, n_data_qubits = targets.shape
-    if references.n_conditions != n_conditions:
+    if encoders.n_conditions != n_conditions:
         raise ValueError(
-            f"reference covers {references.n_conditions} conditions but targets "
+            f"encoder covers {encoders.n_conditions} conditions but targets "
             f"have {n_conditions}",
         )
-    if bank.n_conditions != n_conditions:
+    if encoders.n_qubits < n_data_qubits:
         raise ValueError(
-            f"operator bank covers {bank.n_conditions} conditions but targets "
-            f"have {n_conditions}",
-        )
-    if bank.n_visible != n_data_qubits:
-        raise ValueError(
-            f"operator bank is built for {bank.n_visible} visible qubits but "
-            f"targets have {n_data_qubits}",
-        )
-    if references.n_qubits < n_data_qubits:
-        raise ValueError(
-            "reference qubit count cannot be smaller than the target width",
+            "encoder qubit count cannot be smaller than the target width",
         )
     if n_samples < 2:
         raise ValueError("n_samples must be at least two")
+    return n_data_qubits
 
-    n_ancillas = references.n_qubits - n_data_qubits
-    keys = jax.random.split(key, bank.n_bandwidths * n_conditions)
 
+def _condition_mmd(
+    params: jnp.ndarray,
+    generators: jnp.ndarray,
+    encoder: Encoder,
+    target_condition: jnp.ndarray,
+    visible_masks: jnp.ndarray,
+    weights: jnp.ndarray,
+    n_ancillas: int,
+    n_samples: int,
+    key: jax.Array,
+) -> jnp.ndarray:
+    """Weighted sum of per-mask squared moment differences for one condition.
+
+    ``target_condition`` has shape ``(1, n_targets, n_visible)`` and
+    ``visible_masks`` ``(n_masks, n_visible)``; the U-statistic corrections for
+    both the model and target terms are the paper's finite-sample estimator.
+    """
+    samples = encoder.sample(key, n_samples)
+    return _condition_mmd_from_samples(
+        params,
+        generators,
+        encoder,
+        target_condition,
+        visible_masks,
+        weights,
+        n_ancillas,
+        samples,
+    )
+
+
+def _condition_mmd_from_samples(
+    params: jnp.ndarray,
+    generators: jnp.ndarray,
+    encoder: Encoder,
+    target_condition: jnp.ndarray,
+    visible_masks: jnp.ndarray,
+    weights: jnp.ndarray,
+    n_ancillas: int,
+    samples: jnp.ndarray,
+) -> jnp.ndarray:
+    """Same weighted sum over one already-drawn reference sample set."""
+    n_samples = samples.shape[1]
+    model_masks = pad_visible_masks(visible_masks, n_ancillas)
+    model = estimate_pauli_z_from_samples(
+        params,
+        generators,
+        model_masks,
+        encoder,
+        samples,
+    )
+    target_means, target_squares = target_moments(target_condition, visible_masks)
+    sums = jnp.sum(model.sample_values, axis=1)
+    square_sums = jnp.sum(model.sample_values**2, axis=1)
+    model_squares = (sums**2 - square_sums) / (n_samples * (n_samples - 1))
+    per_mask = model_squares - 2.0 * model.values * target_means + target_squares
+    return jnp.sum(per_mask[0] * weights)
+
+
+def sampled_mmd(
+    params: jnp.ndarray,
+    generators: jnp.ndarray,
+    encoders: Encoder,
+    targets: jnp.ndarray,
+    key: jax.Array,
+    *,
+    sigmas: tuple[float, ...],
+    n_ops: int,
+    n_samples: int,
+) -> ConditionalMMDResult:
+    """Estimate the multiscale squared MMD with masks drawn from ``key``.
+
+    One nonidentity mask bank is drawn per condition and bandwidth at every
+    call, so a fresh key per optimization step refreshes the objective exactly
+    as ``iqpopt`` does.  Shapes are static, so the whole estimator traces into
+    the compiled step; no bank is built on the host.  ``n_ops`` is the number
+    of mask draws per entry.
+    """
+    targets = jnp.asarray(targets, dtype=jnp.float64)
+    if not sigmas:
+        raise ValueError("sigmas must not be empty")
+    if n_ops < 1:
+        raise ValueError("n_ops must be positive")
+    n_data_qubits = _validate_loss_inputs(targets, encoders, n_samples)
+    n_ancillas = encoders.n_qubits - n_data_qubits
+    n_conditions = targets.shape[0]
+
+    keys = jax.random.split(key, len(sigmas) * n_conditions * 2)
     bandwidth_values = []
     cursor = 0
-    for bandwidth in range(bank.n_bandwidths):
+    for sigma in sigmas:
         condition_values = []
         for condition in range(n_conditions):
-            visible_masks, weights = bank.entry(bandwidth, condition)
-            model_masks = pad_visible_masks(visible_masks, n_ancillas)
-            model = _estimate_pauli_z(
-                params,
-                generators,
-                model_masks,
-                references.select(condition),
+            visible_masks, weights = sample_nonidentity_masks_jax(
                 keys[cursor],
-                n_samples,
+                n_ops,
+                n_data_qubits,
+                float(sigma),
             )
             cursor += 1
-            target_means, target_squares = target_moments(
-                targets[condition : condition + 1],
-                visible_masks,
+            condition_values.append(
+                _condition_mmd(
+                    params,
+                    generators,
+                    encoders.select(condition),
+                    targets[condition : condition + 1],
+                    visible_masks,
+                    weights,
+                    n_ancillas,
+                    n_samples,
+                    keys[cursor],
+                ),
             )
-            sums = jnp.sum(model.sample_values, axis=1)
-            square_sums = jnp.sum(model.sample_values**2, axis=1)
-            model_squares = (sums**2 - square_sums) / (n_samples * (n_samples - 1))
-            per_mask = (
-                model_squares - 2.0 * model.values * target_means + target_squares
-            )
-            condition_values.append(jnp.sum(per_mask[0] * weights))
+            cursor += 1
         bandwidth_values.append(jnp.stack(condition_values))
 
     per_bandwidth_condition = jnp.stack(bandwidth_values)
@@ -487,77 +741,95 @@ def sampled_mmd(
     )
 
 
-def conditional_mmd(
+def banked_mmd(
     params: jnp.ndarray,
     generators: jnp.ndarray,
-    references: ReferenceStates,
+    encoders: Encoder,
     targets: jnp.ndarray,
-    sigmas: tuple[float, ...],
-    n_ops: int,
-    n_iqp_samples: int,
+    bank: OperatorBank,
+    n_samples: int,
     key: jax.Array,
+    *,
+    shared_samples: bool = False,
 ) -> ConditionalMMDResult:
-    """Estimate the equally weighted, multiscale, unbiased squared MMD.
+    """Estimate the multiscale squared MMD with a fixed compressed operator bank.
 
-    ``targets`` holds observed bitstrings of shape
-    ``(n_conditions, n_targets, n_visible)``; any extra reference qubits are
-    ancillas and their masks stay identity, so the loss compares the visible
-    marginal against the target law.
+    One condition is evaluated at a time, so the ``(samples, masks)`` buffer
+    covers a single condition instead of the whole batch; combined with the
+    compressed bank this keeps the fixed-bank evaluation inside a small memory
+    budget and makes checkpoint selection comparable across steps.
+
+    With ``shared_samples=True`` each condition draws one reference sample set
+    and evaluates every bandwidth's masks on it, which is the paper's estimator
+    (all masks see the same samples) and avoids resampling once per bandwidth.
+    The default draws one sample set per (bandwidth, condition), the layout the
+    published campaign and the golden fixtures pin.
     """
     targets = jnp.asarray(targets, dtype=jnp.float64)
-    if targets.ndim != 3:
+    n_data_qubits = _validate_loss_inputs(targets, encoders, n_samples)
+    n_conditions = targets.shape[0]
+    if bank.n_conditions != n_conditions:
         raise ValueError(
-            "targets must have shape (n_conditions, n_targets, n_visible)",
-        )
-    n_conditions, _, n_data_qubits = targets.shape
-    if references.n_conditions != n_conditions:
-        raise ValueError(
-            f"reference covers {references.n_conditions} conditions but targets "
+            f"operator bank covers {bank.n_conditions} conditions but targets "
             f"have {n_conditions}",
         )
-    if references.n_qubits < n_data_qubits:
+    if bank.n_visible != n_data_qubits:
         raise ValueError(
-            "reference qubit count cannot be smaller than the target width",
+            f"operator bank is built for {bank.n_visible} visible qubits but "
+            f"targets have {n_data_qubits}",
         )
-    if not sigmas:
-        raise ValueError("sigmas must not be empty")
+    n_ancillas = encoders.n_qubits - n_data_qubits
 
-    n_ancillas = references.n_qubits - n_data_qubits
+    if shared_samples:
+        bandwidth_values = []
+        for condition in range(n_conditions):
+            condition_encoder = encoders.select(condition)
+            samples = condition_encoder.sample(
+                jax.random.fold_in(key, condition),
+                n_samples,
+            )
+            condition_values = [
+                _condition_mmd_from_samples(
+                    params,
+                    generators,
+                    condition_encoder,
+                    targets[condition : condition + 1],
+                    bank.entry(bandwidth, condition)[0],
+                    bank.entry(bandwidth, condition)[1],
+                    n_ancillas,
+                    samples,
+                )
+                for bandwidth in range(bank.n_bandwidths)
+            ]
+            bandwidth_values.append(jnp.stack(condition_values))
+        per_bandwidth_condition = jnp.stack(bandwidth_values, axis=1)
+    else:
+        keys = jax.random.split(key, bank.n_bandwidths * n_conditions)
+        bandwidth_values = []
+        cursor = 0
+        for bandwidth in range(bank.n_bandwidths):
+            condition_values = []
+            for condition in range(n_conditions):
+                visible_masks, weights = bank.entry(bandwidth, condition)
+                condition_values.append(
+                    _condition_mmd(
+                        params,
+                        generators,
+                        encoders.select(condition),
+                        targets[condition : condition + 1],
+                        visible_masks,
+                        weights,
+                        n_ancillas,
+                        n_samples,
+                        keys[cursor],
+                    ),
+                )
+                cursor += 1
+            bandwidth_values.append(jnp.stack(condition_values))
+        per_bandwidth_condition = jnp.stack(bandwidth_values)
 
-    bandwidth_keys = jax.random.split(key, len(sigmas))
-    bandwidth_losses = []
-    for sigma, sigma_key in zip(sigmas, bandwidth_keys, strict=True):
-        op_key, model_key = jax.random.split(sigma_key)
-        visible_masks = sample_mmd_operators(
-            op_key,
-            n_ops,
-            n_data_qubits,
-            float(sigma),
-        )
-        model_masks = pad_visible_masks(visible_masks, n_ancillas)
-        model = _estimate_pauli_z(
-            params,
-            generators,
-            model_masks,
-            references,
-            model_key,
-            n_iqp_samples,
-        )
-        target_means, target_squares = target_moments(targets, visible_masks)
-        model_sums = jnp.sum(model.sample_values, axis=1)
-        model_square_sums = jnp.sum(model.sample_values**2, axis=1)
-        model_squares = (model_sums**2 - model_square_sums) / (
-            n_iqp_samples * (n_iqp_samples - 1)
-        )
-        per_operator = (
-            model_squares - 2.0 * model.values * target_means + target_squares
-        )
-        bandwidth_losses.append(jnp.mean(per_operator, axis=-1))
-
-    per_bandwidth_condition = jnp.stack(bandwidth_losses, axis=0)
-    per_condition = jnp.mean(per_bandwidth_condition, axis=0)
     return ConditionalMMDResult(
-        loss=jnp.mean(per_condition),
-        per_condition=per_condition,
+        loss=jnp.mean(per_bandwidth_condition),
+        per_condition=jnp.mean(per_bandwidth_condition, axis=0),
         per_bandwidth_condition=per_bandwidth_condition,
     )

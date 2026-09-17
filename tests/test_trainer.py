@@ -46,10 +46,10 @@ def test_training_reduces_the_validation_objective(
     config: iqc.TrainingConfig,
 ) -> None:
     training, validation = targets
-    references = iqc.reference("product", angles)
+    encoders = iqc.encoder("product", angles)
     result = iqc.train(
         iqc.complete_ansatz(N_QUBITS),
-        references,
+        encoders,
         training,
         validation,
         seed=9,
@@ -61,13 +61,14 @@ def test_training_reduces_the_validation_objective(
     assert result.family == "product"
 
 
-def test_ancilla_reference_trains_against_visible_targets(
+def test_ancilla_encoder_trains_against_visible_targets(
     targets: tuple[np.ndarray, np.ndarray],
 ) -> None:
     """A five-qubit model with two ancillas trains against three-bit targets."""
     training, validation = targets
     angles = np.random.default_rng(7).uniform(0.4, 2.2, size=(N_CONDITIONS, 5))
-    references = iqc.reference("spin_flip", angles)
+    angles = np.broadcast_to(angles[:, :1], angles.shape)
+    encoders = iqc.encoder("spin_flip", angles)
     config = iqc.TrainingConfig(
         steps=10,
         batch_size=8,
@@ -80,7 +81,7 @@ def test_ancilla_reference_trains_against_visible_targets(
     )
     result = iqc.train(
         iqc.complete_ansatz(5),
-        references,
+        encoders,
         training,
         validation,
         seed=10,
@@ -98,11 +99,11 @@ def test_qubit_count_mismatch_is_rejected(
     config: iqc.TrainingConfig,
 ) -> None:
     training, validation = targets
-    references = iqc.reference("product", angles)
-    with pytest.raises(ValueError, match="reference acts on"):
+    encoders = iqc.encoder("product", angles)
+    with pytest.raises(ValueError, match="encoder acts on"):
         iqc.train(
             iqc.complete_ansatz(N_QUBITS + 1),
-            references,
+            encoders,
             training,
             validation,
             seed=1,
@@ -110,116 +111,51 @@ def test_qubit_count_mismatch_is_rejected(
         )
 
 
-def test_unknown_estimator_is_rejected(
+def test_step_refresh_is_the_default_and_fit_retains_one_bank(
     targets: tuple[np.ndarray, np.ndarray],
     angles: np.ndarray,
     config: iqc.TrainingConfig,
 ) -> None:
-    training, validation = targets
-    with pytest.raises(ValueError, match="unknown estimator"):
-        iqc.train(
-            iqc.complete_ansatz(N_QUBITS),
-            iqc.reference("product", angles),
-            training,
-            validation,
-            seed=1,
-            config=config,
-            estimator="not_an_estimator",
-        )
-
-
-def test_plain_estimator_still_trains(
-    targets: tuple[np.ndarray, np.ndarray],
-    angles: np.ndarray,
-    config: iqc.TrainingConfig,
-) -> None:
-    """The reference estimator remains usable end to end."""
-    training, validation = targets
-    result = iqc.train(
-        iqc.complete_ansatz(N_QUBITS),
-        iqc.reference("product", angles),
-        training,
-        validation,
-        seed=9,
-        config=config,
-        estimator=iqc.PLAIN,
-    )
-    assert np.all(np.isfinite(result.train_losses))
-    assert result.best_validation_loss < result.validation_losses[0]
-
-
-def test_epoch_refresh_rebuilds_the_bank_and_fit_does_not(
-    targets: tuple[np.ndarray, np.ndarray],
-    angles: np.ndarray,
-    config: iqc.TrainingConfig,
-) -> None:
-    """The default redraws the bank each epoch; 'fit' retains one bank."""
+    """The default redraws masks every step; 'cache' retains one bank."""
     training, validation = targets
     ansatz = iqc.complete_ansatz(N_QUBITS)
-    references = iqc.reference("product", angles)
-    steps_per_epoch = max(1, training.shape[1] // config.batch_size)
-    expected_epochs = -(-config.steps // steps_per_epoch)
+    encoders = iqc.encoder("product", angles)
 
-    epoch_result = iqc.train(
+    step_result = iqc.train(
         ansatz,
-        references,
+        encoders,
         training,
         validation,
         seed=4,
         config=config,
-        mask_refresh=iqc.EPOCH,
     )
-    assert epoch_result.n_banks == expected_epochs > 1
+    assert step_result.n_banks == config.steps
 
-    fit_result = iqc.train(
+    explicit = iqc.train(
         ansatz,
-        references,
+        encoders,
         training,
         validation,
         seed=4,
         config=config,
-        mask_refresh=iqc.FIT,
+        mask_refresh=iqc.STEP,
     )
-    assert fit_result.n_banks == 1
-    # Different banks are different objectives, so the runs must diverge.
-    assert not np.array_equal(epoch_result.final_params, fit_result.final_params)
-    assert np.all(np.isfinite(epoch_result.train_losses))
+    # The default path must be the step path, not a silent fallback.
+    assert np.array_equal(step_result.train_losses, explicit.train_losses)
 
-
-def test_epoch_refresh_trains_the_banked_estimator(
-    targets: tuple[np.ndarray, np.ndarray],
-    angles: np.ndarray,
-    config: iqc.TrainingConfig,
-) -> None:
-    """The default must train the compressed objective, not fall back to plain.
-
-    Both estimators see the same seed, batches and samples, so identical
-    training losses would mean the epoch path quietly trained `conditional_mmd`
-    while the validation pass scored the bank.
-    """
-    training, validation = targets
-    ansatz = iqc.complete_ansatz(N_QUBITS)
-    references = iqc.reference("product", angles)
-    epoch_result = iqc.train(
+    cache_result = iqc.train(
         ansatz,
-        references,
+        encoders,
         training,
         validation,
         seed=4,
         config=config,
-        estimator=iqc.COMPRESSED,
-        mask_refresh=iqc.EPOCH,
+        mask_refresh=iqc.CACHE,
     )
-    plain_result = iqc.train(
-        ansatz,
-        references,
-        training,
-        validation,
-        seed=4,
-        config=config,
-        estimator=iqc.PLAIN,
-    )
-    assert not np.array_equal(epoch_result.train_losses, plain_result.train_losses)
+    assert cache_result.n_banks == 1
+    # Different mask protocols are different objectives, so the runs diverge.
+    assert not np.array_equal(step_result.final_params, cache_result.final_params)
+    assert np.all(np.isfinite(step_result.train_losses))
 
 
 def test_unknown_mask_refresh_is_rejected(
@@ -231,7 +167,7 @@ def test_unknown_mask_refresh_is_rejected(
     with pytest.raises(ValueError, match="unknown mask_refresh"):
         iqc.train(
             iqc.complete_ansatz(N_QUBITS),
-            iqc.reference("product", angles),
+            iqc.encoder("product", angles),
             training,
             validation,
             seed=1,
@@ -245,14 +181,14 @@ def test_condition_count_mismatch_is_rejected(
     config: iqc.TrainingConfig,
 ) -> None:
     training, validation = targets
-    references = iqc.reference(
+    encoders = iqc.encoder(
         "product",
         np.zeros((N_CONDITIONS + 1, N_QUBITS)),
     )
     with pytest.raises(ValueError, match="conditions but targets"):
         iqc.train(
             iqc.complete_ansatz(N_QUBITS),
-            references,
+            encoders,
             training,
             validation,
             seed=1,
