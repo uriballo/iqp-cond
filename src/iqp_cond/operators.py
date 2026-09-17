@@ -40,6 +40,17 @@ def mmd_operator_probability(sigma: float | jnp.ndarray) -> jnp.ndarray:
     return (1.0 - jnp.exp(-1.0 / (2.0 * sigma**2))) / 2.0
 
 
+def _mask_probability(sigma: float) -> float:
+    """Scalar mask probability for the host-side bank path.
+
+    The public :func:`mmd_operator_probability` goes through JAX, whose dispatch
+    costs ~0.04 ms per call; the bank path calls it several times per build, so
+    it uses the scalar version instead.  The pinned NumPy sampler keeps the JAX
+    expression so its draws stay identical to the campaign fixtures.
+    """
+    return (1.0 - math.exp(-1.0 / (2.0 * sigma * sigma))) / 2.0
+
+
 def sample_nonidentity_masks_jax(
     key: jax.Array,
     n_ops: int,
@@ -117,7 +128,7 @@ def sample_nonidentity_masks(
 
 def _conditional_weight_cdf(n_qubits: int, sigma: float) -> np.ndarray:
     """CDF of the Hamming weight conditioned on ``k >= 1``."""
-    p = float(mmd_operator_probability(sigma))
+    p = _mask_probability(sigma)
     k = np.arange(n_qubits + 1, dtype=np.float64)
     log_binomial = np.asarray(
         [
@@ -153,14 +164,25 @@ def _sample_nonidentity_codes(
     """
     cdf = _conditional_weight_cdf(n_qubits, sigma)
     powers = 1 << np.arange(n_qubits, dtype=np.int64)
-    rows = np.arange(n_ops)
-    codes = np.empty((n_conditions, n_ops), dtype=np.int64)
-    for condition in range(n_conditions):
-        weights = np.searchsorted(cdf, rng.random(n_ops), side="right") + 1
-        ranks = rng.random((n_ops, n_qubits))
-        threshold = np.sort(ranks, axis=1)[rows, weights - 1]
-        codes[condition] = (ranks <= threshold[:, None]) @ powers
-    return codes
+    # 32-bit integer ranks: the order statistic only needs a total order, and a
+    # tie is a 2**-32 event, so the subset law is unchanged.  Draws and sorts
+    # run for every condition at once, which measured ~1.7x faster than float64
+    # uniforms drawn per condition.
+    weights = np.searchsorted(cdf, rng.random((n_conditions, n_ops)), side="right") + 1
+    ranks = rng.integers(
+        0,
+        2**32,
+        size=(n_conditions, n_ops, n_qubits),
+        dtype=np.uint32,
+    )
+    ordered = np.sort(ranks, axis=2)
+    threshold = np.take_along_axis(
+        ordered,
+        (weights - 1)[..., None],
+        axis=2,
+    )[..., 0]
+    bits = ranks <= threshold[..., None]
+    return bits.astype(np.int64) @ powers
 
 
 def _compress_codes(
@@ -369,7 +391,7 @@ def _draw_batched(
     drawn: list[list[tuple[np.ndarray, np.ndarray]]] = []
     for bandwidth, sigma in enumerate(sigmas):
         cap = caps[bandwidth]
-        p = float(mmd_operator_probability(sigma))
+        p = _mask_probability(sigma)
         nonidentity_mass = 1.0 - (1.0 - p) ** n_visible
         codes = _sample_nonidentity_codes(
             root,
@@ -379,11 +401,15 @@ def _draw_batched(
             n_conditions,
         )
         groups, unique_codes, counts = _compress_codes(codes, n_visible)
+        # Keys are sorted, so the groups are nondecreasing: slice each
+        # condition out with one search over the boundaries instead of a
+        # boolean pass per condition.
+        bounds = np.searchsorted(groups, np.arange(n_conditions + 1))
         row = []
         for condition in range(n_conditions):
-            selected = groups == condition
-            condition_codes = unique_codes[selected]
-            condition_counts = counts[selected]
+            lo, hi = int(bounds[condition]), int(bounds[condition + 1])
+            condition_codes = unique_codes[lo:hi]
+            condition_counts = counts[lo:hi]
             if cap is not None and condition_codes.shape[0] > cap:
                 # Rare with calibrated caps: redraw this entry only.
                 entry = None
