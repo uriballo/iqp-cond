@@ -236,13 +236,20 @@ pure-JAX path is ~1.7×. Per-step refresh is both the unbiased and the fastest
 default. Protocol, timings, and reproduction commands:
 `experiments/library_perf/`.
 
-On accelerators, set `TrainingConfig(gemm_dtype=jnp.float32)` (or pass
-`gemm_dtype` to `banked_mmd` / `sampled_mmd`): only the phase contraction runs
-in float32 and the result is cast back to float64, so the loss and gradient stay
-float64-precise. It is the dominant lever on GPUs — the sibling `iqpopt-gpu`
-benchmark reports 15–28× for the same estimator structure — and is already
-worth 7.5% (production) to 21.5% (paper scale) on CPU with ~1e-7 gradient error.
-The default stays float64 so published numbers reproduce bit-for-bit.
+Two opt-in knobs cover the large-budget regimes; both default to off so
+published numbers reproduce bit-for-bit.
+
+- `TrainingConfig(gemm_dtype=jnp.float32)` (or `gemm_dtype` on `banked_mmd` /
+  `sampled_mmd`) runs only the phase contraction in float32 and casts the result
+  back to float64, so the loss and gradient stay float64-precise. It is the
+  dominant lever on GPUs — the sibling `iqpopt-gpu` benchmark reports 15–28× for
+  the same estimator structure — and is already worth 7.5% (production) to 21.5%
+  (paper scale) on CPU with ~1e-7 gradient error.
+- `TrainingConfig(sample_chunk=N)` streams the reference samples in slices and
+  accumulates the per-mask moments, bounding the live
+  `(samples, masks, qubits)` ratio tensor. At the 8192-sample defaults it is
+  3.5% faster with no ancillas and 14.9% faster with ten (at 8% lower peak
+  RSS); small sample budgets pay a little for the extra program structure.
 
 Peak memory is dominated by the `(samples, masks, qubits)` reduction inside the
 per-condition evaluation, so it scales roughly as

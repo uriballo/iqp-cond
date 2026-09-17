@@ -415,3 +415,60 @@ def test_mixed_precision_gemm_banked_mmd_stays_close_to_float64() -> None:
     )
     deviation = abs(float(mixed.loss) - float(reference.loss))
     assert 0.0 < deviation < 1e-5
+
+
+def test_sample_chunk_matches_the_monolithic_objective() -> None:
+    """Streaming the sample axis changes only the summation order."""
+    rng = np.random.default_rng(61)
+    ansatz = iqc.complete_ansatz(4)
+    encoders = iqc.encoder(iqc.PRODUCT, rng.uniform(0.4, 2.4, size=(2, 4)))
+    targets = rng.integers(0, 2, size=(2, 64, 4)).astype(np.float64)
+    params = rng.normal(0.0, 0.3, size=ansatz.n_parameters)
+    bank = iqc.operator_bank(SIGMAS, 32, 2, 4, seed=12)
+    key = jax.random.PRNGKey(6)
+
+    monolithic = iqc.banked_mmd(
+        params,
+        ansatz.generators,
+        encoders,
+        targets,
+        bank,
+        512,
+        key,
+        shared_samples=True,
+    )
+    chunked = iqc.banked_mmd(
+        params,
+        ansatz.generators,
+        encoders,
+        targets,
+        bank,
+        512,
+        key,
+        shared_samples=True,
+        sample_chunk=128,
+    )
+    assert np.allclose(
+        np.asarray(chunked.per_bandwidth_condition),
+        np.asarray(monolithic.per_bandwidth_condition),
+        rtol=1e-9,
+        atol=1e-12,
+    )
+
+
+def test_sample_chunk_must_be_positive() -> None:
+    rng = np.random.default_rng(62)
+    ansatz = iqc.complete_ansatz(3)
+    encoders = iqc.encoder(iqc.PRODUCT, rng.uniform(0.4, 2.4, size=(2, 3)))
+    targets = rng.integers(0, 2, size=(2, 16, 3)).astype(np.float64)
+    with pytest.raises(ValueError, match="sample_chunk must be positive"):
+        iqc.banked_mmd(
+            np.zeros(ansatz.n_parameters),
+            ansatz.generators,
+            encoders,
+            targets,
+            iqc.operator_bank(SIGMAS, 8, 2, 3, seed=1),
+            16,
+            jax.random.PRNGKey(0),
+            sample_chunk=0,
+        )

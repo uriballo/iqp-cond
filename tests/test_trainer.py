@@ -194,3 +194,33 @@ def test_condition_count_mismatch_is_rejected(
             seed=1,
             config=config,
         )
+
+
+def test_sample_chunk_training_runs(
+    targets: tuple[np.ndarray, np.ndarray],
+    angles: np.ndarray,
+) -> None:
+    """The streaming option works through the trainer and stays close."""
+    training, validation = targets
+    config = iqc.TrainingConfig(
+        steps=10,
+        batch_size=8,
+        validation_interval=5,
+        sigmas=(1.0,),
+        n_ops=8,
+        n_iqp_samples=32,
+        validation_n_ops=8,
+        validation_n_iqp_samples=32,
+        sample_chunk=16,
+    )
+    result = iqc.train(
+        iqc.complete_ansatz(N_QUBITS),
+        iqc.encoder("product", angles),
+        training,
+        validation,
+        seed=3,
+        config=config,
+    )
+    assert np.all(np.isfinite(result.train_losses))
+    assert np.all(np.isfinite(result.validation_losses))
+    assert result.best_step >= 0

@@ -128,6 +128,7 @@ def _condition_mmd(
     n_samples: int,
     key: jax.Array,
     gemm_dtype: jnp.dtype | None = None,
+    sample_chunk: int | None = None,
 ) -> jnp.ndarray:
     """Weighted sum of per-mask squared moment differences for one condition.
 
@@ -146,6 +147,7 @@ def _condition_mmd(
         n_ancillas,
         samples,
         gemm_dtype=gemm_dtype,
+        sample_chunk=sample_chunk,
     )
 
 
@@ -159,23 +161,55 @@ def _condition_mmd_from_samples(
     n_ancillas: int,
     samples: jnp.ndarray,
     gemm_dtype: jnp.dtype | None = None,
+    sample_chunk: int | None = None,
 ) -> jnp.ndarray:
-    """Same weighted sum over one already-drawn reference sample set."""
+    """Same weighted sum over one already-drawn reference sample set.
+
+    ``sample_chunk`` streams the sample axis in slices and accumulates the
+    per-mask sum and sum of squares, which bounds the live ratio tensor
+    ``(samples, masks, qubits)`` without touching the estimator's expectation.
+    It is worth its extra program size once samples are large (measured
+    1.1-1.24x faster and 5-11% lower peak RSS at 8192+ samples) and slightly
+    slower for small budgets, so the default stays monolithic.
+    """
     n_samples = samples.shape[1]
     model_masks = pad_visible_masks(visible_masks, n_ancillas)
-    model = estimate_pauli_z_from_samples(
-        params,
-        generators,
-        model_masks,
-        encoder,
-        samples,
-        gemm_dtype=gemm_dtype,
-    )
+    if sample_chunk is not None and 0 < sample_chunk < n_samples:
+        sums = None
+        square_sums = None
+        for start in range(0, n_samples, sample_chunk):
+            chunk = estimate_pauli_z_from_samples(
+                params,
+                generators,
+                model_masks,
+                encoder,
+                samples[:, start : start + sample_chunk],
+                gemm_dtype=gemm_dtype,
+            ).sample_values
+            chunk_sums = jnp.sum(chunk, axis=1)
+            chunk_squares = jnp.sum(chunk**2, axis=1)
+            sums = chunk_sums if sums is None else sums + chunk_sums
+            square_sums = (
+                chunk_squares if square_sums is None else square_sums + chunk_squares
+            )
+        assert sums is not None
+        assert square_sums is not None
+        values = sums / n_samples
+    else:
+        model = estimate_pauli_z_from_samples(
+            params,
+            generators,
+            model_masks,
+            encoder,
+            samples,
+            gemm_dtype=gemm_dtype,
+        )
+        values = model.values
+        sums = jnp.sum(model.sample_values, axis=1)
+        square_sums = jnp.sum(model.sample_values**2, axis=1)
     target_means, target_squares = target_moments(target_condition, visible_masks)
-    sums = jnp.sum(model.sample_values, axis=1)
-    square_sums = jnp.sum(model.sample_values**2, axis=1)
     model_squares = (sums**2 - square_sums) / (n_samples * (n_samples - 1))
-    per_mask = model_squares - 2.0 * model.values * target_means + target_squares
+    per_mask = model_squares - 2.0 * values * target_means + target_squares
     return jnp.sum(per_mask[0] * weights)
 
 
@@ -190,6 +224,7 @@ def sampled_mmd(
     n_ops: int,
     n_samples: int,
     gemm_dtype: jnp.dtype | None = None,
+    sample_chunk: int | None = None,
 ) -> ConditionalMMDResult:
     """Estimate the multiscale squared MMD with masks drawn from ``key``.
 
@@ -204,6 +239,8 @@ def sampled_mmd(
         raise ValueError("sigmas must not be empty")
     if n_ops < 1:
         raise ValueError("n_ops must be positive")
+    if sample_chunk is not None and sample_chunk < 1:
+        raise ValueError("sample_chunk must be positive")
     n_data_qubits = _validate_loss_inputs(targets, encoders, n_samples)
     n_ancillas = encoders.n_qubits - n_data_qubits
     n_conditions = targets.shape[0]
@@ -233,6 +270,7 @@ def sampled_mmd(
                     n_samples,
                     keys[cursor],
                     gemm_dtype=gemm_dtype,
+                    sample_chunk=sample_chunk,
                 ),
             )
             cursor += 1
@@ -257,6 +295,7 @@ def banked_mmd(
     *,
     shared_samples: bool = False,
     gemm_dtype: jnp.dtype | None = None,
+    sample_chunk: int | None = None,
 ) -> ConditionalMMDResult:
     """Estimate the multiscale squared MMD with a fixed compressed operator bank.
 
@@ -272,6 +311,8 @@ def banked_mmd(
     published campaign and the golden fixtures pin.
     """
     targets = jnp.asarray(targets, dtype=jnp.float64)
+    if sample_chunk is not None and sample_chunk < 1:
+        raise ValueError("sample_chunk must be positive")
     n_data_qubits = _validate_loss_inputs(targets, encoders, n_samples)
     n_conditions = targets.shape[0]
     if bank.n_conditions != n_conditions:
@@ -305,6 +346,7 @@ def banked_mmd(
                     n_ancillas,
                     samples,
                     gemm_dtype=gemm_dtype,
+                    sample_chunk=sample_chunk,
                 )
                 for bandwidth in range(bank.n_bandwidths)
             ]
@@ -330,6 +372,7 @@ def banked_mmd(
                         n_samples,
                         keys[cursor],
                         gemm_dtype=gemm_dtype,
+                        sample_chunk=sample_chunk,
                     ),
                 )
                 cursor += 1

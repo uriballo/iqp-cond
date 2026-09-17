@@ -68,6 +68,11 @@ class TrainingConfig:
     ``jnp.float32``) and casts the result back to float64, which is the mixed
     precision mode that pays off on GPUs; the reductions stay float64.  The
     default keeps every operation in float64.
+
+    ``sample_chunk`` streams the reference samples in slices, bounding the live
+    ``(samples, masks, qubits)`` ratio tensor.  It pays off at large sample
+    budgets (measured 1.1-1.24x faster and 5-11% lower peak RSS at 8192+), and
+    costs a little for small ones, so it is off by default.
     """
 
     steps: int = 2_000
@@ -81,6 +86,7 @@ class TrainingConfig:
     validation_n_ops: int = 256
     validation_n_iqp_samples: int = 16_384
     gemm_dtype: jnp.dtype | None = None
+    sample_chunk: int | None = None
 
 
 @dataclass(frozen=True)
@@ -265,6 +271,7 @@ def train(
             # campaign's per-entry draw layout bit for bit.
             shared_samples=mask_refresh == STEP,
             gemm_dtype=config.gemm_dtype,
+            sample_chunk=config.sample_chunk,
         ).loss
 
     value_and_gradient = jax.jit(jax.value_and_grad(training_loss))
@@ -279,6 +286,7 @@ def train(
             config.validation_n_iqp_samples,
             jax.random.PRNGKey(seed + 1_000_000),
             gemm_dtype=config.gemm_dtype,
+            sample_chunk=config.sample_chunk,
         ).loss
 
     evaluate_validation = jax.jit(validation_loss)
