@@ -10,9 +10,9 @@ that input state, and only these two:
     Evaluate ``phi(z xor a) / phi(z)`` for sampled ``z`` and Fourier masks ``a``.
 
 That pair is the whole classical-tractability requirement.  An encoder
-providing it, plus ``select`` and the two size properties, is trainable with the
-same estimator, loss, and trainer.  Encoders are looked up by name and can be
-added without touching this package::
+providing it, plus the two size properties, is trainable with the same
+estimator, loss, and trainer.  Encoders are looked up by name and can be added
+without touching this package::
 
     import iqp_cond as iqc
 
@@ -28,6 +28,8 @@ further capability, ``post_hadamard_amplitudes``, declared separately by
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 
 import jax
@@ -41,6 +43,7 @@ __all__ = [
     "available_encoders",
     "encoder",
     "register_encoder",
+    "select_encoder",
 ]
 
 
@@ -49,10 +52,12 @@ class Encoder(Protocol):
     """A condition-parameterised encoder evaluated over a batch of conditions.
 
     Shapes are ``C`` conditions, ``S`` samples, ``R`` masks, ``n`` qubits.
+    The library evaluates one condition at a time for memory; it does that with
+    :func:`select_encoder`, which slices every condition-batched leaf of a JAX
+    pytree or falls back to an optional ``select`` method.  Families therefore
+    either register as pytrees or implement ``select``; nothing else about them
+    is required.
     """
-
-    name: str
-    angles: jnp.ndarray
 
     @property
     def n_conditions(self) -> int:
@@ -68,21 +73,6 @@ class Encoder(Protocol):
     def amplitude_ratios(self, samples: jnp.ndarray, masks: jnp.ndarray) -> jnp.ndarray:
         """Return ``(C, S, R)`` ratios ``phi(z xor a) / phi(z)``."""
 
-    def select(self, condition: int) -> Encoder:
-        """Return the same encoder restricted to a single condition.
-
-        Used by the fixed-operator estimator, which evaluates one condition at a
-        time so that the sample/mask tensor never carries every condition at
-        once.  Implementations must recompute rather than slice the batched
-        amplitudes, or the result differs from per-condition evaluation in the
-        last bits.
-
-        This method runs *inside* the jitted loss, where a slice of a constant
-        array is itself a tracer.  Implementations must therefore build the
-        child object directly instead of calling their validating constructor:
-        the parent was already validated when the user built it.
-        """
-
 
 @runtime_checkable
 class ExactEncoder(Encoder, Protocol):
@@ -96,7 +86,36 @@ class ExactEncoder(Encoder, Protocol):
         """Return normalised ``(C, 2**n)`` amplitudes ``<z|H^n|phi(c)>``."""
 
 
-ENCODERS: dict[str, object] = {}
+def select_encoder(states: Encoder, condition: int) -> Encoder:
+    """Restrict a batched encoder to a single condition.
+
+    Every condition-batched leaf of a pytree is sliced to a one-condition
+    batch, which is what keeps the estimator's sample/mask buffer at one
+    condition.  An encoder that is not a pytree may implement ``select``
+    instead; the library then uses it.
+    """
+    if not 0 <= condition < states.n_conditions:
+        raise IndexError(f"condition {condition} outside the batch")
+    own = getattr(states, "select", None)
+    if callable(own):
+        return own(condition)
+    try:
+        return jax.tree_util.tree_map(
+            lambda value: value[condition : condition + 1],
+            states,
+        )
+    except (TypeError, AttributeError, IndexError) as error:
+        raise TypeError(
+            "encoder must be a JAX pytree of condition-batched arrays or "
+            "implement select()",
+        ) from error
+
+
+_REGISTRY: dict[str, object] = {}
+#: Read-only view of the registered families.  Mutate it only through
+#: :func:`register_encoder`, so a typo or a plugin cannot silently shadow a
+#: built-in.
+ENCODERS: Mapping[str, object] = MappingProxyType(_REGISTRY)
 
 
 def register_encoder(
@@ -116,27 +135,38 @@ def register_encoder(
         raise ValueError("family must be a non-empty string")
     if not callable(factory):
         raise TypeError("factory must be callable")
-    if family in ENCODERS and not replace:
+    if family in _REGISTRY and not replace:
         raise ValueError(
             f"encoder family {family!r} is already registered; pass "
             "replace=True to overwrite it",
         )
-    ENCODERS[family] = factory
+    _REGISTRY[family] = factory
 
 
 def available_encoders() -> tuple[str, ...]:
     """Return the registered family names, sorted."""
-    return tuple(sorted(ENCODERS))
+    return tuple(sorted(_REGISTRY))
 
 
 def encoder(family: str, angles: jnp.ndarray, **params: object) -> Encoder:
-    """Build the encoder of ``family`` for every supplied condition."""
-    if family not in ENCODERS:
+    """Build the encoder of ``family`` for every supplied condition.
+
+    The factory's result is checked against the :class:`Encoder` protocol, so a
+    mistyped plugin fails here instead of silently returning something the
+    estimator cannot use.
+    """
+    if family not in _REGISTRY:
         raise ValueError(
             f"unknown encoder family: {family!r}; "
             f"available: {', '.join(available_encoders())}",
         )
-    return ENCODERS[family](angles, **params)  # type: ignore[operator]
+    states = _REGISTRY[family](angles, **params)  # type: ignore[operator]
+    if not isinstance(states, Encoder):
+        raise TypeError(
+            f"encoder family {family!r} returned {type(states).__name__}, which "
+            "does not implement the Encoder protocol",
+        )
+    return states
 
 
 def as_condition_batch(angles: jnp.ndarray, n_qubits: int | None = None) -> jnp.ndarray:

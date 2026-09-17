@@ -19,6 +19,7 @@ import numpy as np
 import pytest
 
 import iqp_cond as iqc
+from iqp_cond.operators import mmd_operator_probability
 
 pennylane = pytest.importorskip("pennylane")
 qml = pennylane
@@ -199,10 +200,11 @@ def test_pauli_moments_match_pennylane(family: str) -> None:
     estimate = iqc.estimate_pauli_z(
         params,
         ansatz.generators,
-        masks,
         encoders,
-        jax.random.PRNGKey(9),
-        200_000,
+        masks,
+        key=jax.random.PRNGKey(9),
+        n_samples=200_000,
+        return_samples=True,
     )
     values = np.asarray(estimate.values)
     errors = np.asarray(estimate.standard_errors)
@@ -247,7 +249,7 @@ def test_reference_sampling_matches_pennylane(family: str) -> None:
         assert 0.5 * np.sum(np.abs(empirical - expected)) < 5.0 * sigma + 1e-4
 
 
-def test_sampled_mmd_expectation_matches_exact_pennylane_value() -> None:
+def test_mmd_expectation_matches_exact_pennylane_value() -> None:
     """The stochastic loss is unbiased for the exact PennyLane MMD.
 
     The target is an analytic product law, so its character moments are exact;
@@ -275,7 +277,7 @@ def test_sampled_mmd_expectation_matches_exact_pennylane_value() -> None:
     masks = ((np.arange(2**N_VISIBLE)[:, None] >> np.arange(N_VISIBLE)) & 1).astype(
         float,
     )
-    p_mask = float(iqc.mmd_operator_probability(sigma))
+    p_mask = float(mmd_operator_probability(sigma))
     weights = np.prod(np.where(masks == 1.0, p_mask, 1.0 - p_mask), axis=1)
 
     exact = np.zeros(N_CONDITIONS)
@@ -305,7 +307,7 @@ def test_sampled_mmd_expectation_matches_exact_pennylane_value() -> None:
     encoders = iqc.encoder(family, angles)
 
     def one_loss(key: jax.Array) -> jax.Array:
-        return iqc.sampled_mmd(
+        return iqc.mmd(
             params,
             ansatz.generators,
             encoders,

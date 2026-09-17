@@ -24,6 +24,7 @@ from .protocol import (
     available_encoders,
     encoder,
     register_encoder,
+    select_encoder,
 )
 from .spin_flip import SPIN_FLIP, SpinFlipEncoder, spin_flip_encoder
 
@@ -44,6 +45,7 @@ __all__ = [
     "radial_shell_samples",
     "radial_shell_state",
     "register_encoder",
+    "select_encoder",
     "spin_flip_encoder",
 ]
 

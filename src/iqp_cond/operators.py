@@ -510,8 +510,14 @@ def operator_bank(
     """
     if not sigmas:
         raise ValueError("sigmas must not be empty")
+    if any(not math.isfinite(float(sigma)) or float(sigma) <= 0.0 for sigma in sigmas):
+        raise ValueError("sigmas must be positive and finite")
+    if n_ops < 1:
+        raise ValueError("n_ops must be positive")
     if n_conditions < 1:
         raise ValueError("n_conditions must be positive")
+    if n_visible < 1:
+        raise ValueError("n_visible must be positive")
     per_bandwidth = isinstance(max_masks, Sequence) and not isinstance(max_masks, str)
     caps: tuple[int | None, ...]
     if max_masks is None:

@@ -58,7 +58,11 @@ def local_amplitudes(
 
 @dataclass(frozen=True)
 class ProductEncoder:
-    """Batched product-state encoder with per-qubit local amplitudes."""
+    """Batched product-state encoder with per-qubit local amplitudes.
+
+    Registered as a JAX pytree so :func:`iqp_cond.select_encoder` can slice it
+    to one condition by slicing its arrays; ``name`` is static metadata.
+    """
 
     name: str
     angles: jnp.ndarray
@@ -96,25 +100,6 @@ class ProductEncoder:
         selected = jnp.where(masks[None, None, :, :] == 1.0, local_flip_ratios, 1.0)
         return jnp.prod(selected, axis=-1)
 
-    def select(self, condition: int) -> ProductEncoder:
-        """Return this encoder restricted to one condition, recomputed.
-
-        Built directly rather than through :func:`product_encoder`: this runs
-        inside the traced loss, where even a slice of a constant array is a
-        tracer and the constructor's Python-level validation cannot run.  The
-        parent object was validated when it was built.
-        """
-        if not 0 <= condition < self.n_conditions:
-            raise IndexError(f"condition {condition} outside the batch")
-        row = self.angles[condition : condition + 1]
-        amp_zero, amp_one = local_amplitudes(row)
-        return ProductEncoder(
-            name=self.name,
-            angles=row,
-            amp_zero=jnp.asarray(amp_zero),
-            amp_one=jnp.asarray(amp_one),
-        )
-
     def post_hadamard_amplitudes(self) -> jnp.ndarray:
         """Return ``(n_conditions, 2**n_qubits)`` little-endian amplitudes."""
         zero_reversed = np.asarray(self.amp_zero, dtype=np.complex128)[:, ::-1]
@@ -133,6 +118,13 @@ class ProductEncoder:
                 ).ravel()
             out[condition] = state
         return out
+
+
+jax.tree_util.register_dataclass(
+    ProductEncoder,
+    data_fields=["angles", "amp_zero", "amp_one"],
+    meta_fields=["name"],
+)
 
 
 def product_encoder(angles: jnp.ndarray) -> ProductEncoder:

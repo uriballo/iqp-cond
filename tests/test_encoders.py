@@ -23,7 +23,9 @@ from iqp_cond.encoders import (
     ExactEncoder,
     available_encoders,
     register_encoder,
+    select_encoder,
 )
+from iqp_cond.encoders.protocol import _REGISTRY
 
 N_QUBITS = 4
 N_CONDITIONS = 3
@@ -114,6 +116,71 @@ def test_ratios_match_post_hadamard_state(
         assert np.allclose(ratios[:, :, mask_index], expected, atol=1e-12)
 
 
+def test_select_encoder_slices_built_in_pytrees() -> None:
+    """A registered family is a pytree, so selection is a generic slice."""
+    encoders = iqc.encoder(
+        iqc.PRODUCT,
+        np.random.default_rng(4).uniform(0.3, 2.4, size=(N_CONDITIONS, N_QUBITS)),
+    )
+    for condition in range(N_CONDITIONS):
+        selected = select_encoder(encoders, condition)
+        assert selected.n_conditions == 1
+        assert np.allclose(
+            np.asarray(selected.angles)[0],
+            np.asarray(encoders.angles)[condition],
+        )
+        samples = selected.sample(jax.random.PRNGKey(0), 8)
+        assert samples.shape == (1, 8, N_QUBITS)
+
+
+def test_select_encoder_uses_an_optional_select_method() -> None:
+    """Encoders that are not pytrees can implement select themselves."""
+
+    class NotAPytree:
+        def __init__(self, n_conditions: int) -> None:
+            self.n_conditions = n_conditions
+
+        @property
+        def n_qubits(self) -> int:
+            return 2
+
+        def sample(self, key: jax.Array, n_samples: int) -> jnp.ndarray:
+            return jnp.zeros((1, n_samples, 2))
+
+        def amplitude_ratios(
+            self,
+            samples: jnp.ndarray,
+            masks: jnp.ndarray,
+        ) -> jnp.ndarray:
+            return jnp.ones((1, samples.shape[1], masks.shape[0]))
+
+        def select(self, condition: int) -> NotAPytree:
+            return NotAPytree(1)
+
+    states = NotAPytree(3)
+    assert isinstance(states, Encoder)
+    assert select_encoder(states, 2).n_conditions == 1
+
+
+def test_select_encoder_rejects_a_plain_object() -> None:
+    class Plain:
+        n_conditions = 2
+        n_qubits = 2
+
+        def sample(self, key: jax.Array, n_samples: int) -> jnp.ndarray:
+            return jnp.zeros((2, n_samples, 2))
+
+        def amplitude_ratios(
+            self,
+            samples: jnp.ndarray,
+            masks: jnp.ndarray,
+        ) -> jnp.ndarray:
+            return jnp.ones((2, samples.shape[1], masks.shape[0]))
+
+    with pytest.raises(TypeError, match="implement select"):
+        select_encoder(Plain(), 0)
+
+
 def test_spin_flip_encoder_vanishes_on_odd_shells(angles: np.ndarray) -> None:
     """The two-branch state is spin-flip symmetric, so odd weights cancel."""
     state = np.asarray(
@@ -172,11 +239,9 @@ def test_built_in_families_are_exact(
 
 
 def test_minimal_family_needs_only_sampling_and_ratios() -> None:
-    """The training interface must not require exact post-Hadamard amplitudes."""
+    """The training interface must not require metadata or exact amplitudes."""
 
     class Minimal:
-        name = "minimal"
-
         def __init__(self, angles: np.ndarray) -> None:
             self.angles = jnp.asarray(angles)
 
@@ -200,9 +265,6 @@ def test_minimal_family_needs_only_sampling_and_ratios() -> None:
         ) -> jnp.ndarray:
             return jnp.ones((self.n_conditions, samples.shape[1], masks.shape[0]))
 
-        def select(self, condition: int) -> Minimal:
-            return Minimal(self.angles[condition : condition + 1])
-
     states = Minimal(np.zeros((2, 3)))
     assert isinstance(states, Encoder)
     assert not isinstance(states, ExactEncoder)
@@ -214,12 +276,30 @@ def test_register_encoder_refuses_to_shadow_a_builtin() -> None:
 
 
 def test_register_encoder_replace_overrides() -> None:
-    original = ENCODERS["product"]
+    original = _REGISTRY["product"]
     try:
-        register_encoder("product", lambda angles, **_: "replaced", replace=True)
-        assert iqc.encoder("product", np.zeros((1, N_QUBITS))) == "replaced"
+        register_encoder(
+            "product",
+            lambda angles, **_: UniformBits("replaced", jnp.asarray(angles)),
+            replace=True,
+        )
+        assert iqc.encoder("product", np.zeros((1, N_QUBITS))).name == "replaced"
     finally:
-        ENCODERS["product"] = original
+        _REGISTRY["product"] = original
+
+
+def test_encoder_factory_result_is_validated() -> None:
+    register_encoder("test_bad_factory", lambda angles, **_: 42)
+    try:
+        with pytest.raises(TypeError, match="does not implement the Encoder"):
+            iqc.encoder("test_bad_factory", np.zeros((1, N_QUBITS)))
+    finally:
+        _REGISTRY.pop("test_bad_factory", None)
+
+
+def test_registry_is_read_only() -> None:
+    with pytest.raises(TypeError):
+        ENCODERS["product"] = lambda angles, **_: None  # type: ignore[index]
 
 
 @dataclass(frozen=True)
@@ -250,9 +330,6 @@ class UniformBits:
             dtype=jnp.float64,
         )
 
-    def select(self, condition: int) -> UniformBits:
-        return UniformBits(self.name, self.angles[condition : condition + 1])
-
     def post_hadamard_amplitudes(self) -> jnp.ndarray:
         return jnp.full(
             (self.n_conditions, 2**self.n_qubits),
@@ -274,16 +351,16 @@ def test_custom_family_trains_through_the_public_api() -> None:
         estimate = iqc.estimate_pauli_z(
             np.zeros(ansatz.n_parameters),
             ansatz.generators,
-            np.array([[1.0, 0.0, 0.0]]),
             encoders,
-            jax.random.PRNGKey(2),
-            64,
+            np.array([[1.0, 0.0, 0.0]]),
+            key=jax.random.PRNGKey(2),
+            n_samples=64,
         )
         # Zero parameters leave the phase bank at identity, so every sample
         # value is Re[R * 1] = 1 for this family's unit ratios.
         assert np.allclose(np.asarray(estimate.values), 1.0, atol=1e-12)
     finally:
-        ENCODERS.pop("test_uniform_bits", None)
+        _REGISTRY.pop("test_uniform_bits", None)
     assert "test_uniform_bits" not in available_encoders()
 
 

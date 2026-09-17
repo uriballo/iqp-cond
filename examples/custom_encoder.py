@@ -1,9 +1,9 @@
 """Register a custom encoder and train through the public interface.
 
 The encoder here is the simplest useful one: every condition is ``|+>^n``, so
-sampling is uniform bits and every amplitude ratio is one.  It needs nothing but
-the three interface methods, and the estimator, loss, and trainer consume it
-without any change.
+sampling is uniform bits and every amplitude ratio is one.  It needs the two
+interface operations plus ``select`` (it is not a JAX pytree), and the
+estimator, loss, and trainer consume it without any change.
 
     PYTHONPATH=src python examples/custom_encoder.py
 """
@@ -52,9 +52,8 @@ def main() -> None:
     iqc.register_encoder("hadamard", lambda angles, **_: HadamardEncoder(angles))
 
     n_qubits, n_conditions = 6, 3
-    angles = np.zeros((n_conditions, n_qubits))
-    encoders = iqc.encoder("hadamard", angles)
-    ansatz = iqc.complete_ansatz(n_qubits)
+    encoders = iqc.encoder("hadamard", np.zeros((n_conditions, n_qubits)))
+    model = iqc.ConditionalModel(iqc.complete_ansatz(n_qubits), encoders)
 
     # The trained circuit has to turn the uniform reference into a biased
     # product law whose bias moves with the condition.
@@ -66,8 +65,7 @@ def main() -> None:
     validation = targets[:, :200]
 
     result = iqc.train(
-        ansatz,
-        encoders,
+        model,
         targets,
         validation,
         seed=0,
@@ -80,12 +78,10 @@ def main() -> None:
     )
     print(f"best step {result.best_step}, validation {result.best_validation_loss:.5f}")
 
-    estimate = iqc.estimate_pauli_z(
+    estimate = model.estimate_pauli_z(
         result.best_params,
-        ansatz.generators,
         np.array([[1.0] * n_qubits]),
-        encoders,
-        jax.random.PRNGKey(0),
+        key=jax.random.PRNGKey(0),
         n_samples=8192,
     )
     print(f"<Z^{n_qubits}> per condition: {np.asarray(estimate.values)[:, 0]}")

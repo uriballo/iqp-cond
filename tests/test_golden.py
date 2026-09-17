@@ -91,10 +91,11 @@ def test_estimate_pauli_z_matches_research(
     estimate = iqc.estimate_pauli_z(
         golden[prefix + "params"],
         golden[prefix + "generators"],
-        golden[prefix + "masks"],
         encoders,
-        jax.random.PRNGKey(11 if family == "product" else 12),
-        64,
+        golden[prefix + "masks"],
+        key=jax.random.PRNGKey(11 if family == "product" else 12),
+        n_samples=64,
+        return_samples=True,
     )
     assert_identical(estimate.values, golden[prefix + "values"], f"{prefix}values")
     assert_identical(
@@ -140,9 +141,9 @@ def test_post_hadamard_amplitudes_match_research(
         )
 
 
-def test_initialize_parameters_matches_research(golden: dict[str, np.ndarray]) -> None:
+def test_parameters_from_data_matches_research(golden: dict[str, np.ndarray]) -> None:
     assert_identical(
-        iqc.initialize_parameters_from_data(
+        iqc.parameters_from_data(
             golden["init_data"],
             golden["init_generators"],
         ),
@@ -150,11 +151,11 @@ def test_initialize_parameters_matches_research(golden: dict[str, np.ndarray]) -
         "init_params",
     )
     assert_identical(
-        iqc.initialize_parameters_with_ancillas(
+        iqc.parameters_from_data(
             golden["init_data"],
             golden["ancilla_generators"],
-            golden["ancilla_support"],
-            37,
+            n_visible=golden["init_data"].shape[1],
+            seed=37,
         ),
         golden["ancilla_init_params"],
         "ancilla_init_params",

@@ -64,7 +64,11 @@ def two_branch_shell_amplitudes(
 
 @dataclass(frozen=True)
 class SpinFlipEncoder:
-    """Batched spin-flip encoder stored as Hamming-shell amplitudes."""
+    """Batched spin-flip encoder stored as Hamming-shell amplitudes.
+
+    Registered as a JAX pytree so :func:`iqp_cond.select_encoder` can slice it
+    to one condition by slicing its arrays; ``name`` is static metadata.
+    """
 
     name: str
     angles: jnp.ndarray
@@ -88,23 +92,16 @@ class SpinFlipEncoder:
         """Return ``(n_conditions, n_samples, n_masks)`` shell-table ratios."""
         return radial_shell_ratios(samples, masks, self.shell_amplitudes)
 
-    def select(self, condition: int) -> SpinFlipEncoder:
-        """Return this encoder restricted to one condition, recomputed.
-
-        Built directly rather than through :func:`spin_flip_encoder`: this runs
-        inside the traced loss, where even a slice of a constant array is a
-        tracer and the constructor's Python-level validation cannot run.  The
-        parent object was validated when it was built.
-        """
-        if not 0 <= condition < self.n_conditions:
-            raise IndexError(f"condition {condition} outside the batch")
-        row = self.angles[condition : condition + 1]
-        shell = two_branch_shell_amplitudes(row, self.n_qubits)
-        return SpinFlipEncoder(name=self.name, angles=row, shell_amplitudes=shell)
-
     def post_hadamard_amplitudes(self) -> jnp.ndarray:
         """Return ``(n_conditions, 2**n_qubits)`` little-endian amplitudes."""
         return radial_shell_state(self.shell_amplitudes)
+
+
+jax.tree_util.register_dataclass(
+    SpinFlipEncoder,
+    data_fields=["angles", "shell_amplitudes"],
+    meta_fields=["name"],
+)
 
 
 def _validated_angles(angles: jnp.ndarray) -> jnp.ndarray:

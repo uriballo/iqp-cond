@@ -16,7 +16,14 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-import iqp_cond as iqc
+from iqp_cond.operators import (
+    OperatorBank,
+    bank_from_ragged,
+    mmd_operator_probability,
+    operator_bank,
+    sample_nonidentity_masks,
+    sample_nonidentity_masks_jax,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "golden.npz"
 SIGMAS = (1.0, 2.0, 4.0)
@@ -42,9 +49,7 @@ def test_sample_nonidentity_masks_matches_the_campaign_sampler(
     """
     raw_key = np.asarray(golden["sampler_key"], dtype=np.uint32)
     seed = int.from_bytes(raw_key.tobytes()[:8], "little")
-    masks, weights = iqc.sample_nonidentity_masks(
-        np.random.default_rng(seed), 64, 5, 2.0
-    )
+    masks, weights = sample_nonidentity_masks(np.random.default_rng(seed), 64, 5, 2.0)
     assert np.array_equal(masks, golden["sampler_masks"])
     assert np.allclose(weights, golden["sampler_weights"])
 
@@ -57,7 +62,7 @@ def test_sample_nonidentity_masks_jax_draws_the_conditional_law() -> None:
     analytic conditional Bernoulli law.
     """
     n_visible, n_ops, sigma = 5, 100_000, 2.0
-    masks, weights = iqc.sample_nonidentity_masks_jax(
+    masks, weights = sample_nonidentity_masks_jax(
         jax.random.PRNGKey(0),
         n_ops,
         n_visible,
@@ -68,7 +73,7 @@ def test_sample_nonidentity_masks_jax_draws_the_conditional_law() -> None:
     assert np.isin(masks, (0.0, 1.0)).all()
     assert np.all(masks.sum(axis=1) > 0.0)
 
-    p = float(iqc.mmd_operator_probability(sigma))
+    p = float(mmd_operator_probability(sigma))
     nonidentity_mass = 1.0 - (1.0 - p) ** n_visible
     assert np.allclose(np.asarray(weights), nonidentity_mass / n_ops)
 
@@ -91,10 +96,10 @@ def test_sample_nonidentity_masks_jax_draws_the_conditional_law() -> None:
 
 def test_sample_nonidentity_masks_jax_rejects_bad_sigma() -> None:
     with pytest.raises(ValueError, match="sigma must be positive"):
-        iqc.sample_nonidentity_masks_jax(jax.random.PRNGKey(0), 8, 3, 0.0)
+        sample_nonidentity_masks_jax(jax.random.PRNGKey(0), 8, 3, 0.0)
 
 
-def rebuild_bank(golden: dict[str, np.ndarray], label: str) -> iqc.OperatorBank:
+def rebuild_bank(golden: dict[str, np.ndarray], label: str) -> OperatorBank:
     """Rebuild the campaign's bank from the recorded masks and weights."""
     masks = tuple(
         tuple(
@@ -112,7 +117,7 @@ def rebuild_bank(golden: dict[str, np.ndarray], label: str) -> iqc.OperatorBank:
         )
         for bandwidth in range(len(SIGMAS))
     )
-    return iqc.bank_from_ragged(
+    return bank_from_ragged(
         sigmas=SIGMAS,
         masks=masks,
         weights=weights,
@@ -143,7 +148,7 @@ def test_bank_weights_carry_the_nonidentity_mass(
 ) -> None:
     """Weight sums must equal ``1 - q(0)``, the rescaling for skipping identity."""
     for bandwidth, sigma in enumerate(SIGMAS):
-        expected = 1.0 - float((1.0 - iqc.mmd_operator_probability(sigma)) ** N_VISIBLE)
+        expected = 1.0 - float((1.0 - mmd_operator_probability(sigma)) ** N_VISIBLE)
         for condition in range(N_CONDITIONS):
             index = bandwidth * N_CONDITIONS + condition
             total = float(np.asarray(golden[f"bank_plain_weights_{index}"]).sum())
@@ -151,8 +156,8 @@ def test_bank_weights_carry_the_nonidentity_mass(
 
 
 def test_operator_bank_is_deterministic_and_skips_the_identity() -> None:
-    first = iqc.operator_bank(SIGMAS, 32, 2, 6, seed=7)
-    second = iqc.operator_bank(SIGMAS, 32, 2, 6, seed=7)
+    first = operator_bank(SIGMAS, 32, 2, 6, seed=7)
+    second = operator_bank(SIGMAS, 32, 2, 6, seed=7)
     for bandwidth in range(first.n_bandwidths):
         for condition in range(first.n_conditions):
             masks_a, weights_a = first.entry(bandwidth, condition)
@@ -167,8 +172,8 @@ def test_operator_bank_is_deterministic_and_skips_the_identity() -> None:
 
 def test_max_masks_fixes_the_padded_width() -> None:
     """A fixed width is what lets refreshed banks reuse one compilation."""
-    natural = iqc.operator_bank(SIGMAS, 64, 2, 6, seed=5)
-    fixed = iqc.operator_bank(SIGMAS, 64, 2, 6, seed=5, max_masks=natural.n_masks + 4)
+    natural = operator_bank(SIGMAS, 64, 2, 6, seed=5)
+    fixed = operator_bank(SIGMAS, 64, 2, 6, seed=5, max_masks=natural.n_masks + 4)
     assert fixed.n_masks == natural.n_masks + 4
     assert fixed.masks.shape[2] == fixed.n_masks
     for bandwidth in range(fixed.n_bandwidths):
@@ -179,7 +184,7 @@ def test_max_masks_fixes_the_padded_width() -> None:
 
 def test_operator_bank_is_a_pytree() -> None:
     """The bank must be passable into a compiled step as an argument."""
-    bank = iqc.operator_bank(SIGMAS, 16, 1, 4, seed=6)
+    bank = operator_bank(SIGMAS, 16, 1, 4, seed=6)
     leaves, treedef = jax.tree_util.tree_flatten(bank)
     assert len(leaves) == 2
     restored = jax.tree_util.tree_unflatten(treedef, leaves)
@@ -190,7 +195,7 @@ def test_operator_bank_is_a_pytree() -> None:
 
 def test_compressed_bank_shrinks_the_mask_set() -> None:
     """At a small qubit count the bank is far smaller than the draw budget."""
-    bank = iqc.operator_bank((4.0,), 2000, 1, 8, seed=3)
+    bank = operator_bank((4.0,), 2000, 1, 8, seed=3)
     assert bank.n_masks < 2000  # duplicates collapse
     assert bank.n_ops == 2000
 
@@ -201,7 +206,7 @@ def test_operator_bank_evaluates_each_bandwidth_at_its_own_width() -> None:
     The three default bandwidths differ by ~5x in how many distinct masks their
     Bernoulli law reaches, so one width for the whole bank is most of the cost.
     """
-    bank = iqc.operator_bank(SIGMAS, 128, 2, 6, seed=11)
+    bank = operator_bank(SIGMAS, 128, 2, 6, seed=11)
     assert bank.widths[0] > bank.widths[-1]
     assert bank.n_masks == max(bank.widths)
     for bandwidth in range(bank.n_bandwidths):
@@ -215,10 +220,10 @@ def test_operator_bank_evaluates_each_bandwidth_at_its_own_width() -> None:
 
 def test_fixed_per_bandwidth_widths_keep_refreshed_banks_one_shape() -> None:
     """Per-step refresh needs every redraw to reuse one compilation per bandwidth."""
-    pilot = iqc.operator_bank(SIGMAS, 64, 2, 6, seed=5)
+    pilot = operator_bank(SIGMAS, 64, 2, 6, seed=5)
     widths = tuple(int(width * 1.1) + 1 for width in pilot.widths)
-    first = iqc.operator_bank(SIGMAS, 64, 2, 6, seed=5, max_masks=widths)
-    second = iqc.operator_bank(SIGMAS, 64, 2, 6, seed=6, max_masks=widths)
+    first = operator_bank(SIGMAS, 64, 2, 6, seed=5, max_masks=widths)
+    second = operator_bank(SIGMAS, 64, 2, 6, seed=6, max_masks=widths)
     assert first.widths == widths
     assert second.widths == widths
     assert first.masks.shape == second.masks.shape
@@ -235,13 +240,13 @@ def test_bank_reproduces_the_conditional_mask_law() -> None:
     import math
 
     n_visible, n_ops, sigma = 3, 200_000, 2.0
-    bank = iqc.operator_bank((sigma,), n_ops, 1, n_visible, seed=0)
+    bank = operator_bank((sigma,), n_ops, 1, n_visible, seed=0)
     masks, weights = bank.entry(0, 0)
     masks = np.asarray(masks)
     weights = np.asarray(weights)
     assert masks.shape[0] == 2**n_visible - 1  # every nonidentity mask, once
 
-    p = float(iqc.mmd_operator_probability(sigma))
+    p = float(mmd_operator_probability(sigma))
     nonidentity_mass = 1.0 - (1.0 - p) ** n_visible
     codes = (masks * 2 ** np.arange(n_visible)).sum(axis=1).astype(int)
     empirical = weights / nonidentity_mass
@@ -255,3 +260,14 @@ def test_bank_reproduces_the_conditional_mask_law() -> None:
     )
     assert float(np.max(np.abs(empirical - analytic))) < 5e-3
     assert math.isclose(float(weights.sum()), nonidentity_mass, rel_tol=1e-12)
+
+
+def test_operator_bank_rejects_invalid_inputs() -> None:
+    with pytest.raises(ValueError, match="n_ops must be positive"):
+        operator_bank(SIGMAS, 0, 2, 4, seed=0)
+    with pytest.raises(ValueError, match="n_visible must be positive"):
+        operator_bank(SIGMAS, 8, 2, 0, seed=0)
+    with pytest.raises(ValueError, match="positive and finite"):
+        operator_bank((0.0,), 8, 2, 4, seed=0)
+    with pytest.raises(ValueError, match="sigmas must not be empty"):
+        operator_bank((), 8, 2, 4, seed=0)

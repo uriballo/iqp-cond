@@ -5,19 +5,18 @@ with the condition.  Updates are condition-balanced (each condition contributes
 the same number of samples per step) and checkpoints are selected on a held-out
 validation split by the same MMD objective.
 
-Masks refresh like ``iqpopt``: unless ``mask_refresh="cache"`` is requested, every
-optimization step draws a fresh compressed, nonidentity mask bank and hands it to
-the compiled step as an argument.  Building the bank on the host rather than in
-JAX is deliberate: the in-JAX sampler in :mod:`iqp_cond.loss` cannot collapse
-duplicates cheaply, so at equal draw budgets it evaluates ~1.8x more mask columns
-and costs ~2x the step time (measured in ``experiments/library_perf``).  The
-law is the paper's either way; compression is a pure compute optimization.
-Validation always consumes one fixed bank, so checkpoint scores stay comparable
-across steps.
+Masks refresh like ``iqpopt``: unless ``mask_refresh="cache"`` is requested,
+every optimization step draws a fresh compressed, nonidentity mask bank and
+hands it to the compiled step as an argument.  Building the bank on the host
+rather than in JAX is deliberate: the in-JAX sampler cannot collapse duplicates
+cheaply, so at equal draw budgets it evaluates more mask columns.  Validation
+always consumes one fixed bank, so checkpoint scores stay comparable across
+steps.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import jax
@@ -25,9 +24,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from .ansatz import Ansatz
-from .encoders import Encoder
-from .loss import banked_mmd
+from .model import ConditionalModel
 from .operators import OperatorBank, operator_bank
 
 __all__ = [
@@ -35,7 +32,6 @@ __all__ = [
     "STEP",
     "TrainingConfig",
     "TrainingResult",
-    "initialize_parameters",
     "train",
 ]
 
@@ -45,9 +41,7 @@ CACHE = "cache"
 #: Headroom over the pilot distinct-mask count when fixing a refreshed bank's
 #: width.  Distinct counts concentrate across banks, so this margin makes a
 #: redraw (which conditions the entry on ``distinct <= width``) rare, while every
-#: step still pays only the columns the law realistically reaches.  A tighter
-#: multi-bank maximum was measured on an idle 32-core host and came out ~6%
-#: slower per step, so the width is not worth tuning by column count alone.
+#: step still pays only the columns the law realistically reaches.
 _BANK_HEADROOM = 1.15
 _BANK_MARGIN = 2
 
@@ -56,8 +50,8 @@ _BANK_MARGIN = 2
 class TrainingConfig:
     """Optimization and Monte Carlo settings.
 
-    The defaults reproduce the published conditional-IQP experiments; they are
-    a starting point, not a tuned recommendation for other problems.
+    The defaults are a starting point, not a tuned recommendation; the current
+    experiments run around 1000-2000 operators and 500-1000 samples.
 
     ``n_ops`` and ``validation_n_ops`` are the number of nonidentity operator
     draws per condition and bandwidth that feed the compressed operator banks.
@@ -66,13 +60,11 @@ class TrainingConfig:
 
     ``gemm_dtype`` runs the phase contraction in a reduced dtype (for example
     ``jnp.float32``) and casts the result back to float64, which is the mixed
-    precision mode that pays off on GPUs; the reductions stay float64.  The
-    default keeps every operation in float64.
+    precision mode that pays off on GPUs; the reductions stay float64.
 
     ``sample_chunk`` streams the reference samples in slices, bounding the live
     ``(samples, masks, qubits)`` ratio tensor.  It pays off at large sample
-    budgets (measured 1.1-1.24x faster and 5-11% lower peak RSS at 8192+), and
-    costs a little for small ones, so it is off by default.
+    budgets and costs a little for small ones, so it is off by default.
     """
 
     steps: int = 2_000
@@ -87,6 +79,35 @@ class TrainingConfig:
     validation_n_iqp_samples: int = 16_384
     gemm_dtype: jnp.dtype | None = None
     sample_chunk: int | None = None
+    mask_refresh: str = STEP
+
+    def __post_init__(self) -> None:
+        if self.steps < 1:
+            raise ValueError("steps must be positive")
+        if self.batch_size < 1:
+            raise ValueError("batch_size must be positive")
+        if not (0.0 < self.learning_rate and 0.0 < self.final_learning_rate):
+            raise ValueError("learning rates must be positive")
+        if self.validation_interval < 1:
+            raise ValueError("validation_interval must be positive")
+        if not self.sigmas or any(
+            not math.isfinite(float(sigma)) or float(sigma) <= 0.0
+            for sigma in self.sigmas
+        ):
+            raise ValueError("sigmas must be positive and finite")
+        if self.n_ops < 1 or self.validation_n_ops < 1:
+            raise ValueError("n_ops and validation_n_ops must be positive")
+        if self.n_iqp_samples < 2 or self.validation_n_iqp_samples < 2:
+            raise ValueError(
+                "n_iqp_samples and validation_n_iqp_samples must be at least two",
+            )
+        if self.sample_chunk is not None and self.sample_chunk < 1:
+            raise ValueError("sample_chunk must be positive")
+        if self.mask_refresh not in (STEP, CACHE):
+            raise ValueError(
+                f"unknown mask_refresh: {self.mask_refresh!r}; "
+                f"expected {STEP!r} or {CACHE!r}",
+            )
 
 
 @dataclass(frozen=True)
@@ -94,8 +115,6 @@ class TrainingResult:
     """Best parameters and scalar training history."""
 
     seed: int
-    generators: np.ndarray
-    angles: np.ndarray
     best_params: np.ndarray
     final_params: np.ndarray
     best_step: int
@@ -104,17 +123,6 @@ class TrainingResult:
     train_losses: np.ndarray
     validation_steps: np.ndarray
     validation_losses: np.ndarray
-    family: str = ""
-    n_banks: int = 0
-
-
-def initialize_parameters(n_parameters: int, seed: int) -> jnp.ndarray:
-    """Draw generator-count normalized Gaussian parameters."""
-    if n_parameters < 1:
-        raise ValueError("n_parameters must be positive")
-    rng = np.random.default_rng(seed + 10_000)
-    scale = 0.1 / np.sqrt(n_parameters)
-    return jnp.asarray(rng.normal(0.0, scale, n_parameters), dtype=jnp.float64)
 
 
 def _batch_schedule(
@@ -132,74 +140,81 @@ def _batch_schedule(
 
 
 def _validate_training_inputs(
-    ansatz: Ansatz,
-    encoders: Encoder,
+    model: ConditionalModel,
     training_targets: np.ndarray,
     validation_targets: np.ndarray,
-) -> int:
-    """Check the shared model/data conventions; return the visible width."""
+) -> None:
+    """Check the shared model/data conventions."""
     if training_targets.ndim != 3:
         raise ValueError("training_targets must be rank three")
-    if encoders.n_conditions != training_targets.shape[0]:
+    if validation_targets.ndim != 3:
+        raise ValueError("validation_targets must be rank three")
+    if model.encoders.n_conditions != training_targets.shape[0]:
         raise ValueError(
-            f"encoder covers {encoders.n_conditions} conditions but targets "
+            f"model covers {model.encoders.n_conditions} conditions but targets "
             f"have {training_targets.shape[0]}",
         )
-    if encoders.n_qubits != ansatz.n_qubits:
+    if training_targets.shape[2] != model.visible:
         raise ValueError(
-            f"encoder acts on {encoders.n_qubits} qubits but the ansatz has "
-            f"{ansatz.n_qubits}",
+            f"model declares {model.visible} visible qubits but training targets "
+            f"have {training_targets.shape[2]}",
         )
     if validation_targets.shape[0] != training_targets.shape[0]:
         raise ValueError("training and validation conditions must align")
-    if validation_targets.shape[2] > ansatz.n_qubits:
+    if validation_targets.shape[2] != model.visible:
         raise ValueError(
-            "validation target qubit count cannot exceed ansatz qubit count",
+            f"model declares {model.visible} visible qubits but validation "
+            f"targets have {validation_targets.shape[2]}",
         )
-    return int(training_targets.shape[2])
+
+
+def _refreshed_widths(
+    config: TrainingConfig,
+    model: ConditionalModel,
+    seed: int,
+) -> tuple[int, ...]:
+    """Mask-axis widths a refreshed bank will almost never exceed."""
+    pilot = operator_bank(
+        config.sigmas,
+        config.n_ops,
+        model.encoders.n_conditions,
+        model.visible,
+        seed,
+    )
+    return tuple(int(width * _BANK_HEADROOM) + _BANK_MARGIN for width in pilot.widths)
 
 
 def train(
-    ansatz: Ansatz,
-    encoders: Encoder,
+    model: ConditionalModel,
     training_targets: np.ndarray,
     validation_targets: np.ndarray,
+    *,
     seed: int,
     config: TrainingConfig,
-    *,
     initial_params: np.ndarray | None = None,
-    mask_refresh: str = STEP,
 ) -> TrainingResult:
     """Train one shared conditional model with fixed validation randomness.
 
-    ``mask_refresh`` selects how the training masks are drawn: ``"step"``
-    (default) builds a fresh compressed bank before every update, so each
-    update's expectation equals the true kernel MMD; ``"cache"`` draws one bank
-    and retains it, which reproduces the published campaign's protocol exactly.
-    Both arms hand the bank to the compiled step as an argument, so the shapes
-    stay static and the program is compiled once.
+    ``config.mask_refresh`` selects how the training masks are drawn:
+    ``"step"`` (default) draws a fresh bank inside every compiled step from a
+    per-step key, so each update's expectation equals the true kernel MMD;
+    ``"cache"`` draws one compressed NumPy bank and retains it, which
+    reproduces the published campaign's protocol exactly.
     """
+    from .initialization import random_parameters
+
     training_targets = np.asarray(training_targets, dtype=np.float64)
     validation_targets = np.asarray(validation_targets, dtype=np.float64)
-    if mask_refresh not in (STEP, CACHE):
-        raise ValueError(
-            f"unknown mask_refresh: {mask_refresh!r}; expected {STEP!r} or {CACHE!r}",
-        )
-    n_visible = _validate_training_inputs(
-        ansatz,
-        encoders,
-        training_targets,
-        validation_targets,
-    )
+    _validate_training_inputs(model, training_targets, validation_targets)
 
-    generators = jnp.asarray(ansatz.generators, dtype=jnp.float64)
+    encoders = model.encoders
     if initial_params is None:
-        params = initialize_parameters(ansatz.n_parameters, seed)
+        params = jnp.asarray(random_parameters(model.ansatz.n_parameters, seed))
     else:
         candidate = np.asarray(initial_params, dtype=np.float64)
-        if candidate.shape != (ansatz.n_parameters,):
+        if candidate.shape != (model.ansatz.n_parameters,):
             raise ValueError(
-                f"initial_params must have shape {(ansatz.n_parameters,)}",
+                f"initial_params must have shape {(model.ansatz.n_parameters,)}",
             )
         if not np.isfinite(candidate).all():
             raise ValueError("initial_params must contain only finite values")
@@ -219,57 +234,53 @@ def train(
     )
     random_key = jax.random.PRNGKey(seed)
 
-    validation_bank = operator_bank(
-        config.sigmas,
-        config.validation_n_ops,
-        encoders.n_conditions,
-        n_visible,
-        seed + 1,
-    )
     # One width per bandwidth for every refreshed bank, so the compiled step is
     # built once.  The pilot draw sizes each width; the margin keeps a redraw
     # (which conditions the entry on ``distinct <= width``) rare.
-    pilot = operator_bank(
-        config.sigmas,
-        config.n_ops,
-        encoders.n_conditions,
-        n_visible,
-        seed,
-    )
-    max_masks = tuple(
-        int(width * _BANK_HEADROOM) + _BANK_MARGIN for width in pilot.widths
-    )
+    max_masks = _refreshed_widths(config, model, seed)
     training_bank: OperatorBank | None = None
-    n_banks = config.steps
-    if mask_refresh == CACHE:
+    if config.mask_refresh == CACHE:
         # Retained for the whole run; the loop never rebuilds it.
         training_bank = operator_bank(
             config.sigmas,
             config.n_ops,
             encoders.n_conditions,
-            n_visible,
+            model.visible,
             seed,
         )
-        n_banks = 1
+    validation_bank = operator_bank(
+        config.sigmas,
+        config.validation_n_ops,
+        encoders.n_conditions,
+        model.visible,
+        seed + 1,
+    )
 
     def training_loss(
         current_params: jnp.ndarray,
         target_batch: jnp.ndarray,
-        current_bank: OperatorBank,
+        current_bank: OperatorBank | None,
         step_key: jax.Array,
     ) -> jnp.ndarray:
-        return banked_mmd(
+        if current_bank is None:
+            return model.mmd(
+                current_params,
+                target_batch,
+                step_key,
+                sigmas=config.sigmas,
+                n_ops=config.n_ops,
+                n_samples=config.n_iqp_samples,
+                shared_samples=True,
+                gemm_dtype=config.gemm_dtype,
+                sample_chunk=config.sample_chunk,
+            ).loss
+        return model.mmd(
             current_params,
-            generators,
-            encoders,
             target_batch,
-            current_bank,
-            config.n_iqp_samples,
             step_key,
-            # The refreshed path reuses one reference draw per condition across
-            # bandwidths (the paper's form); the retained path keeps the
-            # campaign's per-entry draw layout bit for bit.
-            shared_samples=mask_refresh == STEP,
+            bank=current_bank,
+            n_samples=config.n_iqp_samples,
+            shared_samples=True,
             gemm_dtype=config.gemm_dtype,
             sample_chunk=config.sample_chunk,
         ).loss
@@ -277,16 +288,13 @@ def train(
     value_and_gradient = jax.jit(jax.value_and_grad(training_loss))
 
     def validation_loss(current_params: jnp.ndarray) -> jnp.ndarray:
-        return banked_mmd(
+        return model.mmd(
             current_params,
-            generators,
-            encoders,
             jnp.asarray(validation_targets),
-            validation_bank,
-            config.validation_n_iqp_samples,
             jax.random.PRNGKey(seed + 1_000_000),
+            bank=validation_bank,
+            n_samples=config.validation_n_iqp_samples,
             gemm_dtype=config.gemm_dtype,
-            sample_chunk=config.sample_chunk,
         ).loss
 
     evaluate_validation = jax.jit(validation_loss)
@@ -302,12 +310,12 @@ def train(
     validation_steps.append(0)
     validation_losses.append(best_validation)
     for step in range(config.steps):
-        if training_bank is None or mask_refresh == STEP:
+        if training_bank is None or config.mask_refresh == STEP:
             training_bank = operator_bank(
                 config.sigmas,
                 config.n_ops,
                 encoders.n_conditions,
-                n_visible,
+                model.visible,
                 seed + 1_000_003 * (step + 1),
                 max_masks=max_masks,
             )
@@ -348,8 +356,6 @@ def train(
 
     return TrainingResult(
         seed=seed,
-        generators=np.asarray(ansatz.generators),
-        angles=np.asarray(encoders.angles),
         best_params=np.asarray(best_params),
         final_params=np.asarray(params),
         best_step=best_step,
@@ -358,6 +364,4 @@ def train(
         train_losses=np.asarray(jnp.stack(train_losses)),
         validation_steps=np.asarray(validation_steps),
         validation_losses=np.asarray(validation_losses),
-        family=encoders.name,
-        n_banks=n_banks,
     )

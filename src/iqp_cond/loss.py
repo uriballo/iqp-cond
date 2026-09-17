@@ -8,22 +8,23 @@ bandwidths, uses the unbiased ``(B-1)`` normalization for both target and model
 moments, and consumes only quantities the encoder makes classically computable:
 sampled masks, sampled bitstrings, and amplitude ratios.
 
-Two entry points share one condition-level evaluator:
+:func:`mmd` is the single objective; its masks come from exactly one of two
+sources, which differ in cost and statistics, not in target:
 
-:func:`sampled_mmd`
-    Draws nonidentity masks afresh from a JAX key, one draw per condition and
-    bandwidth, exactly as ``iqpopt`` redraws its observables every call.  It
-    needs no host loop but cannot collapse duplicate masks, so at equal draw
-    budgets it evaluates more mask columns than :func:`banked_mmd`.
-:func:`banked_mmd`
-    Consumes a prebuilt compressed :class:`~iqp_cond.operators.OperatorBank`
-    (duplicates collapsed to multiplicities).  The trainer builds one per step
-    and passes it into the compiled step; this is also the evaluation and
-    campaign-reproduction path, and the one the golden fixtures pin.
+``key``
+    Draw nonidentity masks afresh, one draw per condition and bandwidth, exactly
+    as ``iqpopt`` redraws its observables every call.  No host loop, but no
+    duplicate compression either, so at equal draw budgets it evaluates more
+    mask columns.
+``bank``
+    Consume a prebuilt compressed
+    :class:`~iqp_cond.operators.OperatorBank` (duplicates collapsed to
+    multiplicities).  This is the evaluation and campaign-reproduction path, and
+    the one the golden fixtures pin.
 
-Both estimators skip the identity mask exactly: it contributes zero to the
-kernel MMD, so spending draws on it only adds variance.  Mask law, samplers,
-and banks live in :mod:`iqp_cond.operators`.
+Both skip the identity mask exactly: it contributes zero to the kernel MMD, so
+spending draws on it only adds variance.  Mask law, samplers, and banks live in
+:mod:`iqp_cond.operators`.
 """
 
 from __future__ import annotations
@@ -34,15 +35,14 @@ import jax
 import jax.numpy as jnp
 
 from .ancilla import pad_visible_masks
-from .encoders import Encoder
-from .estimator import estimate_pauli_z_from_samples
+from .encoders import Encoder, select_encoder
+from .estimator import estimate_pauli_z_unchecked
 from .operators import OperatorBank, sample_nonidentity_masks_jax
 
 __all__ = [
     "ConditionalMMDResult",
-    "banked_mmd",
     "hamming_rbf",
-    "sampled_mmd",
+    "mmd",
     "target_moments",
 ]
 
@@ -117,41 +117,7 @@ def _validate_loss_inputs(
     return n_data_qubits
 
 
-def _condition_mmd(
-    params: jnp.ndarray,
-    generators: jnp.ndarray,
-    encoder: Encoder,
-    target_condition: jnp.ndarray,
-    visible_masks: jnp.ndarray,
-    weights: jnp.ndarray,
-    n_ancillas: int,
-    n_samples: int,
-    key: jax.Array,
-    gemm_dtype: jnp.dtype | None = None,
-    sample_chunk: int | None = None,
-) -> jnp.ndarray:
-    """Weighted sum of per-mask squared moment differences for one condition.
-
-    ``target_condition`` has shape ``(1, n_targets, n_visible)`` and
-    ``visible_masks`` ``(n_masks, n_visible)``; the U-statistic corrections for
-    both the model and target terms are the paper's finite-sample estimator.
-    """
-    samples = encoder.sample(key, n_samples)
-    return _condition_mmd_from_samples(
-        params,
-        generators,
-        encoder,
-        target_condition,
-        visible_masks,
-        weights,
-        n_ancillas,
-        samples,
-        gemm_dtype=gemm_dtype,
-        sample_chunk=sample_chunk,
-    )
-
-
-def _condition_mmd_from_samples(
+def _condition_value(
     params: jnp.ndarray,
     generators: jnp.ndarray,
     encoder: Encoder,
@@ -160,17 +126,16 @@ def _condition_mmd_from_samples(
     weights: jnp.ndarray,
     n_ancillas: int,
     samples: jnp.ndarray,
-    gemm_dtype: jnp.dtype | None = None,
-    sample_chunk: int | None = None,
+    gemm_dtype: jnp.dtype | None,
+    sample_chunk: int | None,
 ) -> jnp.ndarray:
-    """Same weighted sum over one already-drawn reference sample set.
+    """Weighted sum of per-mask squared moment differences for one condition.
 
-    ``sample_chunk`` streams the sample axis in slices and accumulates the
-    per-mask sum and sum of squares, which bounds the live ratio tensor
-    ``(samples, masks, qubits)`` without touching the estimator's expectation.
-    It is worth its extra program size once samples are large (measured
-    1.1-1.24x faster and 5-11% lower peak RSS at 8192+ samples) and slightly
-    slower for small budgets, so the default stays monolithic.
+    ``target_condition`` has shape ``(1, n_targets, n_visible)`` and
+    ``visible_masks`` ``(n_masks, n_visible)``; the U-statistic corrections for
+    both the model and target terms are the paper's finite-sample estimator.
+    ``sample_chunk`` streams the sample axis and accumulates the per-mask
+    moments, bounding the live ``(samples, masks, qubits)`` ratio tensor.
     """
     n_samples = samples.shape[1]
     model_masks = pad_visible_masks(visible_masks, n_ancillas)
@@ -178,14 +143,16 @@ def _condition_mmd_from_samples(
         sums = None
         square_sums = None
         for start in range(0, n_samples, sample_chunk):
-            chunk = estimate_pauli_z_from_samples(
+            chunk = estimate_pauli_z_unchecked(
                 params,
                 generators,
-                model_masks,
                 encoder,
-                samples[:, start : start + sample_chunk],
+                model_masks,
+                samples=samples[:, start : start + sample_chunk],
                 gemm_dtype=gemm_dtype,
+                return_samples=True,
             ).sample_values
+            assert chunk is not None
             chunk_sums = jnp.sum(chunk, axis=1)
             chunk_squares = jnp.sum(chunk**2, axis=1)
             sums = chunk_sums if sums is None else sums + chunk_sums
@@ -196,14 +163,16 @@ def _condition_mmd_from_samples(
         assert square_sums is not None
         values = sums / n_samples
     else:
-        model = estimate_pauli_z_from_samples(
+        model = estimate_pauli_z_unchecked(
             params,
             generators,
-            model_masks,
             encoder,
-            samples,
+            model_masks,
+            samples=samples,
             gemm_dtype=gemm_dtype,
+            return_samples=True,
         )
+        assert model.sample_values is not None
         values = model.values
         sums = jnp.sum(model.sample_values, axis=1)
         square_sums = jnp.sum(model.sample_values**2, axis=1)
@@ -213,39 +182,74 @@ def _condition_mmd_from_samples(
     return jnp.sum(per_mask[0] * weights)
 
 
-def sampled_mmd(
+def mmd(
     params: jnp.ndarray,
     generators: jnp.ndarray,
     encoders: Encoder,
     targets: jnp.ndarray,
     key: jax.Array,
     *,
-    sigmas: tuple[float, ...],
-    n_ops: int,
+    bank: OperatorBank | None = None,
+    sigmas: tuple[float, ...] | None = None,
+    n_ops: int | None = None,
     n_samples: int,
+    shared_samples: bool = False,
     gemm_dtype: jnp.dtype | None = None,
     sample_chunk: int | None = None,
 ) -> ConditionalMMDResult:
-    """Estimate the multiscale squared MMD with masks drawn from ``key``.
+    """Estimate the condition-balanced multiscale squared MMD.
 
-    One nonidentity mask bank is drawn per condition and bandwidth at every
-    call, so a fresh key per optimization step refreshes the objective exactly
-    as ``iqpopt`` does.  Shapes are static, so the whole estimator traces into
-    the compiled step; no bank is built on the host.  ``n_ops`` is the number
-    of mask draws per entry.
+    ``key`` always supplies the reference-state randomness.  Pass ``sigmas``
+    and ``n_ops`` to draw fresh nonidentity masks from that key, or pass
+    ``bank`` to evaluate a prebuilt compressed bank instead; the two mask
+    sources are exclusive.  One condition is evaluated at a time, so the
+    sample/mask buffer covers a single condition instead of the whole batch.
+
+    With ``bank`` and ``shared_samples=True`` each condition draws one
+    reference sample set and evaluates every bandwidth's masks on it, which is
+    the paper's estimator form and avoids resampling once per bandwidth.
     """
     targets = jnp.asarray(targets, dtype=jnp.float64)
-    if not sigmas:
-        raise ValueError("sigmas must not be empty")
-    if n_ops < 1:
-        raise ValueError("n_ops must be positive")
     if sample_chunk is not None and sample_chunk < 1:
         raise ValueError("sample_chunk must be positive")
+    if bank is None:
+        if not sigmas:
+            raise ValueError("sigmas must not be empty")
+        if n_ops is None or n_ops < 1:
+            raise ValueError("n_ops must be positive")
+    elif sigmas is not None or n_ops is not None:
+        raise ValueError("sigmas and n_ops belong to the key mask source only")
     n_data_qubits = _validate_loss_inputs(targets, encoders, n_samples)
-    n_ancillas = encoders.n_qubits - n_data_qubits
     n_conditions = targets.shape[0]
+    n_ancillas = encoders.n_qubits - n_data_qubits
 
-    keys = jax.random.split(key, len(sigmas) * n_conditions * 2)
+    if bank is not None:
+        if bank.n_conditions != n_conditions:
+            raise ValueError(
+                f"operator bank covers {bank.n_conditions} conditions but targets "
+                f"have {n_conditions}",
+            )
+        if bank.n_visible != n_data_qubits:
+            raise ValueError(
+                f"operator bank is built for {bank.n_visible} visible qubits but "
+                f"targets have {n_data_qubits}",
+            )
+        return _mmd_from_bank(
+            params,
+            generators,
+            encoders,
+            targets,
+            bank,
+            key,
+            n_samples,
+            shared_samples,
+            gemm_dtype,
+            sample_chunk,
+        )
+
+    assert sigmas is not None and n_ops is not None
+    n_keys = len(sigmas) * n_conditions * 2
+    keys = jax.random.split(key, max(n_keys, 1))
     bandwidth_values = []
     cursor = 0
     for sigma in sigmas:
@@ -258,127 +262,98 @@ def sampled_mmd(
                 float(sigma),
             )
             cursor += 1
+            encoder = select_encoder(encoders, condition)
+            samples = encoder.sample(keys[cursor], n_samples)
+            cursor += 1
             condition_values.append(
-                _condition_mmd(
+                _condition_value(
                     params,
                     generators,
-                    encoders.select(condition),
+                    encoder,
                     targets[condition : condition + 1],
                     visible_masks,
                     weights,
                     n_ancillas,
-                    n_samples,
-                    keys[cursor],
-                    gemm_dtype=gemm_dtype,
-                    sample_chunk=sample_chunk,
+                    samples,
+                    gemm_dtype,
+                    sample_chunk,
                 ),
             )
-            cursor += 1
         bandwidth_values.append(jnp.stack(condition_values))
-
-    per_bandwidth_condition = jnp.stack(bandwidth_values)
-    return ConditionalMMDResult(
-        loss=jnp.mean(per_bandwidth_condition),
-        per_condition=jnp.mean(per_bandwidth_condition, axis=0),
-        per_bandwidth_condition=per_bandwidth_condition,
-    )
+    return _result(jnp.stack(bandwidth_values))
 
 
-def banked_mmd(
+def _mmd_from_bank(
     params: jnp.ndarray,
     generators: jnp.ndarray,
     encoders: Encoder,
     targets: jnp.ndarray,
     bank: OperatorBank,
-    n_samples: int,
     key: jax.Array,
-    *,
-    shared_samples: bool = False,
-    gemm_dtype: jnp.dtype | None = None,
-    sample_chunk: int | None = None,
+    n_samples: int,
+    shared_samples: bool,
+    gemm_dtype: jnp.dtype | None,
+    sample_chunk: int | None,
 ) -> ConditionalMMDResult:
-    """Estimate the multiscale squared MMD with a fixed compressed operator bank.
-
-    One condition is evaluated at a time, so the ``(samples, masks)`` buffer
-    covers a single condition instead of the whole batch; combined with the
-    compressed bank this keeps the fixed-bank evaluation inside a small memory
-    budget and makes checkpoint selection comparable across steps.
-
-    With ``shared_samples=True`` each condition draws one reference sample set
-    and evaluates every bandwidth's masks on it, which is the paper's estimator
-    (all masks see the same samples) and avoids resampling once per bandwidth.
-    The default draws one sample set per (bandwidth, condition), the layout the
-    published campaign and the golden fixtures pin.
-    """
-    targets = jnp.asarray(targets, dtype=jnp.float64)
-    if sample_chunk is not None and sample_chunk < 1:
-        raise ValueError("sample_chunk must be positive")
-    n_data_qubits = _validate_loss_inputs(targets, encoders, n_samples)
+    n_data_qubits = targets.shape[2]
     n_conditions = targets.shape[0]
-    if bank.n_conditions != n_conditions:
-        raise ValueError(
-            f"operator bank covers {bank.n_conditions} conditions but targets "
-            f"have {n_conditions}",
-        )
-    if bank.n_visible != n_data_qubits:
-        raise ValueError(
-            f"operator bank is built for {bank.n_visible} visible qubits but "
-            f"targets have {n_data_qubits}",
-        )
     n_ancillas = encoders.n_qubits - n_data_qubits
 
     if shared_samples:
         bandwidth_values = []
         for condition in range(n_conditions):
-            condition_encoder = encoders.select(condition)
-            samples = condition_encoder.sample(
+            encoder = select_encoder(encoders, condition)
+            samples = encoder.sample(
                 jax.random.fold_in(key, condition),
                 n_samples,
             )
             condition_values = [
-                _condition_mmd_from_samples(
+                _condition_value(
                     params,
                     generators,
-                    condition_encoder,
+                    encoder,
                     targets[condition : condition + 1],
                     bank.entry(bandwidth, condition)[0],
                     bank.entry(bandwidth, condition)[1],
                     n_ancillas,
                     samples,
-                    gemm_dtype=gemm_dtype,
-                    sample_chunk=sample_chunk,
+                    gemm_dtype,
+                    sample_chunk,
                 )
                 for bandwidth in range(bank.n_bandwidths)
             ]
             bandwidth_values.append(jnp.stack(condition_values))
-        per_bandwidth_condition = jnp.stack(bandwidth_values, axis=1)
-    else:
-        keys = jax.random.split(key, bank.n_bandwidths * n_conditions)
-        bandwidth_values = []
-        cursor = 0
-        for bandwidth in range(bank.n_bandwidths):
-            condition_values = []
-            for condition in range(n_conditions):
-                visible_masks, weights = bank.entry(bandwidth, condition)
-                condition_values.append(
-                    _condition_mmd(
-                        params,
-                        generators,
-                        encoders.select(condition),
-                        targets[condition : condition + 1],
-                        visible_masks,
-                        weights,
-                        n_ancillas,
-                        n_samples,
-                        keys[cursor],
-                        gemm_dtype=gemm_dtype,
-                        sample_chunk=sample_chunk,
-                    ),
-                )
-                cursor += 1
-            bandwidth_values.append(jnp.stack(condition_values))
-        per_bandwidth_condition = jnp.stack(bandwidth_values)
+        return _result(jnp.stack(bandwidth_values, axis=1))
 
+    keys = jax.random.split(key, bank.n_bandwidths * n_conditions)
+    bandwidth_values = []
+    cursor = 0
+    for bandwidth in range(bank.n_bandwidths):
+        condition_values = []
+        for condition in range(n_conditions):
+            encoder = select_encoder(encoders, condition)
+            samples = encoder.sample(keys[cursor], n_samples)
+            cursor += 1
+            visible_masks, weights = bank.entry(bandwidth, condition)
+            condition_values.append(
+                _condition_value(
+                    params,
+                    generators,
+                    encoder,
+                    targets[condition : condition + 1],
+                    visible_masks,
+                    weights,
+                    n_ancillas,
+                    samples,
+                    gemm_dtype,
+                    sample_chunk,
+                ),
+            )
+        bandwidth_values.append(jnp.stack(condition_values))
+    return _result(jnp.stack(bandwidth_values))
+
+
+def _result(per_bandwidth_condition: jnp.ndarray) -> ConditionalMMDResult:
     return ConditionalMMDResult(
         loss=jnp.mean(per_bandwidth_condition),
         per_condition=jnp.mean(per_bandwidth_condition, axis=0),

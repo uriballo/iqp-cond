@@ -3,7 +3,7 @@
 Reproduces the manuscript's simplest benchmark shape without any external data:
 a translated discrete Gaussian over Hamming weight, a broadcast product-state
 encoder, and a short training run.  Sample counts are small so the script runs
-in seconds; the shipped `TrainingConfig` defaults are the production settings.
+in seconds; the shipped `TrainingConfig` defaults are a starting point.
 
     PYTHONPATH=src python examples/train_gaussian.py
 """
@@ -47,12 +47,13 @@ def main() -> None:
     # The encoder owns "condition -> angle"; the campaign broadcasts one angle
     # to every qubit, alpha(c) = pi (0.35 - 0.70 c).
     angles = np.repeat((np.pi * (0.35 - 0.70 * conditions))[:, None], N_QUBITS, axis=1)
-    encoders = iqc.encoder(iqc.PRODUCT, angles)
-    ansatz = iqc.complete_ansatz(N_QUBITS)
+    model = iqc.ConditionalModel(
+        iqc.complete_ansatz(N_QUBITS),
+        iqc.encoder(iqc.PRODUCT, angles),
+    )
 
     result = iqc.train(
-        ansatz,
-        encoders,
+        model,
         training,
         validation,
         seed=0,

@@ -28,7 +28,7 @@ def ancilla_support(
 
     Under the visible-first ordering this is the set of parameters that have no
     data-based initialization and receive seeded noise instead; pass it to
-    :func:`iqp_cond.initialize_parameters_with_ancillas`.
+    :func:`iqp_cond.parameters_from_data`.
     """
     rows = np.asarray(generators)
     if rows.ndim != 2:

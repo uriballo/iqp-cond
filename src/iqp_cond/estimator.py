@@ -7,12 +7,11 @@ comes from the encoder and ``Delta_a f`` from the diagonal phase bank.  Both
 pieces are classically computable, so the estimator is unbiased with bounded
 variance and its parameter gradient is available in closed form.
 
-Three entry points share one kernel.  :func:`estimate_pauli_z` validates its
-inputs and pads visible-width masks with identity on the ancillas;
-:func:`estimate_pauli_z_unchecked` skips both and is what the loss calls, since
-it is safe to trace under ``jax.jit``; :func:`estimate_pauli_z_from_samples`
-evaluates pre-drawn reference samples, which lets several mask banks share one
-draw.
+One estimator, two entry points: :func:`estimate_pauli_z` validates its inputs
+and pads visible-width masks with identity on the ancillas, while
+:func:`estimate_pauli_z_unchecked` skips both and is safe to trace under
+``jax.jit``.  Either accepts a random key or pre-drawn reference samples, so
+several mask banks can share one draw.
 """
 
 from __future__ import annotations
@@ -28,28 +27,33 @@ from .encoders import Encoder
 __all__ = [
     "ExpectationEstimate",
     "estimate_pauli_z",
-    "estimate_pauli_z_from_samples",
     "estimate_pauli_z_unchecked",
 ]
 
 
 @dataclass(frozen=True)
 class ExpectationEstimate:
-    """Pauli-Z estimates and per-sample values for every condition and mask.
+    """Pauli-Z estimates for every condition and mask.
 
-    ``values`` has shape ``(n_conditions, n_masks)`` and ``sample_values``
-    ``(n_conditions, n_samples, n_masks)``.  ``standard_errors`` is derived on
-    demand from ``sample_values``; training never reads it, so computing it
-    eagerly would tax every step.
+    ``values`` has shape ``(n_conditions, n_masks)``.  ``sample_values`` holds
+    the ``(conditions, samples, masks)`` per-sample values and is ``None``
+    unless ``return_samples=True``; it is a memory trap otherwise, and only the
+    loss and callers computing their own variance need it.  ``standard_errors``
+    derives from it on demand.
     """
 
     values: jnp.ndarray
-    sample_values: jnp.ndarray
     n_samples: int
+    sample_values: jnp.ndarray | None = None
 
     @property
     def standard_errors(self) -> jnp.ndarray:
         """Monte Carlo standard error of each ``values`` entry."""
+        if self.sample_values is None:
+            raise ValueError(
+                "standard_errors needs per-sample values; estimate with "
+                "return_samples=True",
+            )
         return jnp.std(self.sample_values, axis=1, ddof=1) / jnp.sqrt(self.n_samples)
 
 
@@ -65,6 +69,23 @@ def _validate_binary(name: str, values: jnp.ndarray) -> None:
         raise ValueError(f"{name} must contain only zeros and ones")
 
 
+def _validate_sources(
+    key: jax.Array | None,
+    samples: jnp.ndarray | None,
+    n_samples: int | None,
+) -> None:
+    if (key is None) == (samples is None):
+        raise ValueError("pass exactly one of key or samples")
+    if key is not None:
+        if n_samples is None:
+            raise ValueError("n_samples is required when sampling from a key")
+        if n_samples < 2:
+            raise ValueError("n_samples must be at least two")
+    elif n_samples is not None and samples is not None:
+        if int(n_samples) != samples.shape[1]:
+            raise ValueError("n_samples must match the drawn samples")
+
+
 def _phase_differences(
     params: jnp.ndarray,
     generators: jnp.ndarray,
@@ -78,7 +99,7 @@ def _phase_differences(
     contraction in a reduced dtype and casts the result back to float64, so the
     exponentiation and every reduction stay precise.  This is the mixed
     precision mode that gives large speedups on GPUs, whose float64 throughput
-    is a small fraction of float32; on CPU it measured neutral.
+    is a small fraction of float32; on CPU it measured neutral to profitable.
     """
     sample_parities = jnp.einsum("bsn,mn->bsm", samples, generators)
     sample_characters = 1.0 - 2.0 * jnp.mod(sample_parities, 2.0)
@@ -94,26 +115,62 @@ def _phase_differences(
     return jnp.einsum("bsm,rm->bsr", sample_characters, weighted_flips)
 
 
+def _estimate(
+    params: jnp.ndarray,
+    generators: jnp.ndarray,
+    encoders: Encoder,
+    masks: jnp.ndarray,
+    samples: jnp.ndarray,
+    gemm_dtype: jnp.dtype | None,
+    return_samples: bool,
+) -> ExpectationEstimate:
+    ratios = encoders.amplitude_ratios(samples, masks)
+    phases = _phase_differences(params, generators, masks, samples, gemm_dtype)
+    sample_values = jnp.real(ratios * jnp.exp(1j * phases))
+    values = jnp.mean(sample_values, axis=1)
+    return ExpectationEstimate(
+        values,
+        int(samples.shape[1]),
+        sample_values if return_samples else None,
+    )
+
+
+def _draw(
+    encoders: Encoder,
+    key: jax.Array | None,
+    samples: jnp.ndarray | None,
+    n_samples: int | None,
+) -> jnp.ndarray:
+    if samples is not None:
+        return samples if samples.ndim == 3 else samples[None, :, :]
+    assert key is not None and n_samples is not None
+    return encoders.sample(key, n_samples)
+
+
 def estimate_pauli_z(
     params: jnp.ndarray,
     generators: jnp.ndarray,
-    masks: jnp.ndarray,
     encoders: Encoder,
-    key: jax.Array,
-    n_samples: int,
+    masks: jnp.ndarray,
     *,
+    key: jax.Array | None = None,
+    samples: jnp.ndarray | None = None,
+    n_samples: int | None = None,
     gemm_dtype: jnp.dtype | None = None,
+    return_samples: bool = False,
 ) -> ExpectationEstimate:
     """Estimate Pauli-Z expectations for one or more conditions.
 
-    ``masks`` has shape ``(n_masks, n_qubits)``.  Visible-width masks are
-    accepted and padded with identity on the ancilla positions, following the
-    visible-first convention of :mod:`iqp_cond.ancilla`; model-width masks pass
-    through unchanged.
+    Pass ``key`` with ``n_samples`` to draw fresh reference samples, or
+    ``samples`` to reuse a ``(conditions, samples, qubits)`` draw.  ``masks``
+    has shape ``(n_masks, n_qubits)``; visible-width masks are accepted and
+    padded with identity on the ancilla positions, following the visible-first
+    convention of :mod:`iqp_cond.ancilla`.
     """
     params = jnp.asarray(params, dtype=jnp.float64)
     generators = jnp.asarray(generators, dtype=jnp.float64)
     masks = jnp.asarray(masks, dtype=jnp.float64)
+    _validate_sources(key, samples, n_samples)
     if generators.ndim != 2:
         raise ValueError("generators must have shape (n_generators, n_qubits)")
     if params.shape != (generators.shape[0],):
@@ -124,8 +181,6 @@ def estimate_pauli_z(
         raise ValueError("masks must have shape (n_masks, n_qubits)")
     if masks.shape[1] > generators.shape[1]:
         raise ValueError("masks cannot cover more qubits than the generators")
-    if n_samples < 2:
-        raise ValueError("n_samples must be at least two")
     if encoders.n_qubits != generators.shape[1]:
         raise ValueError(
             f"encoder acts on {encoders.n_qubits} qubits but generators "
@@ -136,70 +191,41 @@ def estimate_pauli_z(
     _validate_binary("generators", generators)
     _validate_binary("masks", masks)
 
-    return estimate_pauli_z_unchecked(
+    drawn = _draw(encoders, key, samples, n_samples)
+    return _estimate(
         params,
         generators,
-        masks,
         encoders,
-        key,
-        n_samples,
-        gemm_dtype=gemm_dtype,
+        masks,
+        drawn,
+        gemm_dtype,
+        return_samples,
     )
 
 
 def estimate_pauli_z_unchecked(
     params: jnp.ndarray,
     generators: jnp.ndarray,
-    masks: jnp.ndarray,
     encoders: Encoder,
-    key: jax.Array,
-    n_samples: int,
+    masks: jnp.ndarray,
     *,
+    key: jax.Array | None = None,
+    samples: jnp.ndarray | None = None,
+    n_samples: int | None = None,
     gemm_dtype: jnp.dtype | None = None,
+    return_samples: bool = False,
 ) -> ExpectationEstimate:
-    """Unchecked estimator kernel, safe to trace under ``jax.jit``.
+    """Traceable estimator kernel: no validation, model-width masks.
 
-    Skips the input validation and the visible-mask padding of
-    :func:`estimate_pauli_z`: ``masks`` must already cover the model register
-    and the caller is responsible for the array shapes.  The loss uses this
-    entry point because Python-level checks cannot run on tracers.
+    Safe to call under ``jax.jit``, which is why the loss uses it.
     """
-    samples = encoders.sample(key, n_samples)
-    return estimate_pauli_z_from_samples(
+    drawn = _draw(encoders, key, samples, n_samples)
+    return _estimate(
         params,
         generators,
-        masks,
         encoders,
-        samples,
-        gemm_dtype=gemm_dtype,
-    )
-
-
-def estimate_pauli_z_from_samples(
-    params: jnp.ndarray,
-    generators: jnp.ndarray,
-    masks: jnp.ndarray,
-    encoders: Encoder,
-    samples: jnp.ndarray,
-    *,
-    gemm_dtype: jnp.dtype | None = None,
-) -> ExpectationEstimate:
-    """Estimator kernel over pre-drawn reference samples.
-
-    Lets several mask banks share one reference draw per condition — the
-    paper's estimator evaluates every mask on the same samples, and sharing
-    avoids resampling (and re-sorting, for radial encoders) once per bandwidth.
-    ``samples`` is ``(n_conditions, n_samples, n_qubits)`` as produced by
-    :meth:`Encoder.sample`.
-    """
-    ratios = encoders.amplitude_ratios(samples, masks)
-    phases = _phase_differences(
-        params,
-        generators,
         masks,
-        samples,
-        gemm_dtype=gemm_dtype,
+        drawn,
+        gemm_dtype,
+        return_samples,
     )
-    sample_values = jnp.real(ratios * jnp.exp(1j * phases))
-    values = jnp.mean(sample_values, axis=1)
-    return ExpectationEstimate(values, sample_values, samples.shape[1])
