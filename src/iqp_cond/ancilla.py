@@ -17,7 +17,25 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 
-__all__ = ["pad_visible_masks"]
+__all__ = ["ancilla_support", "pad_visible_masks"]
+
+
+def ancilla_support(
+    generators: jnp.ndarray | np.ndarray,
+    n_visible: int,
+) -> np.ndarray:
+    """Return the parameter mask whose generators touch an ancilla qubit.
+
+    Under the visible-first ordering this is the set of parameters that have no
+    data-based initialization and receive seeded noise instead; pass it to
+    :func:`iqp_cond.initialize_parameters_with_ancillas`.
+    """
+    rows = np.asarray(generators)
+    if rows.ndim != 2:
+        raise ValueError("generators must have shape (n_generators, n_qubits)")
+    if not 0 <= n_visible <= rows.shape[1]:
+        raise ValueError("n_visible must be between zero and the register width")
+    return np.any(rows[:, n_visible:] != 0, axis=1)
 
 
 def pad_visible_masks(

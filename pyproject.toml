@@ -32,6 +32,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/iqp_cond"]
 
+[tool.hatch.build.targets.sdist]
+include = ["/README.md", "/pyproject.toml", "/src", "/tests", "/examples"]
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",

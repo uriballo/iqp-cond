@@ -7,10 +7,12 @@ comes from the encoder and ``Delta_a f`` from the diagonal phase bank.  Both
 pieces are classically computable, so the estimator is unbiased with bounded
 variance and its parameter gradient is available in closed form.
 
-Two entry points share one kernel.  :func:`estimate_pauli_z` validates its
+Three entry points share one kernel.  :func:`estimate_pauli_z` validates its
 inputs and pads visible-width masks with identity on the ancillas;
-:func:`estimate_pauli_z_unchecked` skips both, is safe to trace under
-``jax.jit``, and is what the loss calls.
+:func:`estimate_pauli_z_unchecked` skips both and is what the loss calls, since
+it is safe to trace under ``jax.jit``; :func:`estimate_pauli_z_from_samples`
+evaluates pre-drawn reference samples, which lets several mask banks share one
+draw.
 """
 
 from __future__ import annotations

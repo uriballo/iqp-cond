@@ -27,7 +27,8 @@ import optax
 
 from .ansatz import Ansatz
 from .encoders import Encoder
-from .loss import OperatorBank, banked_mmd, operator_bank
+from .loss import banked_mmd
+from .operators import OperatorBank, operator_bank
 
 __all__ = [
     "CACHE",

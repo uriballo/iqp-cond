@@ -16,7 +16,7 @@ import jax
 
 jax.config.update("jax_enable_x64", True)
 
-from .ancilla import pad_visible_masks
+from .ancilla import ancilla_support, pad_visible_masks
 from .ansatz import Ansatz, complete_ansatz, generators_from_graph
 from .encoders import (
     ENCODERS,
@@ -44,16 +44,18 @@ from .initialization import (
 )
 from .loss import (
     ConditionalMMDResult,
-    OperatorBank,
-    bank_from_ragged,
     banked_mmd,
     hamming_rbf,
+    sampled_mmd,
+    target_moments,
+)
+from .operators import (
+    OperatorBank,
+    bank_from_ragged,
     mmd_operator_probability,
     operator_bank,
     sample_nonidentity_masks,
     sample_nonidentity_masks_jax,
-    sampled_mmd,
-    target_moments,
 )
 from .trainer import (
     CACHE,
@@ -80,6 +82,7 @@ __all__ = [
     "SpinFlipEncoder",
     "TrainingConfig",
     "TrainingResult",
+    "ancilla_support",
     "available_encoders",
     "bank_from_ragged",
     "banked_mmd",

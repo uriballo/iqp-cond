@@ -84,7 +84,9 @@ estimate.standard_errors  # Monte Carlo uncertainty, computed on request
 
 `estimate_pauli_z` validates its inputs.  Inside `jax.jit`, use
 `estimate_pauli_z_unchecked`, which skips the Python-level checks and expects
-model-width masks; the loss uses it for the same reason.
+model-width masks; `estimate_pauli_z_from_samples` evaluates a batch of masks
+against pre-drawn reference samples, which is how several mask banks share one
+draw. The loss uses both.
 
 ## Encoders
 
@@ -187,11 +189,12 @@ sample statistics and draw small seeded noise on ancilla-supported generators.
 |---|---|
 | `iqp_cond.ansatz` | `Ansatz`, `generators_from_graph`, `complete_ansatz` |
 | `iqp_cond.encoders` | `Encoder`, `ExactEncoder`, `encoder`, `register_encoder`, `available_encoders`, built-in families |
-| `iqp_cond.estimator` | `estimate_pauli_z`, `estimate_pauli_z_unchecked`, `ExpectationEstimate` |
-| `iqp_cond.loss` | `sampled_mmd`, `banked_mmd`, `operator_bank`, `OperatorBank`, `bank_from_ragged`, `sample_nonidentity_masks`, `sample_nonidentity_masks_jax`, `target_moments`, `hamming_rbf` |
+| `iqp_cond.estimator` | `estimate_pauli_z`, `estimate_pauli_z_unchecked`, `estimate_pauli_z_from_samples`, `ExpectationEstimate` |
+| `iqp_cond.operators` | `operator_bank`, `OperatorBank`, `bank_from_ragged`, `sample_nonidentity_masks`, `sample_nonidentity_masks_jax`, `mmd_operator_probability` |
+| `iqp_cond.loss` | `sampled_mmd`, `banked_mmd`, `target_moments`, `hamming_rbf`, `ConditionalMMDResult` |
 | `iqp_cond.trainer` | `TrainingConfig`, `TrainingResult`, `train`, `initialize_parameters` |
 | `iqp_cond.initialization` | `initialize_parameters_from_data`, `initialize_parameters_with_ancillas` |
-| `iqp_cond.ancilla` | `pad_visible_masks` |
+| `iqp_cond.ancilla` | `pad_visible_masks`, `ancilla_support` |
 
 ## Masks and the MMD estimator
 
@@ -243,6 +246,13 @@ Walsh–Hadamard transforms, visible marginalization) and the benchmark target
 families. Exact evaluation needs the full `2**n` output state, so it is useful
 only at small sizes, and the target families carry experiment-specific
 constants; both live with the research code that consumes this package.
+
+## Examples
+
+`examples/train_gaussian.py` runs the manuscript's simplest benchmark shape
+end to end on synthetic data, and `examples/custom_encoder.py` registers a
+custom encoder and trains through the public interface. Both run from a
+checkout with `PYTHONPATH=src python examples/<name>.py`.
 
 ## Tests
 
