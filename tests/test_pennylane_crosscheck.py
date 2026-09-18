@@ -71,6 +71,47 @@ def prepare_encoder(family: str, angles: np.ndarray, n_qubits: int) -> None:
     qml.StatePrep(state / np.linalg.norm(state), wires=range(n_qubits))
 
 
+def prepare_angle_encoder(axes: tuple[str, ...], angles: np.ndarray) -> None:
+    """Layered single-qubit rotations; layer 0 is applied first."""
+    for layer, labels in enumerate(axes):
+        for wire, label in enumerate(labels):
+            getattr(qml, f"R{label}")(float(angles[layer, wire]), wires=wire)
+
+
+def pl_layered_state(
+    axes: tuple[str, ...],
+    angles: np.ndarray,
+    n_qubits: int,
+) -> np.ndarray:
+    dev = qml.device("default.qubit", wires=n_qubits)
+
+    @qml.qnode(dev)
+    def circuit() -> np.ndarray:
+        prepare_angle_encoder(axes, angles)
+        for wire in range(n_qubits):
+            qml.Hadamard(wire)
+        return qml.state()
+
+    return np.asarray(circuit())
+
+
+def test_layered_angle_encoder_state_matches_pennylane() -> None:
+    """The multi-layer family composes rotations in the documented order."""
+    axes = ("YXXY", "ZXYZ", "YYZZ")
+    angles = np.random.default_rng(23).uniform(
+        0.4,
+        2.2,
+        size=(N_CONDITIONS, len(axes), N_QUBITS),
+    )
+    encoders = iqc.angle_encoder(angles, axes)
+    state = np.asarray(encoders.post_hadamard_amplitudes())
+
+    for condition in range(N_CONDITIONS):
+        expected = pl_layered_state(axes, angles[condition], N_QUBITS)
+        reordered = state[condition][reverse_bits(np.arange(2**N_QUBITS), N_QUBITS)]
+        assert np.max(np.abs(reordered - expected)) < 1e-12
+
+
 def apply_iqp(params: np.ndarray, generators: np.ndarray, n_qubits: int) -> None:
     """The shared IQP block: H, diagonal phases, H."""
     for wire in range(n_qubits):

@@ -61,12 +61,23 @@ def broadcast_for(family: str, angles: np.ndarray) -> np.ndarray:
     return angles
 
 
+def make_encoder(family: str, angles: np.ndarray) -> iqc.Encoder:
+    """Build each registered family with angles valid for its interface."""
+    if family == "angle":
+        return iqc.encoder(
+            family,
+            np.asarray(angles)[:, None, :],
+            axes=("Y" * angles.shape[1],),
+        )
+    return iqc.encoder(family, broadcast_for(family, angles))
+
+
 def test_family_satisfies_protocol(
     family: str,
     angles: np.ndarray,
     masks: np.ndarray,
 ) -> None:
-    states = iqc.encoder(family, broadcast_for(family, angles))
+    states = make_encoder(family, angles)
     assert isinstance(states, Encoder)
     assert states.n_qubits == N_QUBITS
     assert states.n_conditions == N_CONDITIONS
@@ -81,12 +92,35 @@ def test_family_satisfies_protocol(
 
 
 def test_post_hadamard_state_is_normalised(family: str, angles: np.ndarray) -> None:
-    state = np.asarray(
-        iqc.encoder(family, broadcast_for(family, angles)).post_hadamard_amplitudes()
-    )
+    state = np.asarray(make_encoder(family, angles).post_hadamard_amplitudes())
     assert state.shape == (N_CONDITIONS, 2**N_QUBITS)
     norm = np.sum(np.abs(state) ** 2, axis=-1)
     assert np.allclose(norm, 1.0, atol=1e-12)
+
+
+def expected_ratios(
+    states: iqc.Encoder,
+    samples: np.ndarray,
+    masks: np.ndarray,
+) -> np.ndarray:
+    """``phi(z xor a)/phi(z)`` from the exact state, zero where undefined."""
+    state = np.asarray(states.post_hadamard_amplitudes())
+    base = indices_of(samples)
+    conditions = np.arange(samples.shape[0])
+    denominator = state[conditions[:, None], base]
+    out = np.empty(
+        (samples.shape[0], samples.shape[1], masks.shape[0]),
+        dtype=state.dtype,
+    )
+    for mask_index, mask in enumerate(masks.astype(np.int64)):
+        flipped = indices_of(samples.astype(np.int64) ^ mask)
+        out[:, :, mask_index] = np.where(
+            np.abs(denominator) > 0.0,
+            state[conditions[:, None], flipped]
+            / np.where(denominator == 0.0, 1.0, denominator),
+            0.0,
+        )
+    return out
 
 
 def test_ratios_match_post_hadamard_state(
@@ -95,25 +129,14 @@ def test_ratios_match_post_hadamard_state(
     masks: np.ndarray,
 ) -> None:
     """``R(z, a)`` must equal ``phi(z xor a)/phi(z)`` from the full state."""
-    states = iqc.encoder(family, broadcast_for(family, angles))
-    state = np.asarray(states.post_hadamard_amplitudes())
+    states = make_encoder(family, angles)
     samples = np.asarray(states.sample(jax.random.PRNGKey(1), 16))
-    mask_bits = masks.astype(np.int64)
-    base = indices_of(samples)
     ratios = np.asarray(states.amplitude_ratios(jnp.asarray(samples), masks))
-    for mask_index, mask in enumerate(mask_bits):
-        flipped = indices_of(samples.astype(np.int64) ^ mask)
-        expected = np.where(
-            np.abs(state[np.arange(N_CONDITIONS)[:, None], base]) > 0.0,
-            state[np.arange(N_CONDITIONS)[:, None], flipped]
-            / np.where(
-                state[np.arange(N_CONDITIONS)[:, None], base] == 0.0,
-                1.0,
-                state[np.arange(N_CONDITIONS)[:, None], base],
-            ),
-            0.0,
-        )
-        assert np.allclose(ratios[:, :, mask_index], expected, atol=1e-12)
+    assert np.allclose(
+        ratios,
+        expected_ratios(states, samples, masks),
+        atol=1e-12,
+    )
 
 
 def test_select_encoder_slices_built_in_pytrees() -> None:
@@ -216,7 +239,7 @@ def test_unknown_family_is_rejected() -> None:
 
 def test_only_the_core_families_are_registered() -> None:
     """The shipped registry is exactly the core conditional-IQP surface."""
-    assert available_encoders() == ("product", "spin_flip")
+    assert available_encoders() == ("angle", "product", "spin_flip")
 
 
 def test_the_built_in_families_are_distinct(angles: np.ndarray) -> None:
@@ -234,7 +257,7 @@ def test_built_in_families_are_exact(
     family: str,
     angles: np.ndarray,
 ) -> None:
-    states = iqc.encoder(family, broadcast_for(family, angles))
+    states = make_encoder(family, angles)
     assert isinstance(states, ExactEncoder)
 
 
@@ -395,3 +418,105 @@ def test_radial_sampling_follows_the_shell_law() -> None:
     )
     tolerance = 3.0 * np.sqrt(law.max() * (1.0 - law.max()) / n_samples)
     assert np.max(np.abs(empirical - law)) < tolerance
+
+
+def test_angle_encoder_single_y_layer_equals_the_product_encoder() -> None:
+    """The base product family is the one-layer all-Y angle encoder."""
+    angles = np.random.default_rng(9).uniform(0.3, 2.4, size=(N_CONDITIONS, N_QUBITS))
+    product = iqc.product_encoder(angles)
+    angle = iqc.angle_encoder(angles[:, None, :], axes=("Y" * N_QUBITS,))
+    assert isinstance(angle, iqc.ProductEncoder)
+    assert angle.axes == (("Y",) * N_QUBITS,)
+    assert np.asarray(angle.amp_zero).dtype == np.float64
+    assert np.array_equal(np.asarray(angle.amp_zero), np.asarray(product.amp_zero))
+    assert np.array_equal(np.asarray(angle.amp_one), np.asarray(product.amp_one))
+    key = jax.random.PRNGKey(10)
+    assert np.array_equal(
+        np.asarray(angle.sample(key, 32)),
+        np.asarray(product.sample(key, 32)),
+    )
+
+
+def test_angle_encoder_ratios_match_post_hadamard_state() -> None:
+    """The complex multi-layer path satisfies the same ratio identity."""
+    angles = np.random.default_rng(11).uniform(
+        0.3,
+        2.4,
+        size=(N_CONDITIONS, 3, N_QUBITS),
+    )
+    axes = ("X" * N_QUBITS, "ZY" * (N_QUBITS // 2), "Y" * N_QUBITS)
+    states = iqc.angle_encoder(angles, axes)
+    assert np.asarray(states.amp_zero).dtype == np.complex128
+    samples = np.asarray(states.sample(jax.random.PRNGKey(12), 16))
+    masks = (
+        np.random.default_rng(13)
+        .integers(
+            0,
+            2,
+            size=(4, N_QUBITS),
+        )
+        .astype(np.float64)
+    )
+    ratios = np.asarray(states.amplitude_ratios(jnp.asarray(samples), masks))
+    assert np.allclose(
+        ratios,
+        expected_ratios(states, samples, masks),
+        atol=1e-12,
+    )
+
+
+def test_angle_encoder_composes_layers_in_order() -> None:
+    """X then Y differs from Y then X, so layer 0 is applied first."""
+    angles = np.random.default_rng(14).uniform(
+        0.3,
+        2.4,
+        size=(N_CONDITIONS, 2, N_QUBITS),
+    )
+    first = iqc.angle_encoder(angles, axes=("X" * N_QUBITS, "Y" * N_QUBITS))
+    swapped = iqc.angle_encoder(
+        angles[:, ::-1, :],
+        axes=("Y" * N_QUBITS, "X" * N_QUBITS),
+    )
+    assert not np.allclose(
+        np.asarray(first.post_hadamard_amplitudes()),
+        np.asarray(swapped.post_hadamard_amplitudes()),
+    )
+
+
+def test_angle_encoder_validates_axes_and_shapes() -> None:
+    angles = np.zeros((N_CONDITIONS, 2, N_QUBITS))
+    with pytest.raises(ValueError, match="first rotation layer"):
+        iqc.angle_encoder(angles, axes=("Z" * N_QUBITS, "Y" * N_QUBITS))
+    with pytest.raises(ValueError, match="unknown rotation axis"):
+        iqc.angle_encoder(angles, axes=("W" * N_QUBITS, "Y" * N_QUBITS))
+    with pytest.raises(ValueError, match="2 layers but angles have"):
+        iqc.angle_encoder(angles[:, :1, :], axes=("Y", "Y"))
+    with pytest.raises(ValueError, match="labels but the register"):
+        iqc.angle_encoder(angles, axes=("Y" * (N_QUBITS - 1), "Y" * N_QUBITS))
+    with pytest.raises(TypeError, match="sequence of layers"):
+        iqc.angle_encoder(angles, axes="Y")
+    with pytest.raises(ValueError, match="shape"):
+        iqc.angle_encoder(np.zeros((N_CONDITIONS, N_QUBITS)), axes=("Y",))
+    with pytest.raises(ValueError, match="angles must be real"):
+        iqc.angle_encoder(
+            np.zeros((N_CONDITIONS, 2, N_QUBITS), dtype=np.complex128),
+            axes=("X" * N_QUBITS, "Y" * N_QUBITS),
+        )
+    bad = np.zeros((N_CONDITIONS, 2, N_QUBITS))
+    bad[0, 0, 0] = np.inf
+    with pytest.raises(ValueError, match="angles must be finite"):
+        iqc.angle_encoder(bad, axes=("X" * N_QUBITS, "Y" * N_QUBITS))
+
+
+def test_angle_encoder_selects_conditions_as_a_pytree() -> None:
+    angles = np.random.default_rng(15).uniform(
+        0.3,
+        2.4,
+        size=(N_CONDITIONS, 2, N_QUBITS),
+    )
+    encoders = iqc.angle_encoder(angles, axes=("X" * N_QUBITS, "Z" * N_QUBITS))
+    selected = select_encoder(encoders, 1)
+    assert selected.n_conditions == 1
+    assert selected.n_qubits == N_QUBITS
+    assert selected.axes == encoders.axes
+    assert np.array_equal(np.asarray(selected.angles)[0], angles[1])

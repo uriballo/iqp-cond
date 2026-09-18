@@ -31,12 +31,15 @@ from .ansatz import (
     generators_from_graph,
 )
 from .encoders import (
+    ANGLE,
     PRODUCT,
     SPIN_FLIP,
+    AngleEncoder,
     Encoder,
     ExactEncoder,
     ProductEncoder,
     SpinFlipEncoder,
+    angle_encoder,
     available_encoders,
     encoder,
     product_encoder,
@@ -55,10 +58,12 @@ from .operators import expected_bodyness_sigmas
 from .trainer import CACHE, STEP, TrainingConfig, TrainingResult, train
 
 __all__ = [
+    "ANGLE",
     "CACHE",
     "PRODUCT",
     "SPIN_FLIP",
     "STEP",
+    "AngleEncoder",
     "Ansatz",
     "ConditionalMMDResult",
     "ConditionalModel",
@@ -70,6 +75,7 @@ __all__ = [
     "TrainingConfig",
     "TrainingResult",
     "ancilla_support",
+    "angle_encoder",
     "ansatz_from_generators",
     "available_encoders",
     "complete_ansatz",

@@ -90,8 +90,9 @@ Pass `samples=` instead of `key=` to evaluate a pre-drawn reference draw, and
 
 ## Encoders
 
-`iqc.encoder(family, angles)` takes angles of shape `(n_conditions, n_qubits)`
-and returns an object implementing three things:
+`iqc.encoder(family, angles, **params)` takes family-specific angles (all
+built-ins but `angle` use `(n_conditions, n_qubits)`) and returns an object
+implementing three things:
 
 - `sample(key, n_samples)` — `(conditions, samples, qubits)` bitstrings from the
   encoder's Born law `|phi(c)|^2`;
@@ -102,16 +103,28 @@ and returns an object implementing three things:
 The library evaluates one condition at a time for memory, and does that with
 `iqp_cond.encoders.select_encoder`: it slices every condition-batched leaf of a
 JAX pytree, or falls back to an optional `select(condition)` method when the
-encoder is not a pytree.  Both built-ins are registered as pytrees, so a custom
+encoder is not a pytree.  The built-ins are registered as pytrees, so a custom
 family needs `select` only if it is plain Python.
 
-Both built-ins also implement `post_hadamard_amplitudes` (the optional
+All built-ins also implement `post_hadamard_amplitudes` (the optional
 `ExactEncoder` capability) for exact small-system work.
 
 | Name | State | Used for |
 |---|---|---|
 | `product` | `RY(a_i)` on each qubit | translated Gaussian target |
+| `angle` | stack of fixed-axis rotations per qubit | general product conditioning |
 | `spin_flip` | `\|p>^n + X^n \|p>^n`, a spin-flip-symmetric radial state | Curie–Weiss target |
+
+The `angle` family generalizes `product` to several layers of non-commuting
+single-qubit rotations: `iqc.encoder("angle", angles, axes=...)` takes angles of
+shape `(conditions, layers, qubits)` and one axis label (`"X"`, `"Y"`, or
+`"Z"`) per layer and qubit, with layer 0 applied first.  A layer can be any
+sequence of labels, so `axes=("YXXY", "ZXYZ")` is valid for four qubits.  The
+first layer may not contain `Z`, because `R_Z` on `|0>` is a global phase that
+cancels from every probability and ratio, so accepting it would silently ignore
+its angle.  Local amplitudes stay real for all-`Y` sequences and become complex
+as soon as `X` or `Z` appears; sampling and ratio queries are unchanged either
+way.
 
 `spin_flip` rotates every qubit by a single angle, so its matrix must be a
 broadcast row: every column equal to the first, or zero (the natural ancilla
