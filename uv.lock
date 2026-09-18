@@ -263,7 +263,7 @@ wheels = [
 
 [[package]]
 name = "iqp-cond"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "jax", version = "0.10.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
@@ -271,10 +271,6 @@ dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "optax" },
-]
-
-[package.optional-dependencies]
-crosscheck = [
     { name = "pennylane" },
 ]
 
@@ -289,9 +285,8 @@ requires-dist = [
     { name = "jax", specifier = ">=0.10.1" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "optax", specifier = ">=0.2.8" },
-    { name = "pennylane", marker = "extra == 'crosscheck'", specifier = ">=0.45" },
+    { name = "pennylane", specifier = ">=0.45" },
 ]
-provides-extras = ["crosscheck"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -25,21 +25,22 @@ import jax
 
 jax.config.update("jax_enable_x64", True)
 
+from . import simulation
 from .core import (
     Ansatz,
     ConditionalModel,
     ancilla_support,
     ansatz_from_generators,
     complete_ansatz,
-    exact_probabilities,
     pad_visible_masks,
-    sample_exact,
 )
 from .encoders import (
     ANGLE,
     AngleEncoder,
+    CircuitEncoder,
     Encoder,
     ExactEncoder,
+    Operation,
     angle_encoder,
     available_encoders,
     encoder,
@@ -61,11 +62,13 @@ __all__ = [
     "STEP",
     "AngleEncoder",
     "Ansatz",
+    "CircuitEncoder",
     "ConditionalMMDResult",
     "ConditionalModel",
     "Encoder",
     "ExactEncoder",
     "ExpectationEstimate",
+    "Operation",
     "TrainingConfig",
     "TrainingResult",
     "ancilla_support",
@@ -76,13 +79,12 @@ __all__ = [
     "encoder",
     "estimate_pauli_z",
     "estimate_pauli_z_unchecked",
-    "exact_probabilities",
     "expected_bodyness_sigmas",
     "mmd",
     "pad_visible_masks",
     "parameters_from_data",
     "random_parameters",
     "register_encoder",
-    "sample_exact",
+    "simulation",
     "train",
 ]

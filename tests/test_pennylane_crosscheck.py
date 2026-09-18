@@ -340,14 +340,14 @@ def pl_visible_probabilities(
     return np.asarray(circuit())
 
 
-def test_exact_probabilities_match_pennylane() -> None:
-    """The exact model distribution, including ancilla marginalization."""
+def test_simulation_probabilities_match_pennylane() -> None:
+    """The bridge distribution, including ancilla marginalization."""
     angles = angles_for(seed=29)
     ansatz = ciqp.complete_ansatz(N_QUBITS)
     rng = np.random.default_rng(30)
     params = rng.normal(0.0, 0.4, size=ansatz.n_parameters)
     model = ciqp.ConditionalModel(ansatz, y_layer(angles), n_visible=N_VISIBLE)
-    probabilities = ciqp.exact_probabilities(model, params)
+    probabilities = ciqp.simulation.probabilities(model, params)
 
     for condition in range(N_CONDITIONS):
         expected = pl_visible_probabilities(

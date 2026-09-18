@@ -11,26 +11,27 @@ classically computable whenever the encoder supports two operations:
 - draw bitstrings from its own Born distribution, and
 - evaluate amplitude ratios `phi(z xor a) / phi(z)` for Fourier masks `a`.
 
-That pair is the whole modelling interface, and it is also what keeps training
-classical — the model itself is still hard to sample from in general.  For
-small registers the package can also evaluate the model distribution exactly.
+That pair is the whole training interface, and it is also what keeps training
+classical — the model itself is still hard to sample from in general.  Sampled
+evaluation of the trained model goes through PennyLane: registered encoders also
+describe their preparation as single-qubit rotations, so the same model runs on
+a classical simulator or a quantum backend without touching the training code.
 
 ## Install
 
 ```bash
-uv sync                      # library plus dev tools
-uv sync --extra crosscheck   # add PennyLane for the cross-check tests
+uv sync   # library plus dev tools
 ```
 
 The project is managed with [uv](https://docs.astral.sh/uv/); `uv sync` installs
 the package in editable mode, and `uv run <command>` runs commands inside the
-environment.  Python 3.11+ with JAX; dependencies are `jax`, `numpy`, and
-`optax`.
+environment.  Python 3.11+ with JAX; dependencies are `jax`, `numpy`, `optax`,
+and `pennylane` (which installs `pennylane-lightning`).
 
 To use it from another project (private repository, access required):
 
 ```bash
-uv add "iqp-cond @ git+https://github.com/uriballo/iqp-cond@v0.1.0"
+uv add "iqp-cond @ git+https://github.com/uriballo/iqp-cond@v0.3.0"
 ```
 
 ## Quickstart
@@ -100,32 +101,54 @@ Pass `samples=` instead of `key=` to evaluate a pre-drawn reference draw, and
 `estimate.standard_errors` needs.  Inside `jax.jit`, use the free function
 `ciqp.estimate_pauli_z_unchecked`, which skips validation; the loss uses it.
 
-## Exact evaluation
+## Sampling and backends
 
-For registers small enough to hold the full `2**n_qubits` state, the model
-distribution is computable exactly:
+Training never touches PennyLane; sampling the trained model does.  The model is
+compiled into a PennyLane circuit — encoder preparation, `H^n`, the shared
+diagonal as `MultiRZ` per generator, `H^n` — and evaluated on the device you
+choose:
 
 ```python
-probabilities = ciqp.exact_probabilities(model, params)  # (conditions, 2**n_visible)
-draws = ciqp.sample_exact(model, params, 1024, seed=0)   # (conditions, samples, n_visible)
+import pennylane as qml
+
+probabilities = ciqp.simulation.probabilities(model, params)
+draws = ciqp.simulation.sample_model(model, params, 1024, seed=0)
+
+device = qml.device("default.qubit", wires=model.n_qubits)  # any plugin device
+qnode = ciqp.simulation.build_qnode(model, params, 0, device=device, shots=1000)
 ```
 
-Both require an encoder with `post_hadamard_amplitudes`, which the built-in
-family provides, and both scale as `O(conditions * 2**n_qubits)` in time and
-memory.  `exact_probabilities` is the natural reference for total-variation
-distances; `sample_exact` draws with NumPy and is independent of the JAX keys
-used during training.
+- `probabilities(model, params, *, device="lightning.qubit")` returns the exact
+  visible distribution `(conditions, 2**n_visible)`; it needs an analytic device
+  (a statevector simulator) and is a small-system path.
+- `sample_model(model, params, n_samples, *, seed=None, device="lightning.qubit")`
+  draws shot samples `(conditions, n_samples, n_visible)` and works on any
+  PennyLane device, including hardware backends.  `seed` applies when the device
+  is built from a name.
+- `build_qnode(model, params, condition, device=None, *, shots=None, seed=None)`
+  returns the QNode itself, so you can compile, batch, or submit it with any
+  plugin.
+
+Every exact sampler still represents the full `2**n_qubits` state, so simulator
+sampling fits only registers that fit in memory; hardware runs use shots and the
+same circuit.
 
 ## Encoders
 
-`ciqp.encoder(family, angles, **params)` returns an object implementing three
-things:
+`ciqp.encoder(family, angles, **params)` returns an object implementing the
+three operations of the `CircuitEncoder` interface:
 
 - `sample(key, n_samples)` — `(conditions, samples, qubits)` bitstrings from the
   encoder's Born law `|phi(c)|^2`;
 - `amplitude_ratios(samples, masks)` — `(conditions, samples, masks)` ratios
   `phi(z xor a) / phi(z)`;
-- `n_conditions` and `n_qubits`.
+- `preparation_ops(condition)` — `(gate, wires, parameters)` rotations that
+  prepare `|phi(c)>`, used only by `ciqp.simulation`.
+
+The first two are all training needs and never touch PennyLane.  Registered
+families are validated against the full `CircuitEncoder` protocol, so anything
+you can train you can also sample.  `n_conditions` and `n_qubits` complete the
+interface.
 
 The built-in family is `angle`: a product state whose qubits carry a stack of
 fixed-axis rotations.  `ciqp.encoder("angle", angles, axes=...)` takes angles
@@ -146,7 +169,7 @@ pytree, or falls back to an optional `select(condition)` method when the
 encoder is not a pytree.  The built-in family is a pytree, so a custom family
 needs `select` only if it is plain Python.  The built-in family also implements
 `post_hadamard_amplitudes`, the optional `ExactEncoder` capability used by the
-exact evaluation above.
+statevector checks in the test suite.
 
 ### Adding your own
 
@@ -174,6 +197,10 @@ class HadamardEncoder:
 
     def amplitude_ratios(self, samples, masks):
         return jnp.ones((self.n_conditions, samples.shape[1], masks.shape[0]))
+
+    def preparation_ops(self, condition):
+        # |+>^n is the image of |0>^n under the first Hadamard layer.
+        return ()
 
     def select(self, condition):
         return HadamardEncoder(self.angles[condition : condition + 1])
@@ -207,8 +234,9 @@ returns the parameter mask whose generators touch an ancilla, which is what
 
 | Module | Contents |
 |---|---|
-| `iqp_cond.core` | `Ansatz`, `ConditionalModel`, `complete_ansatz`, `ansatz_from_generators`, `exact_probabilities`, `sample_exact`, `pad_visible_masks`, `ancilla_support` |
-| `iqp_cond.encoders` | `Encoder`, `ExactEncoder`, `AngleEncoder`, `angle_encoder`, `encoder`, `register_encoder`, `available_encoders`, `select_encoder` |
+| `iqp_cond.core` | `Ansatz`, `ConditionalModel`, `complete_ansatz`, `ansatz_from_generators`, `pad_visible_masks`, `ancilla_support` |
+| `iqp_cond.encoders` | `Encoder`, `ExactEncoder`, `CircuitEncoder`, `Operation`, `AngleEncoder`, `angle_encoder`, `encoder`, `register_encoder`, `available_encoders`, `select_encoder` |
+| `iqp_cond.simulation` | `probabilities`, `sample_model`, `build_qnode` |
 | `iqp_cond.estimator` | `estimate_pauli_z`, `estimate_pauli_z_unchecked`, `ExpectationEstimate` |
 | `iqp_cond.loss` | `mmd`, `target_moments`, `hamming_rbf`, `ConditionalMMDResult` |
 | `iqp_cond.trainer` | `TrainingConfig`, `TrainingResult`, `train`, `STEP`, `CACHE` |
@@ -280,23 +308,24 @@ Two opt-in knobs cover large-budget regimes.
 ## Examples
 
 `examples/train_gaussian.py` trains a conditional model on a synthetic Gaussian
-family, then samples and scores it exactly; `examples/custom_encoder.py`
-registers a custom encoder and trains through the public interface. Both run from a checkout with
+family, then samples it through the PennyLane bridge and scores the Hamming
+profiles; `examples/custom_encoder.py` registers a custom encoder and trains
+through the public interface.  Both run from a checkout with
 `uv run python examples/<name>.py`.
 
 ## Tests
 
 ```bash
-uv run pytest                     # library suite
-uv run --extra crosscheck pytest  # include the PennyLane cross-checks
+uv run pytest
 ```
 
+`tests/test_simulation.py` checks the bridge against an independent NumPy
+statevector oracle and shot statistics, and
 `tests/test_pennylane_crosscheck.py` rebuilds the encoder states and the full
-conditional circuit in PennyLane and compares the estimator, the sampler, the
-amplitude ratios, and the exact model distribution against statevector results.
-It skips unless PennyLane is installed (`uv sync --extra crosscheck`).
+conditional circuit by hand in PennyLane, comparing the estimator, the sampler,
+and the amplitude ratios against statevector results.
 
 ## Status
 
-Version 0.1.0, a private development release.  Licence and citation metadata are
+Version 0.3.0, a private development release.  Licence and citation metadata are
 pending author and institutional approval.

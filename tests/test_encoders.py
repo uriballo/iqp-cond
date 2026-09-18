@@ -19,6 +19,7 @@ import iqp_cond as ciqp
 from iqp_cond.encoders import (
     _REGISTRY,
     ENCODERS,
+    CircuitEncoder,
     Encoder,
     ExactEncoder,
     available_encoders,
@@ -69,6 +70,7 @@ def test_family_satisfies_protocol(
 ) -> None:
     states = make_encoder(family, angles)
     assert isinstance(states, Encoder)
+    assert isinstance(states, CircuitEncoder)
     assert states.n_qubits == N_QUBITS
     assert states.n_conditions == N_CONDITIONS
 
@@ -211,7 +213,7 @@ def test_built_in_families_are_exact(
 
 
 def test_minimal_family_needs_only_sampling_and_ratios() -> None:
-    """The training interface must not require metadata or exact amplitudes."""
+    """Training internals need only the sampling and ratio pair."""
 
     class Minimal:
         def __init__(self, angles: np.ndarray) -> None:
@@ -263,7 +265,7 @@ def test_register_encoder_replace_overrides() -> None:
 def test_encoder_factory_result_is_validated() -> None:
     register_encoder("test_bad_factory", lambda angles, **_: 42)
     try:
-        with pytest.raises(TypeError, match="does not implement the Encoder"):
+        with pytest.raises(TypeError, match="CircuitEncoder"):
             ciqp.encoder("test_bad_factory", np.zeros((1, N_QUBITS)))
     finally:
         _REGISTRY.pop("test_bad_factory", None)
@@ -308,6 +310,10 @@ class UniformBits:
             2.0 ** (-self.n_qubits / 2),
             dtype=jnp.complex128,
         )
+
+    def preparation_ops(self, condition: int) -> tuple[ciqp.Operation, ...]:
+        # |+>^n is the image of |0>^n under the first Hadamard layer.
+        return ()
 
 
 def test_custom_family_trains_through_the_public_api() -> None:
@@ -439,3 +445,42 @@ def test_angle_encoder_selects_conditions_as_a_pytree() -> None:
     assert selected.n_qubits == N_QUBITS
     assert selected.axes == encoders.axes
     assert np.array_equal(np.asarray(selected.angles)[0], angles[1])
+
+
+def test_preparation_ops_follow_axes_and_layers() -> None:
+    """Operations come in layer order, then qubit order, as rotations."""
+    angles = np.array([[[0.1, 0.2], [0.3, 0.4]]])
+    states = ciqp.angle_encoder(angles, axes=("XY", "ZY"))
+    ops = states.preparation_ops(0)
+    assert [op.name for op in ops] == ["RX", "RY", "RZ", "RY"]
+    assert [op.wires for op in ops] == [(0,), (1,), (0,), (1,)]
+    assert [op.parameters[0] for op in ops] == pytest.approx(
+        [0.1, 0.2, 0.3, 0.4],
+    )
+    with pytest.raises(IndexError, match="condition"):
+        states.preparation_ops(4)
+
+
+def test_registration_requires_the_circuit_representation() -> None:
+    """A family without preparation_ops cannot be registered."""
+
+    class TrainingOnly:
+        n_conditions = 1
+        n_qubits = 2
+
+        def sample(self, key: jax.Array, n_samples: int) -> jnp.ndarray:
+            return jnp.zeros((1, n_samples, 2))
+
+        def amplitude_ratios(
+            self,
+            samples: jnp.ndarray,
+            masks: jnp.ndarray,
+        ) -> jnp.ndarray:
+            return jnp.ones((1, samples.shape[1], masks.shape[0]))
+
+    register_encoder("test_training_only", lambda angles, **_: TrainingOnly())
+    try:
+        with pytest.raises(TypeError, match="CircuitEncoder"):
+            ciqp.encoder("test_training_only", np.zeros((1, 2)))
+    finally:
+        _REGISTRY.pop("test_training_only", None)

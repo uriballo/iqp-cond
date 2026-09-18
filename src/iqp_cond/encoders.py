@@ -1,18 +1,21 @@
 """The encoder interface and the product-state angle family.
 
 A conditional IQP model applies one shared diagonal unitary ``U_theta`` to a
-condition-dependent input state ``|phi(c)>``.  Training needs two things from
-that input state, and only these two:
+condition-dependent input state ``|phi(c)>``.  A registered encoder provides
+three capabilities:
 
 ``sample``
     Draw bitstrings from ``|phi(c)|^2`` in polynomial time.
 ``amplitude_ratios``
     Evaluate ``phi(z xor a) / phi(z)`` for sampled ``z`` and Fourier masks ``a``.
+``preparation_ops``
+    Describe how ``|phi(c)>`` is prepared as single-qubit rotations, so the
+    model can be compiled to a circuit and sampled on a simulator or backend.
 
-That pair is the whole classical-tractability requirement.  An encoder
-providing it, plus the two size properties, is trainable with the same
-estimator, loss, and trainer.  Encoders are looked up by name and can be added
-without touching this package::
+The first two are the whole classical-tractability requirement for training and
+keep the trainer independent of any circuit simulator.  The third is required
+at registration time and used only by :mod:`iqp_cond.simulation`.  Encoders are
+looked up by name and can be added without touching this package::
 
     import iqp_cond as ciqp
 
@@ -42,8 +45,10 @@ __all__ = [
     "ANGLE",
     "ENCODERS",
     "AngleEncoder",
+    "CircuitEncoder",
     "Encoder",
     "ExactEncoder",
+    "Operation",
     "angle_encoder",
     "available_encoders",
     "encoder",
@@ -55,6 +60,19 @@ __all__ = [
 ANGLE = "angle"
 
 _ROTATION_AXES = ("X", "Y", "Z")
+
+
+@dataclass(frozen=True)
+class Operation:
+    """One backend-agnostic gate in an encoder's state preparation.
+
+    The simulation bridge maps the name to a PennyLane gate; the whitelist is
+    ``RX``, ``RY``, and ``RZ``, each acting on one wire with one angle.
+    """
+
+    name: str
+    wires: tuple[int, ...]
+    parameters: tuple[float, ...] = ()
 
 
 @runtime_checkable
@@ -88,12 +106,27 @@ class Encoder(Protocol):
 class ExactEncoder(Encoder, Protocol):
     """A training encoder that can also materialise its exact post-Hadamard state.
 
-    Required only for small-system exact evaluation (the full ``2**n`` state,
-    TVD, and the ratio-identity tests); training never calls it.
+    Required only for small-system exact checks (the full ``2**n`` state and the
+    ratio-identity tests); training and simulation never call it.
     """
 
     def post_hadamard_amplitudes(self) -> jnp.ndarray:
         """Return normalised ``(C, 2**n)`` amplitudes ``<z|H^n|phi(c)>``."""
+
+
+@runtime_checkable
+class CircuitEncoder(Encoder, Protocol):
+    """The registered encoder interface: training plus a circuit representation.
+
+    ``preparation_ops`` describes ``|phi(c)>`` as single-qubit rotations,
+    without reference to any simulator.  :mod:`iqp_cond.simulation` compiles
+    those operations plus the shared diagonal into a PennyLane circuit, so any
+    registered family can be sampled on a classical simulator or a backend.
+    Registered families are validated against this protocol.
+    """
+
+    def preparation_ops(self, condition: int) -> tuple[Operation, ...]:
+        """Return the operations preparing ``|phi(condition)>`` before ``H^n``."""
 
 
 def select_encoder(states: Encoder, condition: int) -> Encoder:
@@ -170,10 +203,11 @@ def encoder(family: str, angles: jnp.ndarray, **params: object) -> Encoder:
             f"available: {', '.join(available_encoders())}",
         )
     states = _REGISTRY[family](angles, **params)  # type: ignore[operator]
-    if not isinstance(states, Encoder):
+    if not isinstance(states, CircuitEncoder):
         raise TypeError(
             f"encoder family {family!r} returned {type(states).__name__}, which "
-            "does not implement the Encoder protocol",
+            "does not implement the CircuitEncoder protocol: register families "
+            "that provide sampling, amplitude ratios, and preparation_ops",
         )
     return states
 
@@ -418,6 +452,20 @@ class AngleEncoder(ProductEncoder):
     def n_qubits(self) -> int:
         """Number of qubits the encoder state lives on."""
         return int(self.angles.shape[-1])
+
+    def preparation_ops(self, condition: int) -> tuple[Operation, ...]:
+        """Return this condition's rotation layers, layer 0 first."""
+        if not 0 <= condition < self.n_conditions:
+            raise IndexError(f"condition {condition} outside the batch")
+        return tuple(
+            Operation(
+                name=f"R{label}",
+                wires=(qubit,),
+                parameters=(float(self.angles[condition, layer, qubit]),),
+            )
+            for layer, labels in enumerate(self.axes)
+            for qubit, label in enumerate(labels)
+        )
 
 
 jax.tree_util.register_dataclass(

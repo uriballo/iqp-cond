@@ -1,4 +1,4 @@
-"""Generator banks, the conditional model, and exact small-system evaluation.
+"""Generator banks and the conditional model.
 
 A generator row is a binary mask over the register; the diagonal unitary is
 ``exp(i sum_j theta_j (-1)^{g_j . z})``.  The complete two-local bank built by
@@ -6,10 +6,9 @@ A generator row is a binary mask over the register; the diagonal unitary is
 used through :func:`ansatz_from_generators`.
 
 The model applies that shared diagonal to a condition-dependent encoder state,
-``q_theta(x | c) = |<x| U_theta |phi(c)>|^2``.  For registers small enough to
-materialize the full ``2**n`` state, :func:`exact_probabilities` and
-:func:`sample_exact` evaluate the model distribution exactly; training and
-inference otherwise rely on the classically computable estimator.
+``q_theta(x | c) = |<x| U_theta |phi(c)>|^2``.  Training uses the classically
+computable estimator; :mod:`iqp_cond.simulation` compiles the same model into a
+circuit for sampling on a simulator or backend.
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .encoders import Encoder, ExactEncoder
+from .encoders import Encoder
 
 if TYPE_CHECKING:
     from .estimator import ExpectationEstimate
@@ -34,9 +33,7 @@ __all__ = [
     "ancilla_support",
     "ansatz_from_generators",
     "complete_ansatz",
-    "exact_probabilities",
     "pad_visible_masks",
-    "sample_exact",
 ]
 
 
@@ -253,99 +250,3 @@ class ConditionalModel:
             gemm_dtype=gemm_dtype,
             sample_chunk=sample_chunk,
         )
-
-
-def _hadamard_transform(amplitudes: np.ndarray, n_qubits: int) -> np.ndarray:
-    """Apply ``H^{tensor n}`` along the last axis of ``amplitudes``."""
-    blocks = amplitudes.reshape(amplitudes.shape[:-1] + (2,) * n_qubits)
-    scale = np.sqrt(2.0)
-    for axis in range(-n_qubits, 0):
-        zero = blocks.take(0, axis=axis)
-        one = blocks.take(1, axis=axis)
-        blocks = np.stack([(zero + one) / scale, (zero - one) / scale], axis=axis)
-    return blocks.reshape(amplitudes.shape)
-
-
-def exact_probabilities(
-    model: ConditionalModel,
-    params: np.ndarray,
-) -> np.ndarray:
-    """Return the exact visible distribution ``(conditions, 2**n_visible)``.
-
-    Materializes the state entering the diagonal, applies the shared phases and
-    the final Hadamard layer, and marginalizes the ancillas.  Cost is
-    ``O(conditions * 2**n_qubits)`` time and memory, so this is a small-system
-    evaluation path (a few hundred megabytes at roughly 26 qubits); training
-    never needs it.  The encoder must provide ``post_hadamard_amplitudes``
-    (:class:`~iqp_cond.encoders.ExactEncoder`).
-    """
-    if not isinstance(model.encoders, ExactEncoder):
-        raise TypeError(
-            "exact evaluation needs an encoder with post_hadamard_amplitudes; "
-            f"{type(model.encoders).__name__} does not provide it",
-        )
-    params = np.asarray(params, dtype=np.float64)
-    generators = np.asarray(model.generators, dtype=np.float64)
-    if params.shape != (generators.shape[0],):
-        raise ValueError("params must have shape (n_generators,)")
-    if not np.isfinite(params).all():
-        raise ValueError("params must contain only finite values")
-
-    n_qubits = model.n_qubits
-    amplitudes = np.asarray(
-        model.encoders.post_hadamard_amplitudes(),
-        dtype=np.complex128,
-    )
-    if amplitudes.shape != (model.encoders.n_conditions, 2**n_qubits):
-        raise ValueError(
-            "post_hadamard_amplitudes must have shape (conditions, 2**n_qubits)",
-        )
-
-    codes = np.arange(2**n_qubits, dtype=np.int64)
-    weights = 1 << np.arange(n_qubits, dtype=np.int64)
-    generator_codes = np.asarray(generators, dtype=np.int64) @ weights
-    overlaps = codes[:, None] & generator_codes[None, :]
-    characters = 1.0 - 2.0 * (np.bitwise_count(overlaps) % 2)
-    phases = characters @ params
-    state = amplitudes * np.exp(1j * phases)[None, :]
-    state = _hadamard_transform(state, n_qubits)
-
-    n_visible = model.visible
-    densities = (
-        np.abs(
-            state.reshape(
-                model.encoders.n_conditions,
-                2**model.n_ancillas,
-                2**n_visible,
-            ),
-        )
-        ** 2
-    )
-    # Ancillas are measured and traced out: sum probabilities, not amplitudes.
-    return densities.sum(axis=1)
-
-
-def sample_exact(
-    model: ConditionalModel,
-    params: np.ndarray,
-    n_samples: int,
-    *,
-    seed: int = 0,
-) -> np.ndarray:
-    """Draw ``(conditions, n_samples, n_visible)`` bitstrings from the model.
-
-    Exact classical sampling via :func:`exact_probabilities`, so it is limited
-    to registers small enough to materialize the full state.  Uses NumPy's
-    generator, independent of the JAX keys used for training.
-    """
-    if n_samples < 1:
-        raise ValueError("n_samples must be positive")
-    probabilities = exact_probabilities(model, params)
-    rng = np.random.default_rng(seed)
-    codes = np.stack(
-        [
-            rng.choice(probabilities.shape[1], size=n_samples, p=condition)
-            for condition in probabilities
-        ],
-    )
-    return ((codes[..., None] >> np.arange(model.visible)) & 1).astype(np.float64)

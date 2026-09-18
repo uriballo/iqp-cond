@@ -1,9 +1,10 @@
 """Register a custom encoder and train through the public interface.
 
-The encoder here is the simplest useful one: every condition is ``|+>^n``, so
-sampling is uniform bits and every amplitude ratio is one.  It needs the two
-interface operations plus ``select`` (it is not a JAX pytree), and the
-estimator, loss, and trainer consume it without any change.
+The encoder here is the simplest useful one: its post-Hadamard state is
+``|+>^n``, so sampling is uniform bits and every amplitude ratio is one.  It
+needs the three interface operations (sampling, amplitude ratios, and the
+circuit representation) plus ``select`` (it is not a JAX pytree), and the
+estimator, loss, trainer, and simulation bridge consume it unchanged.
 
     uv run python examples/custom_encoder.py
 """
@@ -43,6 +44,10 @@ class HadamardEncoder:
 
     def amplitude_ratios(self, samples: jnp.ndarray, masks: jnp.ndarray) -> jnp.ndarray:
         return jnp.ones((self.n_conditions, samples.shape[1], masks.shape[0]))
+
+    def preparation_ops(self, condition: int) -> tuple[ciqp.Operation, ...]:
+        # |+>^n is the image of |0>^n under the first Hadamard layer.
+        return ()
 
     def select(self, condition: int) -> HadamardEncoder:
         return HadamardEncoder(self.angles[condition : condition + 1])

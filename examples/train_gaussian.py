@@ -74,10 +74,16 @@ def main() -> None:
     print(f"best step {result.best_step}")
     print(f"validation MMD {result.best_validation_loss:.6f}")
 
-    # Exact sampling: the register is small enough to avoid Monte Carlo, so the
-    # trained model can be scored directly against the training conditions.
-    draws = ciqp.sample_exact(model, result.best_params, n_samples=2000, seed=1)
-    probabilities = ciqp.exact_probabilities(model, result.best_params)
+    # The simulation bridge compiles the trained model into a PennyLane
+    # circuit: exact probabilities when the device supports analytic
+    # execution, and shots otherwise (including hardware backends).
+    draws = ciqp.simulation.sample_model(
+        model,
+        result.best_params,
+        2000,
+        seed=1,
+    )
+    probabilities = ciqp.simulation.probabilities(model, result.best_params)
     state_weights = np.bitwise_count(np.arange(2**N_QUBITS)).astype(int)
     profile_tvds = [
         0.5
