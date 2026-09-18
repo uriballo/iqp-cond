@@ -21,7 +21,7 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 
-from .ancilla import pad_visible_masks
+from .core import pad_visible_masks
 from .encoders import Encoder
 
 __all__ = [
@@ -180,7 +180,7 @@ def estimate_pauli_z(
     every condition but the one it was sampled from.  ``masks`` has shape
     ``(n_masks, n_qubits)``; visible-width masks are accepted and padded with
     identity on the ancilla positions, following the visible-first convention
-    of :mod:`iqp_cond.ancilla`.
+    of :mod:`iqp_cond.core`.
     """
     params = jnp.asarray(params, dtype=jnp.float64)
     generators = jnp.asarray(generators, dtype=jnp.float64)

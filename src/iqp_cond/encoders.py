@@ -1,47 +1,189 @@
-"""Single-qubit product-state encoders.
+"""The encoder interface and the product-state angle family.
 
-Each qubit carries an independent one-qubit state built from that condition's
-angles, so the encoder is a product state and the amplitude-ratio query
-factorizes over qubits.  The base :class:`ProductEncoder` is one ``RY``
-rotation per qubit (the translated Gaussian benchmark); :class:`AngleEncoder`
-generalizes it to a stack of fixed-axis rotations per qubit, still a product
-state and therefore still classically tractable.
+A conditional IQP model applies one shared diagonal unitary ``U_theta`` to a
+condition-dependent input state ``|phi(c)>``.  Training needs two things from
+that input state, and only these two:
+
+``sample``
+    Draw bitstrings from ``|phi(c)|^2`` in polynomial time.
+``amplitude_ratios``
+    Evaluate ``phi(z xor a) / phi(z)`` for sampled ``z`` and Fourier masks ``a``.
+
+That pair is the whole classical-tractability requirement.  An encoder
+providing it, plus the two size properties, is trainable with the same
+estimator, loss, and trainer.  Encoders are looked up by name and can be added
+without touching this package::
+
+    import iqp_cond as ciqp
+
+    ciqp.register_encoder("my_family", my_encoder_factory)
+    states = ciqp.encoder("my_family", angles)
+
+The built-in family is :class:`AngleEncoder`, a product state built from any
+number of fixed-axis single-qubit rotation layers.  Implementations are batched
+over conditions: ``angles`` always carries a leading condition axis, and every
+method keeps that axis, because the estimator samples all conditions from a
+single random key.  Exact small-system work needs a further capability,
+``post_hadamard_amplitudes``, declared separately by :class:`ExactEncoder`.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Protocol, runtime_checkable
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .protocol import as_condition_batch
-
 __all__ = [
     "ANGLE",
-    "PRODUCT",
+    "ENCODERS",
     "AngleEncoder",
-    "ProductEncoder",
+    "Encoder",
+    "ExactEncoder",
     "angle_encoder",
+    "available_encoders",
+    "encoder",
     "layered_amplitudes",
-    "local_amplitudes",
-    "product_encoder",
+    "register_encoder",
+    "select_encoder",
 ]
 
-PRODUCT = "product"
 ANGLE = "angle"
 
 _ROTATION_AXES = ("X", "Y", "Z")
 
 
-def safe_ratio(numerator: jnp.ndarray, denominator: jnp.ndarray) -> jnp.ndarray:
+@runtime_checkable
+class Encoder(Protocol):
+    """A condition-parameterised encoder evaluated over a batch of conditions.
+
+    Shapes are ``C`` conditions, ``S`` samples, ``R`` masks, ``n`` qubits.
+    The library evaluates one condition at a time for memory; it does that with
+    :func:`select_encoder`, which slices every condition-batched leaf of a JAX
+    pytree or falls back to an optional ``select`` method.  Families therefore
+    either register as pytrees or implement ``select``; nothing else about them
+    is required.
+    """
+
+    @property
+    def n_conditions(self) -> int:
+        """Number of conditions in the batch."""
+
+    @property
+    def n_qubits(self) -> int:
+        """Number of qubits the encoder state lives on."""
+
+    def sample(self, key: jax.Array, n_samples: int) -> jnp.ndarray:
+        """Draw ``(C, S, n)`` bitstrings distributed as ``|phi(c)|^2``."""
+
+    def amplitude_ratios(self, samples: jnp.ndarray, masks: jnp.ndarray) -> jnp.ndarray:
+        """Return ``(C, S, R)`` ratios ``phi(z xor a) / phi(z)``."""
+
+
+@runtime_checkable
+class ExactEncoder(Encoder, Protocol):
+    """A training encoder that can also materialise its exact post-Hadamard state.
+
+    Required only for small-system exact evaluation (the full ``2**n`` state,
+    TVD, and the ratio-identity tests); training never calls it.
+    """
+
+    def post_hadamard_amplitudes(self) -> jnp.ndarray:
+        """Return normalised ``(C, 2**n)`` amplitudes ``<z|H^n|phi(c)>``."""
+
+
+def select_encoder(states: Encoder, condition: int) -> Encoder:
+    """Restrict a batched encoder to a single condition.
+
+    Every condition-batched leaf of a pytree is sliced to a one-condition
+    batch, which is what keeps the estimator's sample/mask buffer at one
+    condition.  An encoder that is not a pytree may implement ``select``
+    instead; the library then uses it.
+    """
+    if not 0 <= condition < states.n_conditions:
+        raise IndexError(f"condition {condition} outside the batch")
+    own = getattr(states, "select", None)
+    if callable(own):
+        return own(condition)
+    try:
+        return jax.tree_util.tree_map(
+            lambda value: value[condition : condition + 1],
+            states,
+        )
+    except (TypeError, AttributeError, IndexError) as error:
+        raise TypeError(
+            "encoder must be a JAX pytree of condition-batched arrays or "
+            "implement select()",
+        ) from error
+
+
+_REGISTRY: dict[str, object] = {}
+#: Read-only view of the registered families.  Mutate it only through
+#: :func:`register_encoder`, so a typo or a plugin cannot silently shadow a
+#: built-in.
+ENCODERS: Mapping[str, object] = MappingProxyType(_REGISTRY)
+
+
+def register_encoder(
+    family: str,
+    factory: object,
+    *,
+    replace: bool = False,
+) -> None:
+    """Register an encoder factory under ``family``.
+
+    The factory is called as ``factory(angles, **params)`` with family-specific
+    angles.  Registering an existing name raises unless ``replace=True``, so a
+    typo or a plugin cannot silently shadow a built-in family.
+    """
+    if not family or not isinstance(family, str):
+        raise ValueError("family must be a non-empty string")
+    if not callable(factory):
+        raise TypeError("factory must be callable")
+    if family in _REGISTRY and not replace:
+        raise ValueError(
+            f"encoder family {family!r} is already registered; pass "
+            "replace=True to overwrite it",
+        )
+    _REGISTRY[family] = factory
+
+
+def available_encoders() -> tuple[str, ...]:
+    """Return the registered family names, sorted."""
+    return tuple(sorted(_REGISTRY))
+
+
+def encoder(family: str, angles: jnp.ndarray, **params: object) -> Encoder:
+    """Build the encoder of ``family`` for every supplied condition.
+
+    The factory's result is checked against the :class:`Encoder` protocol, so a
+    mistyped plugin fails here instead of silently returning something the
+    estimator cannot use.
+    """
+    if family not in _REGISTRY:
+        raise ValueError(
+            f"unknown encoder family: {family!r}; "
+            f"available: {', '.join(available_encoders())}",
+        )
+    states = _REGISTRY[family](angles, **params)  # type: ignore[operator]
+    if not isinstance(states, Encoder):
+        raise TypeError(
+            f"encoder family {family!r} returned {type(states).__name__}, which "
+            "does not implement the Encoder protocol",
+        )
+    return states
+
+
+def _safe_ratio(numerator: jnp.ndarray, denominator: jnp.ndarray) -> jnp.ndarray:
     """Divide, mapping division by zero to zero."""
     return jnp.where(denominator != 0.0, numerator / denominator, 0.0)
 
 
-def local_amplitudes(
+def _local_amplitudes(
     angles: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Return the post-Hadamard ``(amp_zero, amp_one)`` of ``RY(a)|0>``.
@@ -50,8 +192,7 @@ def local_amplitudes(
     ``(c + s)/sqrt(2) |0> + (c - s)/sqrt(2) |1>``.  The amplitudes are real, so
     they are returned in float64: the ratio query then runs on real arithmetic,
     which halves the memory traffic of its ``(samples, masks, qubits)``
-    intermediate.  The float values are bit-for-bit the real parts of the
-    complex amplitudes the golden fixtures pin.
+    intermediate.
     """
     angles = jnp.asarray(angles, dtype=jnp.float64)
     cosine = jnp.cos(angles / 2.0)
@@ -63,7 +204,7 @@ def local_amplitudes(
     scale = jnp.sqrt(jnp.asarray(2.0, dtype=jnp.float64))
     # XLA divides complex by real differently from real by real (reciprocal
     # multiply), so the components are extracted from the complex expression
-    # that the golden fixtures pin rather than recomputed in real arithmetic.
+    # the regression fixtures pin rather than recomputed in real arithmetic.
     return (
         jnp.real((pre_zero + pre_one) / scale),
         jnp.real((pre_zero - pre_one) / scale),
@@ -122,9 +263,9 @@ def layered_amplitudes(
 
     ``angles`` is ``(n_conditions, n_layers, n_qubits)`` and ``axes`` the
     matching rotation labels, layer 0 applied first.  The amplitudes are real
-    when every layer is ``Y`` (including the one-layer base case, which defers
-    to :func:`local_amplitudes` so its pinned floats are preserved) and complex
-    whenever an ``X`` or ``Z`` rotation is present.
+    when every layer is ``Y`` (including the one-layer case, which defers to
+    the pinned ``RY`` expression) and complex whenever an ``X`` or ``Z``
+    rotation is present.
     """
     values = jnp.asarray(angles, dtype=jnp.float64)
     if values.ndim != 3:
@@ -135,7 +276,7 @@ def layered_amplitudes(
     normalized = _normalize_axes(axes, n_layers, n_qubits)
     all_y = all(label == "Y" for layer in normalized for label in layer)
     if n_layers == 1 and all_y:
-        return local_amplitudes(values[:, 0, :])
+        return _local_amplitudes(values[:, 0, :])
 
     cosine = jnp.cos(values / 2.0)
     sine = jnp.sin(values / 2.0)
@@ -177,8 +318,10 @@ def layered_amplitudes(
 class ProductEncoder:
     """Batched product-state encoder with per-qubit local amplitudes.
 
-    Registered as a JAX pytree so :func:`iqp_cond.select_encoder` can slice it
-    to one condition by slicing its arrays; ``name`` is static metadata.
+    The one-layer ``RY`` base of :class:`AngleEncoder`: subclasses store the
+    condition-batched local amplitudes and inherit sampling, ratio queries, and
+    the exact state expansion.  Registered as a JAX pytree so
+    :func:`select_encoder` can slice it to one condition.
     """
 
     name: str
@@ -207,8 +350,8 @@ class ProductEncoder:
 
     def amplitude_ratios(self, samples: jnp.ndarray, masks: jnp.ndarray) -> jnp.ndarray:
         """Return ``(n_conditions, n_samples, n_masks)`` product ratios."""
-        zero_to_one = safe_ratio(self.amp_one, self.amp_zero)[:, None, None, :]
-        one_to_zero = safe_ratio(self.amp_zero, self.amp_one)[:, None, None, :]
+        zero_to_one = _safe_ratio(self.amp_one, self.amp_zero)[:, None, None, :]
+        one_to_zero = _safe_ratio(self.amp_zero, self.amp_one)[:, None, None, :]
         local_flip_ratios = jnp.where(
             samples[:, :, None, :] == 0.0,
             zero_to_one,
@@ -244,29 +387,16 @@ jax.tree_util.register_dataclass(
 )
 
 
-def product_encoder(angles: jnp.ndarray) -> ProductEncoder:
-    """Build the product-state encoder for every supplied condition."""
-    angles = as_condition_batch(angles)
-    amp_zero, amp_one = local_amplitudes(angles)
-    return ProductEncoder(
-        name=PRODUCT,
-        angles=angles,
-        amp_zero=jnp.asarray(amp_zero),
-        amp_one=jnp.asarray(amp_one),
-    )
-
-
 @dataclass(frozen=True)
 class AngleEncoder(ProductEncoder):
     """Product-state encoder with stacked single-qubit rotation layers.
 
-    A generalization of :class:`ProductEncoder`: ``angles`` is
-    ``(n_conditions, n_layers, n_qubits)`` and ``axes`` the static
-    ``(n_layers, n_qubits)`` rotation labels, with layer 0 applied first.  The
-    one-layer all-``Y`` case is the base family; anything else composes
-    rotations, which makes the local amplitudes complex as soon as ``X`` or
-    ``Z`` appears, since only ``Y`` keeps the single-qubit matrices real.
-    Sampling and ratio queries are inherited unchanged.
+    ``angles`` is ``(n_conditions, n_layers, n_qubits)`` and ``axes`` the
+    static ``(n_layers, n_qubits)`` rotation labels, with layer 0 applied
+    first.  A single all-``Y`` layer is the plain ``RY`` product state;
+    anything else composes rotations, which makes the local amplitudes complex
+    as soon as ``X`` or ``Z`` appears, since only ``Y`` keeps the single-qubit
+    matrices real.  Sampling and ratio queries are inherited unchanged.
     """
 
     axes: tuple[tuple[str, ...], ...] = ()
@@ -335,3 +465,6 @@ def angle_encoder(
         amp_one=jnp.asarray(amp_one),
         axes=normalized,
     )
+
+
+register_encoder(ANGLE, angle_encoder)

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import numpy as np
 
-import iqp_cond as iqc
+import iqp_cond as ciqp
 
 N_QUBITS = 12
 TRAINING_CONDITIONS = (0.0, 0.25, 0.5, 0.75, 1.0)
@@ -47,17 +47,17 @@ def main() -> None:
     # The encoder owns "condition -> angle"; the campaign broadcasts one angle
     # to every qubit, alpha(c) = pi (0.35 - 0.70 c).
     angles = np.repeat((np.pi * (0.35 - 0.70 * conditions))[:, None], N_QUBITS, axis=1)
-    model = iqc.ConditionalModel(
-        iqc.complete_ansatz(N_QUBITS),
-        iqc.encoder(iqc.PRODUCT, angles),
+    model = ciqp.ConditionalModel(
+        ciqp.complete_ansatz(N_QUBITS),
+        ciqp.angle_encoder(angles[:, None, :], axes=("Y" * N_QUBITS,)),
     )
 
-    result = iqc.train(
+    result = ciqp.train(
         model,
         training,
         validation,
         seed=0,
-        config=iqc.TrainingConfig(
+        config=ciqp.TrainingConfig(
             steps=200,
             batch_size=100,
             n_ops=64,

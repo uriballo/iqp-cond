@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .ancilla import ancilla_support
+from .core import ancilla_support
 
 __all__ = [
     "parameters_from_data",

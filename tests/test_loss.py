@@ -18,7 +18,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-import iqp_cond as iqc
+import iqp_cond as ciqp
 from iqp_cond.loss import hamming_rbf
 from iqp_cond.operators import (
     OperatorBank,
@@ -27,6 +27,13 @@ from iqp_cond.operators import (
     operator_bank,
     sample_nonidentity_masks,
 )
+
+
+def y_layer(angles: np.ndarray) -> ciqp.AngleEncoder:
+    """One ``RY`` layer per qubit: the plain product-state encoding."""
+    angles = np.asarray(angles)
+    return ciqp.angle_encoder(angles[:, None, :], axes=("Y" * angles.shape[1],))
+
 
 FIXTURES = Path(__file__).parent / "fixtures" / "golden.npz"
 SIGMAS = (1.0, 2.0, 4.0)
@@ -73,12 +80,12 @@ def test_mmd_reproduces_the_campaign_value(
     golden: dict[str, np.ndarray],
 ) -> None:
     label = "bank_plain"
-    ansatz = iqc.complete_ansatz(N_VISIBLE)
-    encoders = iqc.encoder(iqc.PRODUCT, golden[f"{label}_angles"])
+    ansatz = ciqp.complete_ansatz(N_VISIBLE)
+    encoders = y_layer(golden[f"{label}_angles"])
     bank = rebuild_bank(golden, label)
     key = jax.random.wrap_key_data(np.asarray(golden[f"{label}_key"]))
 
-    result = iqc.mmd(
+    result = ciqp.mmd(
         golden[f"{label}_params"],
         ansatz.generators,
         encoders,
@@ -94,12 +101,12 @@ def test_mmd_reproduces_the_campaign_value(
 
 def test_mmd_rejects_a_mismatched_bank() -> None:
     rng = np.random.default_rng(0)
-    ansatz = iqc.complete_ansatz(4)
-    encoders = iqc.encoder(iqc.PRODUCT, rng.uniform(0.4, 2.4, size=(2, 4)))
+    ansatz = ciqp.complete_ansatz(4)
+    encoders = y_layer(rng.uniform(0.4, 2.4, size=(2, 4)))
     targets = rng.integers(0, 2, size=(2, 16, 4)).astype(float)
     bank = operator_bank(SIGMAS, 8, 3, 4, seed=0)  # three conditions, not two
     with pytest.raises(ValueError, match="operator bank covers 3 conditions"):
-        iqc.mmd(
+        ciqp.mmd(
             np.zeros(ansatz.n_parameters),
             ansatz.generators,
             encoders,
@@ -110,7 +117,7 @@ def test_mmd_rejects_a_mismatched_bank() -> None:
         )
     wrong_width = operator_bank(SIGMAS, 8, 2, 5, seed=0)
     with pytest.raises(ValueError, match="built for 5 visible qubits"):
-        iqc.mmd(
+        ciqp.mmd(
             np.zeros(ansatz.n_parameters),
             ansatz.generators,
             encoders,
@@ -124,8 +131,8 @@ def test_mmd_rejects_a_mismatched_bank() -> None:
 def test_per_bandwidth_widths_do_not_change_the_loss() -> None:
     """Cutting a bandwidth's padding changes cost, not the estimate."""
     rng = np.random.default_rng(3)
-    ansatz = iqc.complete_ansatz(5)
-    encoders = iqc.encoder(iqc.PRODUCT, rng.uniform(0.4, 2.4, size=(2, 5)))
+    ansatz = ciqp.complete_ansatz(5)
+    encoders = y_layer(rng.uniform(0.4, 2.4, size=(2, 5)))
     targets = rng.integers(0, 2, size=(2, 32, 5)).astype(float)
     params = np.zeros(ansatz.n_parameters)
     key = jax.random.PRNGKey(4)
@@ -153,7 +160,7 @@ def test_per_bandwidth_widths_do_not_change_the_loss() -> None:
     narrower = dataclasses.replace(bank, widths=widths)
 
     wide = float(
-        iqc.mmd(
+        ciqp.mmd(
             params,
             ansatz.generators,
             encoders,
@@ -164,7 +171,7 @@ def test_per_bandwidth_widths_do_not_change_the_loss() -> None:
         ).loss,
     )
     narrow = float(
-        iqc.mmd(
+        ciqp.mmd(
             params,
             ansatz.generators,
             encoders,
@@ -180,13 +187,13 @@ def test_per_bandwidth_widths_do_not_change_the_loss() -> None:
 def test_key_masks_are_jittable_and_key_driven() -> None:
     """Fresh-mask training draws masks from the step key inside the jit."""
     rng = np.random.default_rng(11)
-    ansatz = iqc.complete_ansatz(4)
-    encoders = iqc.encoder(iqc.PRODUCT, rng.uniform(0.4, 2.4, size=(2, 4)))
+    ansatz = ciqp.complete_ansatz(4)
+    encoders = y_layer(rng.uniform(0.4, 2.4, size=(2, 4)))
     targets = rng.integers(0, 2, size=(2, 32, 4)).astype(np.float64)
     params = np.zeros(ansatz.n_parameters)
 
     def loss(key: jax.Array) -> jax.Array:
-        return iqc.mmd(
+        return ciqp.mmd(
             params,
             ansatz.generators,
             encoders,
@@ -208,11 +215,11 @@ def test_key_masks_are_jittable_and_key_driven() -> None:
 
 def test_mmd_rejects_a_mismatched_encoder() -> None:
     rng = np.random.default_rng(12)
-    ansatz = iqc.complete_ansatz(4)
-    encoders = iqc.encoder(iqc.PRODUCT, rng.uniform(0.4, 2.4, size=(3, 4)))
+    ansatz = ciqp.complete_ansatz(4)
+    encoders = y_layer(rng.uniform(0.4, 2.4, size=(3, 4)))
     targets = rng.integers(0, 2, size=(2, 16, 4)).astype(np.float64)
     with pytest.raises(ValueError, match="covers 3 conditions"):
-        iqc.mmd(
+        ciqp.mmd(
             np.zeros(ansatz.n_parameters),
             ansatz.generators,
             encoders,
@@ -227,15 +234,15 @@ def test_mmd_rejects_a_mismatched_encoder() -> None:
 def test_mmd_rejects_generator_and_params_shape_mismatches() -> None:
     """The loss reports width failures itself instead of failing in an einsum."""
     rng = np.random.default_rng(15)
-    ansatz = iqc.complete_ansatz(4)
-    encoders = iqc.encoder(iqc.PRODUCT, rng.uniform(0.4, 2.4, size=(2, 4)))
+    ansatz = ciqp.complete_ansatz(4)
+    encoders = y_layer(rng.uniform(0.4, 2.4, size=(2, 4)))
     targets = rng.integers(0, 2, size=(2, 16, 4)).astype(np.float64)
     params = np.zeros(ansatz.n_parameters)
     key = jax.random.PRNGKey(0)
 
-    narrow = iqc.encoder(iqc.PRODUCT, rng.uniform(0.4, 2.4, size=(2, 3)))
+    narrow = y_layer(rng.uniform(0.4, 2.4, size=(2, 3)))
     with pytest.raises(ValueError, match="generators cover 4"):
-        iqc.mmd(
+        ciqp.mmd(
             params,
             ansatz.generators,
             narrow,
@@ -246,7 +253,7 @@ def test_mmd_rejects_generator_and_params_shape_mismatches() -> None:
             n_samples=16,
         )
     with pytest.raises(ValueError, match="params must have shape"):
-        iqc.mmd(
+        ciqp.mmd(
             np.zeros(3),
             ansatz.generators,
             encoders,
@@ -257,7 +264,7 @@ def test_mmd_rejects_generator_and_params_shape_mismatches() -> None:
             n_samples=16,
         )
     with pytest.raises(ValueError, match="generators must have shape"):
-        iqc.mmd(
+        ciqp.mmd(
             params,
             ansatz.generators[0],
             encoders,
@@ -269,7 +276,7 @@ def test_mmd_rejects_generator_and_params_shape_mismatches() -> None:
         )
 
     def loss(current_params: jax.Array, current_generators: jax.Array) -> jax.Array:
-        return iqc.mmd(
+        return ciqp.mmd(
             current_params,
             current_generators,
             narrow,
@@ -286,13 +293,13 @@ def test_mmd_rejects_generator_and_params_shape_mismatches() -> None:
 
 def test_mmd_rejects_mixed_or_missing_mask_sources() -> None:
     rng = np.random.default_rng(13)
-    ansatz = iqc.complete_ansatz(3)
-    encoders = iqc.encoder(iqc.PRODUCT, rng.uniform(0.4, 2.4, size=(2, 3)))
+    ansatz = ciqp.complete_ansatz(3)
+    encoders = y_layer(rng.uniform(0.4, 2.4, size=(2, 3)))
     targets = rng.integers(0, 2, size=(2, 16, 3)).astype(np.float64)
     params = np.zeros(ansatz.n_parameters)
     bank = operator_bank(SIGMAS, 8, 2, 3, seed=1)
     with pytest.raises(ValueError, match="or a prebuilt bank"):
-        iqc.mmd(
+        ciqp.mmd(
             params,
             ansatz.generators,
             encoders,
@@ -301,7 +308,7 @@ def test_mmd_rejects_mixed_or_missing_mask_sources() -> None:
             n_samples=16,
         )
     with pytest.raises(ValueError, match="key mask source only"):
-        iqc.mmd(
+        ciqp.mmd(
             params,
             ansatz.generators,
             encoders,
@@ -312,7 +319,7 @@ def test_mmd_rejects_mixed_or_missing_mask_sources() -> None:
             n_samples=16,
         )
     with pytest.raises(ValueError, match="n_ops must be positive"):
-        iqc.mmd(
+        ciqp.mmd(
             params,
             ansatz.generators,
             encoders,
@@ -327,8 +334,8 @@ def test_mmd_rejects_mixed_or_missing_mask_sources() -> None:
 def test_mmd_result_survives_jit() -> None:
     """The result dataclass is a pytree, so jitted calls can return it."""
     rng = np.random.default_rng(14)
-    ansatz = iqc.complete_ansatz(3)
-    encoders = iqc.encoder(iqc.PRODUCT, rng.uniform(0.4, 2.4, size=(2, 3)))
+    ansatz = ciqp.complete_ansatz(3)
+    encoders = y_layer(rng.uniform(0.4, 2.4, size=(2, 3)))
     targets = rng.integers(0, 2, size=(2, 16, 3)).astype(np.float64)
     params = np.zeros(ansatz.n_parameters)
 
@@ -336,8 +343,8 @@ def test_mmd_result_survives_jit() -> None:
         current_params: jax.Array,
         target_batch: jax.Array,
         key: jax.Array,
-    ) -> iqc.ConditionalMMDResult:
-        return iqc.mmd(
+    ) -> ciqp.ConditionalMMDResult:
+        return ciqp.mmd(
             current_params,
             ansatz.generators,
             encoders,
@@ -382,8 +389,8 @@ def test_hamming_rbf_matches_the_character_expansion() -> None:
 def test_shared_samples_agrees_with_per_entry_sampling() -> None:
     """One reference draw per condition is unbiased for the same objective."""
     rng = np.random.default_rng(41)
-    ansatz = iqc.complete_ansatz(5)
-    encoders = iqc.encoder(iqc.PRODUCT, rng.uniform(0.4, 2.4, size=(2, 5)))
+    ansatz = ciqp.complete_ansatz(5)
+    encoders = y_layer(rng.uniform(0.4, 2.4, size=(2, 5)))
     targets = rng.integers(0, 2, size=(2, 64, 5)).astype(np.float64)
     params = rng.normal(0.0, 0.4, size=ansatz.n_parameters)
     bank = operator_bank(SIGMAS, 32, 2, 5, seed=3)
@@ -392,7 +399,7 @@ def test_shared_samples_agrees_with_per_entry_sampling() -> None:
         return np.asarray(
             [
                 float(
-                    iqc.mmd(
+                    ciqp.mmd(
                         params,
                         ansatz.generators,
                         encoders,
@@ -417,14 +424,14 @@ def test_shared_samples_agrees_with_per_entry_sampling() -> None:
 
 def test_shared_samples_keeps_the_result_shape() -> None:
     rng = np.random.default_rng(42)
-    ansatz = iqc.complete_ansatz(4)
-    encoders = iqc.encoder(iqc.PRODUCT, rng.uniform(0.4, 2.4, size=(2, 4)))
+    ansatz = ciqp.complete_ansatz(4)
+    encoders = y_layer(rng.uniform(0.4, 2.4, size=(2, 4)))
     targets = rng.integers(0, 2, size=(2, 32, 4)).astype(np.float64)
     params = np.zeros(ansatz.n_parameters)
     bank = operator_bank(SIGMAS, 16, 2, 4, seed=4)
 
-    def evaluate(shared: bool) -> iqc.ConditionalMMDResult:
-        return iqc.mmd(
+    def evaluate(shared: bool) -> ciqp.ConditionalMMDResult:
+        return ciqp.mmd(
             params,
             ansatz.generators,
             encoders,
@@ -453,28 +460,29 @@ def test_shared_samples_reuses_one_draw_per_condition_with_fresh_masks(
 ) -> None:
     """The fresh-mask path honors shared_samples: one encoder draw per condition."""
     rng = np.random.default_rng(43)
-    ansatz = iqc.complete_ansatz(3)
-    encoders = iqc.encoder(iqc.PRODUCT, rng.uniform(0.4, 2.4, size=(2, 3)))
+    ansatz = ciqp.complete_ansatz(3)
+    encoders = y_layer(rng.uniform(0.4, 2.4, size=(2, 3)))
     targets = rng.integers(0, 2, size=(2, 16, 3)).astype(np.float64)
     params = np.zeros(ansatz.n_parameters)
     calls: list[int] = []
 
-    original_sample = iqc.ProductEncoder.sample
+    encoder_class = type(encoders)
+    original_sample = encoder_class.sample
 
     def counting_sample(
-        self: iqc.ProductEncoder,
+        self: object,
         key: jax.Array,
         n_samples: int,
     ) -> jnp.ndarray:
         calls.append(1)
         return original_sample(self, key, n_samples)
 
-    monkeypatch.setattr(iqc.ProductEncoder, "sample", counting_sample)
+    monkeypatch.setattr(encoder_class, "sample", counting_sample)
 
     def evaluate(shared: bool) -> float:
         calls.clear()
         return float(
-            iqc.mmd(
+            ciqp.mmd(
                 params,
                 ansatz.generators,
                 encoders,
@@ -496,14 +504,14 @@ def test_shared_samples_reuses_one_draw_per_condition_with_fresh_masks(
 def test_sample_chunk_matches_the_monolithic_objective() -> None:
     """Streaming the sample axis changes only the summation order."""
     rng = np.random.default_rng(61)
-    ansatz = iqc.complete_ansatz(4)
-    encoders = iqc.encoder(iqc.PRODUCT, rng.uniform(0.4, 2.4, size=(2, 4)))
+    ansatz = ciqp.complete_ansatz(4)
+    encoders = y_layer(rng.uniform(0.4, 2.4, size=(2, 4)))
     targets = rng.integers(0, 2, size=(2, 64, 4)).astype(np.float64)
     params = rng.normal(0.0, 0.3, size=ansatz.n_parameters)
     bank = operator_bank(SIGMAS, 32, 2, 4, seed=12)
     key = jax.random.PRNGKey(6)
 
-    monolithic = iqc.mmd(
+    monolithic = ciqp.mmd(
         params,
         ansatz.generators,
         encoders,
@@ -513,7 +521,7 @@ def test_sample_chunk_matches_the_monolithic_objective() -> None:
         n_samples=512,
         shared_samples=True,
     )
-    chunked = iqc.mmd(
+    chunked = ciqp.mmd(
         params,
         ansatz.generators,
         encoders,
@@ -534,11 +542,11 @@ def test_sample_chunk_matches_the_monolithic_objective() -> None:
 
 def test_sample_chunk_must_be_positive() -> None:
     rng = np.random.default_rng(62)
-    ansatz = iqc.complete_ansatz(3)
-    encoders = iqc.encoder(iqc.PRODUCT, rng.uniform(0.4, 2.4, size=(2, 3)))
+    ansatz = ciqp.complete_ansatz(3)
+    encoders = y_layer(rng.uniform(0.4, 2.4, size=(2, 3)))
     targets = rng.integers(0, 2, size=(2, 16, 3)).astype(np.float64)
     with pytest.raises(ValueError, match="sample_chunk must be positive"):
-        iqc.mmd(
+        ciqp.mmd(
             np.zeros(ansatz.n_parameters),
             ansatz.generators,
             encoders,
@@ -553,14 +561,14 @@ def test_sample_chunk_must_be_positive() -> None:
 def test_mixed_precision_gemm_stays_close_to_float64() -> None:
     """The mixed-precision knob does not move the objective."""
     rng = np.random.default_rng(51)
-    ansatz = iqc.complete_ansatz(4)
-    encoders = iqc.encoder(iqc.PRODUCT, rng.uniform(0.4, 2.4, size=(2, 4)))
+    ansatz = ciqp.complete_ansatz(4)
+    encoders = y_layer(rng.uniform(0.4, 2.4, size=(2, 4)))
     targets = rng.integers(0, 2, size=(2, 64, 4)).astype(np.float64)
     params = rng.normal(0.0, 0.3, size=ansatz.n_parameters)
     bank = operator_bank(SIGMAS, 64, 2, 4, seed=9)
     key = jax.random.PRNGKey(5)
 
-    reference = iqc.mmd(
+    reference = ciqp.mmd(
         params,
         ansatz.generators,
         encoders,
@@ -569,7 +577,7 @@ def test_mixed_precision_gemm_stays_close_to_float64() -> None:
         bank=bank,
         n_samples=512,
     )
-    mixed = iqc.mmd(
+    mixed = ciqp.mmd(
         params,
         ansatz.generators,
         encoders,

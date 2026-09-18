@@ -15,8 +15,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-import iqp_cond as iqc
+import iqp_cond as ciqp
 from iqp_cond.encoders import (
+    _REGISTRY,
     ENCODERS,
     Encoder,
     ExactEncoder,
@@ -24,7 +25,6 @@ from iqp_cond.encoders import (
     register_encoder,
     select_encoder,
 )
-from iqp_cond.encoders.protocol import _REGISTRY
 
 N_QUBITS = 4
 N_CONDITIONS = 3
@@ -53,15 +53,13 @@ def masks() -> np.ndarray:
     )
 
 
-def make_encoder(family: str, angles: np.ndarray) -> iqc.Encoder:
-    """Build each registered family with angles valid for its interface."""
-    if family == "angle":
-        return iqc.encoder(
-            family,
-            np.asarray(angles)[:, None, :],
-            axes=("Y" * angles.shape[1],),
-        )
-    return iqc.encoder(family, angles)
+def make_encoder(family: str, angles: np.ndarray) -> ciqp.Encoder:
+    """Build the registered family with angles valid for its interface."""
+    assert family == ciqp.ANGLE
+    return ciqp.angle_encoder(
+        np.asarray(angles)[:, None, :],
+        axes=("Y" * angles.shape[1],),
+    )
 
 
 def test_family_satisfies_protocol(
@@ -91,7 +89,7 @@ def test_post_hadamard_state_is_normalised(family: str, angles: np.ndarray) -> N
 
 
 def expected_ratios(
-    states: iqc.Encoder,
+    states: ciqp.Encoder,
     samples: np.ndarray,
     masks: np.ndarray,
 ) -> np.ndarray:
@@ -133,10 +131,8 @@ def test_ratios_match_post_hadamard_state(
 
 def test_select_encoder_slices_built_in_pytrees() -> None:
     """A registered family is a pytree, so selection is a generic slice."""
-    encoders = iqc.encoder(
-        iqc.PRODUCT,
-        np.random.default_rng(4).uniform(0.3, 2.4, size=(N_CONDITIONS, N_QUBITS)),
-    )
+    angles = np.random.default_rng(4).uniform(0.3, 2.4, size=(N_CONDITIONS, N_QUBITS))
+    encoders = make_encoder(ciqp.ANGLE, angles)
     for condition in range(N_CONDITIONS):
         selected = select_encoder(encoders, condition)
         assert selected.n_conditions == 1
@@ -198,25 +194,12 @@ def test_select_encoder_rejects_a_plain_object() -> None:
 
 def test_unknown_family_is_rejected() -> None:
     with pytest.raises(ValueError, match="unknown encoder family"):
-        iqc.encoder("not_a_family", np.zeros((1, N_QUBITS)))
+        ciqp.encoder("not_a_family", np.zeros((1, N_QUBITS)))
 
 
 def test_only_the_core_families_are_registered() -> None:
     """The shipped registry is exactly the core conditional-IQP surface."""
-    assert available_encoders() == ("angle", "product")
-
-
-def test_the_built_in_families_are_distinct(angles: np.ndarray) -> None:
-    """A registry alias must not collapse a family onto the product state."""
-    product = np.asarray(iqc.encoder("product", angles).post_hadamard_amplitudes())
-    layered = np.asarray(
-        iqc.encoder(
-            "angle",
-            np.asarray(angles)[:, None, :],
-            axes=("X" * angles.shape[1],),
-        ).post_hadamard_amplitudes(),
-    )
-    assert not np.allclose(product, layered)
+    assert available_encoders() == ("angle",)
 
 
 def test_built_in_families_are_exact(
@@ -261,34 +244,34 @@ def test_minimal_family_needs_only_sampling_and_ratios() -> None:
 
 def test_register_encoder_refuses_to_shadow_a_builtin() -> None:
     with pytest.raises(ValueError, match="already registered"):
-        register_encoder("product", lambda angles, **_: None)
+        register_encoder(ciqp.ANGLE, lambda angles, **_: None)
 
 
 def test_register_encoder_replace_overrides() -> None:
-    original = _REGISTRY["product"]
+    original = _REGISTRY[ciqp.ANGLE]
     try:
         register_encoder(
-            "product",
+            ciqp.ANGLE,
             lambda angles, **_: UniformBits("replaced", jnp.asarray(angles)),
             replace=True,
         )
-        assert iqc.encoder("product", np.zeros((1, N_QUBITS))).name == "replaced"
+        assert ciqp.encoder(ciqp.ANGLE, np.zeros((1, N_QUBITS))).name == "replaced"
     finally:
-        _REGISTRY["product"] = original
+        _REGISTRY[ciqp.ANGLE] = original
 
 
 def test_encoder_factory_result_is_validated() -> None:
     register_encoder("test_bad_factory", lambda angles, **_: 42)
     try:
         with pytest.raises(TypeError, match="does not implement the Encoder"):
-            iqc.encoder("test_bad_factory", np.zeros((1, N_QUBITS)))
+            ciqp.encoder("test_bad_factory", np.zeros((1, N_QUBITS)))
     finally:
         _REGISTRY.pop("test_bad_factory", None)
 
 
 def test_registry_is_read_only() -> None:
     with pytest.raises(TypeError):
-        ENCODERS["product"] = lambda angles, **_: None  # type: ignore[index]
+        ENCODERS[ciqp.ANGLE] = lambda angles, **_: None  # type: ignore[index]
 
 
 @dataclass(frozen=True)
@@ -335,9 +318,9 @@ def test_custom_family_trains_through_the_public_api() -> None:
     )
     try:
         assert "test_uniform_bits" in available_encoders()
-        ansatz = iqc.complete_ansatz(3)
-        encoders = iqc.encoder("test_uniform_bits", np.zeros((2, 3)))
-        estimate = iqc.estimate_pauli_z(
+        ansatz = ciqp.complete_ansatz(3)
+        encoders = ciqp.encoder("test_uniform_bits", np.zeros((2, 3)))
+        estimate = ciqp.estimate_pauli_z(
             np.zeros(ansatz.n_parameters),
             ansatz.generators,
             encoders,
@@ -353,20 +336,23 @@ def test_custom_family_trains_through_the_public_api() -> None:
     assert "test_uniform_bits" not in available_encoders()
 
 
-def test_angle_encoder_single_y_layer_equals_the_product_encoder() -> None:
-    """The base product family is the one-layer all-Y angle encoder."""
+def test_angle_encoder_single_y_layer_matches_the_ry_formula() -> None:
+    """One all-Y layer is the plain RY product state with real amplitudes."""
     angles = np.random.default_rng(9).uniform(0.3, 2.4, size=(N_CONDITIONS, N_QUBITS))
-    product = iqc.product_encoder(angles)
-    angle = iqc.angle_encoder(angles[:, None, :], axes=("Y" * N_QUBITS,))
-    assert isinstance(angle, iqc.ProductEncoder)
-    assert angle.axes == (("Y",) * N_QUBITS,)
-    assert np.asarray(angle.amp_zero).dtype == np.float64
-    assert np.array_equal(np.asarray(angle.amp_zero), np.asarray(product.amp_zero))
-    assert np.array_equal(np.asarray(angle.amp_one), np.asarray(product.amp_one))
-    key = jax.random.PRNGKey(10)
-    assert np.array_equal(
-        np.asarray(angle.sample(key, 32)),
-        np.asarray(product.sample(key, 32)),
+    states = ciqp.angle_encoder(angles[:, None, :], axes=("Y" * N_QUBITS,))
+    cosine = np.cos(angles / 2.0)
+    sine = np.sin(angles / 2.0)
+    assert states.axes == (("Y",) * N_QUBITS,)
+    assert np.asarray(states.amp_zero).dtype == np.float64
+    assert np.allclose(
+        np.asarray(states.amp_zero),
+        (cosine + sine) / np.sqrt(2.0),
+        atol=1e-15,
+    )
+    assert np.allclose(
+        np.asarray(states.amp_one),
+        (cosine - sine) / np.sqrt(2.0),
+        atol=1e-15,
     )
 
 
@@ -378,7 +364,7 @@ def test_angle_encoder_ratios_match_post_hadamard_state() -> None:
         size=(N_CONDITIONS, 3, N_QUBITS),
     )
     axes = ("X" * N_QUBITS, "ZY" * (N_QUBITS // 2), "Y" * N_QUBITS)
-    states = iqc.angle_encoder(angles, axes)
+    states = ciqp.angle_encoder(angles, axes)
     assert np.asarray(states.amp_zero).dtype == np.complex128
     samples = np.asarray(states.sample(jax.random.PRNGKey(12), 16))
     masks = (
@@ -405,8 +391,8 @@ def test_angle_encoder_composes_layers_in_order() -> None:
         2.4,
         size=(N_CONDITIONS, 2, N_QUBITS),
     )
-    first = iqc.angle_encoder(angles, axes=("X" * N_QUBITS, "Y" * N_QUBITS))
-    swapped = iqc.angle_encoder(
+    first = ciqp.angle_encoder(angles, axes=("X" * N_QUBITS, "Y" * N_QUBITS))
+    swapped = ciqp.angle_encoder(
         angles[:, ::-1, :],
         axes=("Y" * N_QUBITS, "X" * N_QUBITS),
     )
@@ -419,26 +405,26 @@ def test_angle_encoder_composes_layers_in_order() -> None:
 def test_angle_encoder_validates_axes_and_shapes() -> None:
     angles = np.zeros((N_CONDITIONS, 2, N_QUBITS))
     with pytest.raises(ValueError, match="first rotation layer"):
-        iqc.angle_encoder(angles, axes=("Z" * N_QUBITS, "Y" * N_QUBITS))
+        ciqp.angle_encoder(angles, axes=("Z" * N_QUBITS, "Y" * N_QUBITS))
     with pytest.raises(ValueError, match="unknown rotation axis"):
-        iqc.angle_encoder(angles, axes=("W" * N_QUBITS, "Y" * N_QUBITS))
+        ciqp.angle_encoder(angles, axes=("W" * N_QUBITS, "Y" * N_QUBITS))
     with pytest.raises(ValueError, match="2 layers but angles have"):
-        iqc.angle_encoder(angles[:, :1, :], axes=("Y", "Y"))
+        ciqp.angle_encoder(angles[:, :1, :], axes=("Y", "Y"))
     with pytest.raises(ValueError, match="labels but the register"):
-        iqc.angle_encoder(angles, axes=("Y" * (N_QUBITS - 1), "Y" * N_QUBITS))
+        ciqp.angle_encoder(angles, axes=("Y" * (N_QUBITS - 1), "Y" * N_QUBITS))
     with pytest.raises(TypeError, match="sequence of layers"):
-        iqc.angle_encoder(angles, axes="Y")
+        ciqp.angle_encoder(angles, axes="Y")
     with pytest.raises(ValueError, match="shape"):
-        iqc.angle_encoder(np.zeros((N_CONDITIONS, N_QUBITS)), axes=("Y",))
+        ciqp.angle_encoder(np.zeros((N_CONDITIONS, N_QUBITS)), axes=("Y",))
     with pytest.raises(ValueError, match="angles must be real"):
-        iqc.angle_encoder(
+        ciqp.angle_encoder(
             np.zeros((N_CONDITIONS, 2, N_QUBITS), dtype=np.complex128),
             axes=("X" * N_QUBITS, "Y" * N_QUBITS),
         )
     bad = np.zeros((N_CONDITIONS, 2, N_QUBITS))
     bad[0, 0, 0] = np.inf
     with pytest.raises(ValueError, match="angles must be finite"):
-        iqc.angle_encoder(bad, axes=("X" * N_QUBITS, "Y" * N_QUBITS))
+        ciqp.angle_encoder(bad, axes=("X" * N_QUBITS, "Y" * N_QUBITS))
 
 
 def test_angle_encoder_selects_conditions_as_a_pytree() -> None:
@@ -447,7 +433,7 @@ def test_angle_encoder_selects_conditions_as_a_pytree() -> None:
         2.4,
         size=(N_CONDITIONS, 2, N_QUBITS),
     )
-    encoders = iqc.angle_encoder(angles, axes=("X" * N_QUBITS, "Z" * N_QUBITS))
+    encoders = ciqp.angle_encoder(angles, axes=("X" * N_QUBITS, "Z" * N_QUBITS))
     selected = select_encoder(encoders, 1)
     assert selected.n_conditions == 1
     assert selected.n_qubits == N_QUBITS

@@ -12,58 +12,69 @@ classically computable whenever the encoder supports two operations:
 - evaluate amplitude ratios `phi(z xor a) / phi(z)` for Fourier masks `a`.
 
 That pair is the whole modelling interface, and it is also what keeps training
-classical — the model itself is still hard to sample from in general.
+classical — the model itself is still hard to sample from in general.  For
+small registers the package can also evaluate the model distribution exactly.
 
 ## Install
 
 ```bash
-uv sync          # create .venv and install the package plus dev tools
+uv sync                      # library plus dev tools
+uv sync --extra crosscheck   # add PennyLane for the cross-check tests
 ```
 
 The project is managed with [uv](https://docs.astral.sh/uv/); `uv sync` installs
 the package in editable mode, and `uv run <command>` runs commands inside the
-environment. Python 3.11+ with JAX. Dependencies: `jax`, `jaxlib`, `numpy`,
-`optax`, `networkx`.
+environment.  Python 3.11+ with JAX; dependencies are `jax`, `numpy`, and
+`optax`.
+
+To use it from another project (private repository, access required):
+
+```bash
+uv add "iqp-cond @ git+https://github.com/uriballo/iqp-cond@v0.1.0"
+```
 
 ## Quickstart
 
 ```python
 import numpy as np
-import iqp_cond as iqc
+import iqp_cond as ciqp
 
 n_qubits, n_conditions = 8, 3
 
 # A conditional model is a shared generator bank plus an encoder.
-ansatz = iqc.complete_ansatz(n_qubits)
+ansatz = ciqp.complete_ansatz(n_qubits)
 
-# One angle per condition and qubit; the angle family below stacks layers.
+# One RY layer per condition and qubit; see "Encoders" for stacked layers.
 angles = np.broadcast_to(
     np.linspace(0.6, 2.0, n_conditions)[:, None], (n_conditions, n_qubits)
 )
-model = iqc.ConditionalModel(ansatz, iqc.encoder(iqc.PRODUCT, angles))
+model = ciqp.ConditionalModel(
+    ansatz,
+    ciqp.angle_encoder(angles[:, None, :], axes=("Y" * n_qubits,)),
+)
 
 # Bitstring samples from the target family: (conditions, samples, visible qubits).
 rng = np.random.default_rng(0)
 train_targets = rng.integers(0, 2, size=(n_conditions, 1000, n_qubits)).astype(float)
 valid_targets = rng.integers(0, 2, size=(n_conditions, 200, n_qubits)).astype(float)
 
-result = iqc.train(
+result = ciqp.train(
     model,
     train_targets,
     valid_targets,
     seed=0,
-    # Shipped defaults: 2000 updates, batch 256, 512 masks per condition and
-    # bandwidth, 1000 Monte Carlo samples, data-based initialization, and the
+    # Defaults: 2000 updates, batch 256, 512 masks per condition and bandwidth,
+    # 1000 Monte Carlo samples, pooled data-based initialization, and the
     # width-aware bodyness bandwidth schedule.  This quickstart shortens them.
-    config=iqc.TrainingConfig(steps=50, batch_size=64, n_ops=16, mc_samples=1024),
+    config=ciqp.TrainingConfig(steps=50, batch_size=64, n_ops=16, mc_samples=1024),
 )
 
 params = result.best_params  # selected on the validation split
 ```
 
 Parameters are initialized by default from the pooled training conditions with
-the IQPopt mean-covariance prescription, so training starts from the target's
-one- and two-body structure rather than noise.
+the mean-covariance prescription, so training starts from the target's one- and
+two-body structure rather than noise.
 
 ## Querying expectations
 
@@ -87,13 +98,28 @@ estimate.values  # (conditions, masks)
 Pass `samples=` instead of `key=` to evaluate a pre-drawn reference draw, and
 `return_samples=True` to materialise the per-sample values that
 `estimate.standard_errors` needs.  Inside `jax.jit`, use the free function
-`iqc.estimate_pauli_z_unchecked`, which skips validation; the loss uses it.
+`ciqp.estimate_pauli_z_unchecked`, which skips validation; the loss uses it.
+
+## Exact evaluation
+
+For registers small enough to hold the full `2**n_qubits` state, the model
+distribution is computable exactly:
+
+```python
+probabilities = ciqp.exact_probabilities(model, params)  # (conditions, 2**n_visible)
+draws = ciqp.sample_exact(model, params, 1024, seed=0)   # (conditions, samples, n_visible)
+```
+
+Both require an encoder with `post_hadamard_amplitudes`, which the built-in
+family provides, and both scale as `O(conditions * 2**n_qubits)` in time and
+memory.  `exact_probabilities` is the natural reference for total-variation
+distances; `sample_exact` draws with NumPy and is independent of the JAX keys
+used during training.
 
 ## Encoders
 
-`iqc.encoder(family, angles, **params)` takes family-specific angles (all
-built-ins but `angle` use `(n_conditions, n_qubits)`) and returns an object
-implementing three things:
+`ciqp.encoder(family, angles, **params)` returns an object implementing three
+things:
 
 - `sample(key, n_samples)` — `(conditions, samples, qubits)` bitstrings from the
   encoder's Born law `|phi(c)|^2`;
@@ -101,35 +127,31 @@ implementing three things:
   `phi(z xor a) / phi(z)`;
 - `n_conditions` and `n_qubits`.
 
-The library evaluates one condition at a time for memory, and does that with
-`iqp_cond.encoders.select_encoder`: it slices every condition-batched leaf of a
-JAX pytree, or falls back to an optional `select(condition)` method when the
-encoder is not a pytree.  The built-ins are registered as pytrees, so a custom
-family needs `select` only if it is plain Python.
-
-All built-ins also implement `post_hadamard_amplitudes` (the optional
-`ExactEncoder` capability) for exact small-system work.
-
-| Name | State | Used for |
-|---|---|---|
-| `product` | `RY(a_i)` on each qubit | translated Gaussian target |
-| `angle` | stack of fixed-axis rotations per qubit | general product conditioning |
-
-The `angle` family generalizes `product` to several layers of non-commuting
-single-qubit rotations: `iqc.encoder("angle", angles, axes=...)` takes angles of
-shape `(conditions, layers, qubits)` and one axis label (`"X"`, `"Y"`, or
+The built-in family is `angle`: a product state whose qubits carry a stack of
+fixed-axis rotations.  `ciqp.encoder("angle", angles, axes=...)` takes angles
+of shape `(conditions, layers, qubits)` and one axis label (`"X"`, `"Y"`, or
 `"Z"`) per layer and qubit, with layer 0 applied first.  A layer can be any
-sequence of labels, so `axes=("YXXY", "ZXYZ")` is valid for four qubits.  The
-first layer may not contain `Z`, because `R_Z` on `|0>` is a global phase that
-cancels from every probability and ratio, so accepting it would silently ignore
-its angle.  Local amplitudes stay real for all-`Y` sequences and become complex
-as soon as `X` or `Z` appears; sampling and ratio queries are unchanged either
-way.
+sequence of labels, so `axes=("YXXY", "ZXYZ")` is valid for four qubits; a
+single all-`Y` layer is the plain `RY` product state.
+
+The first layer may not contain `Z`, because `R_Z` on `|0>` is a global phase
+that cancels from every probability and ratio, so accepting it would silently
+ignore its angle.  Local amplitudes stay real for all-`Y` sequences and become
+complex as soon as `X` or `Z` appears; sampling and ratio queries are unchanged
+either way.
+
+The library evaluates one condition at a time for memory, and does that with
+`ciqp.encoders.select_encoder`: it slices every condition-batched leaf of a JAX
+pytree, or falls back to an optional `select(condition)` method when the
+encoder is not a pytree.  The built-in family is a pytree, so a custom family
+needs `select` only if it is plain Python.  The built-in family also implements
+`post_hadamard_amplitudes`, the optional `ExactEncoder` capability used by the
+exact evaluation above.
 
 ### Adding your own
 
 An encoder is any object with the interface above; registering it makes
-`iqc.encoder` return it.  See `examples/custom_encoder.py` for a runnable
+`ciqp.encoder` return it.  See `examples/custom_encoder.py` for a runnable
 version:
 
 ```python
@@ -157,7 +179,7 @@ class HadamardEncoder:
         return HadamardEncoder(self.angles[condition : condition + 1])
 
 
-iqc.register_encoder(
+ciqp.register_encoder(
     "hadamard", lambda angles, **_: HadamardEncoder(jnp.asarray(angles))
 )
 ```
@@ -170,29 +192,27 @@ Extra qubits are allowed and are marginalized after measurement. Qubits are
 ordered **visible first, ancillas last**; the model declares the split:
 
 ```python
-model = iqc.ConditionalModel(ansatz_on_5_qubits, encoder, n_visible=3)
+model = ciqp.ConditionalModel(ansatz_on_5_qubits, encoder, n_visible=3)
 model.n_ancillas  # 2
 ```
 
 The encoder and the generator bank cover the full register, targets keep the
 visible width only, and visible masks are padded with identity on the ancilla
 positions automatically by the estimator and the loss (or explicitly with
-`iqc.pad_visible_masks`).  `iqc.ancilla_support(generators, n_visible)` returns
-the parameter mask whose generators touch an ancilla, which is what
-`iqc.parameters_from_data` uses to leave ancilla parameters near zero.
+`ciqp.pad_visible_masks`).  `ciqp.ancilla_support(generators, n_visible)`
+returns the parameter mask whose generators touch an ancilla, which is what
+`ciqp.parameters_from_data` uses to leave ancilla parameters near zero.
 
 ## API
 
 | Module | Contents |
 |---|---|
-| `iqp_cond.ansatz` | `Ansatz`, `ansatz_from_generators`, `generators_from_graph`, `complete_ansatz` |
-| `iqp_cond.encoders` | `Encoder`, `ExactEncoder`, `encoder`, `register_encoder`, `available_encoders`, `select_encoder`, built-in families |
+| `iqp_cond.core` | `Ansatz`, `ConditionalModel`, `complete_ansatz`, `ansatz_from_generators`, `exact_probabilities`, `sample_exact`, `pad_visible_masks`, `ancilla_support` |
+| `iqp_cond.encoders` | `Encoder`, `ExactEncoder`, `AngleEncoder`, `angle_encoder`, `encoder`, `register_encoder`, `available_encoders`, `select_encoder` |
 | `iqp_cond.estimator` | `estimate_pauli_z`, `estimate_pauli_z_unchecked`, `ExpectationEstimate` |
 | `iqp_cond.loss` | `mmd`, `target_moments`, `hamming_rbf`, `ConditionalMMDResult` |
-| `iqp_cond.model` | `ConditionalModel` |
 | `iqp_cond.trainer` | `TrainingConfig`, `TrainingResult`, `train`, `STEP`, `CACHE` |
 | `iqp_cond.initialization` | `random_parameters`, `parameters_from_data` |
-| `iqp_cond.ancilla` | `pad_visible_masks`, `ancilla_support` |
 
 Advanced building blocks live in `iqp_cond.operators` (mask law, `OperatorBank`,
 `operator_bank`, `bank_from_ragged`, `sample_nonidentity_masks`,
@@ -202,43 +222,38 @@ its default bandwidths through it.
 
 ## Masks and the MMD estimator
 
-Training minimizes the paper's stochastic operator estimator of the squared
-multiscale Hamming–RBF MMD through `iqc.mmd`. The reference-state randomness
-always comes from the call's `key`; the mask source is exactly one of:
+Training minimizes the stochastic operator estimator of the squared multiscale
+Hamming–RBF MMD through `ciqp.mmd`.  The reference-state randomness always
+comes from the call's `key`; the mask source is exactly one of:
 
 - `sigmas` + `n_ops`: draw nonidentity masks afresh inside the call, one draw
-  per condition and bandwidth, the `iqpopt` cadence;
-- `bank`: evaluate a prebuilt compressed `OperatorBank`, which is the
-  evaluation and campaign-reproduction path.
+  per condition and bandwidth;
+- `bank`: evaluate a prebuilt compressed `OperatorBank`, which is the path for
+  fixed-bank evaluation and repeated scoring.
 
 A bandwidth `sigma` induces the mask law `a_i ~ Bernoulli(p_sigma)` with
 `p_sigma = (1 - e^{-1/(2 sigma^2)})/2`, so `E[|a|] = n p_sigma` is the expected
-bodyness. `iqc.expected_bodyness_sigmas(n, targets)` inverts a bodyness target
-into its bandwidth; the library default targets `(2, n/4, 0.49n)`, capped at
-`0.49n` because `p_sigma < 1/2` strictly. The trainer resolves
-`TrainingConfig.sigmas=None` through that helper once it knows the model width;
-the campaign instead targeted `1, (1+0.49n)/2, 0.49n`.
+bodyness.  `ciqp.expected_bodyness_sigmas(n, targets)` inverts a bodyness
+target into its bandwidth; the default targets are `(2, n/4, 0.49n)`, capped at
+`0.49n` because `p_sigma < 1/2` strictly.  `TrainingConfig.sigmas=None`
+resolves through that helper once the model width is known.
 
 Skipping the identity mask is exact: it contributes zero to the kernel MMD, so
 spending draws on it only adds variance.  Both mask sources accept
 `shared_samples=True`, which draws one reference sample set per condition and
-evaluates every bandwidth on it; that is the trainer's estimator form and the
-paper's.  The default resamples per (bandwidth, condition) entry.  The trainer
-redraws masks at every optimization step (`TrainingConfig.mask_refresh="step"`,
-the default) so each update's expectation equals the true kernel MMD;
-`mask_refresh="cache"` draws one bank and retains it, reproducing the published
-campaign's protocol.  Validation always uses one fixed bank, so checkpoint
-selection stays comparable across steps.
+evaluates every bandwidth on it; the default resamples per (bandwidth,
+condition) entry.  The trainer redraws masks at every optimization step
+(`TrainingConfig.mask_refresh="step"`, the default) so each update's
+expectation equals the true kernel MMD; `mask_refresh="cache"` draws one bank
+and retains it.  Validation always uses one fixed bank, so checkpoint selection
+stays comparable across steps.
 
-The shipped defaults are lighter than the campaign's: 512 masks and 1000 Monte
-Carlo samples per condition, against 2000 masks and 8192 samples (the smallest
-budget passing the campaign's preregistered estimator gates). Raise
-`n_ops`/`mc_samples` for production fidelity. At 12 visible qubits and 5
-conditions, one 2000-step fit at the campaign scale takes ~55–62 s on an idle
-32-core host, with mixed precision
-(`TrainingConfig(gemm_dtype=jnp.float32)`) another 6–16% faster. Peak memory is
-dominated by the `(samples, masks, qubits)` reduction inside the per-condition
-evaluation, so it scales roughly as
+The shipped defaults are 512 masks and 1000 Monte Carlo samples per condition.
+At 12 visible qubits and 5 conditions, one 2000-step fit with 2000 masks and
+8192 Monte Carlo samples per condition takes ~55–62 s on an idle 32-core host,
+with mixed precision (`TrainingConfig(gemm_dtype=jnp.float32)`) another 6–16%
+faster.  Peak memory is dominated by the `(samples, masks, qubits)` reduction
+inside the per-condition evaluation, so it scales roughly as
 `mc_samples × distinct_masks × n_qubits × 16` bytes.
 
 ## Precision
@@ -254,19 +269,19 @@ Two opt-in knobs cover large-budget regimes.
 - `TrainingConfig(gemm_dtype=jnp.float32)` (or `gemm_dtype` on `mmd` /
   `estimate_pauli_z`) runs only the phase contraction in float32 and casts the
   result back to float64, so the loss and gradient stay float64-precise. It is
-  the dominant lever on GPUs — the sibling `iqpopt-gpu` benchmark reports
-  15–28× for the same estimator structure — and is worth 6–16% of a full fit on
-  CPU with ~1e-7 gradient error.
-- `TrainingConfig(sample_chunk=N)` streams the reference samples in slices and
-  accumulates the per-mask moments, bounding the live ratio tensor. It pays off
-  at large sample budgets (1.1–1.24× faster at 8192+ samples) and costs a little
-  for small ones.
+  the dominant lever on GPUs — a sibling GPU benchmark of the same estimator
+  structure reports 15–28× — and is worth 6–16% of a full fit on CPU with
+  ~1e-7 gradient error.
+- `TrainingConfig(sample_chunk=N)` streams the Monte Carlo samples in slices
+  and accumulates the per-mask moments, bounding the live ratio tensor. It pays
+  off at large sample budgets (1.1–1.24× faster at 8192+ samples) and costs a
+  little for small ones.
 
 ## Examples
 
-`examples/train_gaussian.py` runs the manuscript's simplest benchmark shape end
-to end on synthetic data, and `examples/custom_encoder.py` registers a custom
-encoder and trains through the public interface. Both run from a checkout with
+`examples/train_gaussian.py` trains a conditional model on a synthetic Gaussian
+family, and `examples/custom_encoder.py` registers a custom encoder and trains
+through the public interface. Both run from a checkout with
 `uv run python examples/<name>.py`.
 
 ## Tests
@@ -277,11 +292,11 @@ uv run --extra crosscheck pytest  # include the PennyLane cross-checks
 ```
 
 `tests/test_pennylane_crosscheck.py` rebuilds the encoder states and the full
-conditional circuit in PennyLane and compares the estimator, the sampler, and
-the amplitude ratios against exact statevector results. It skips unless
-`pennylane` is installed (`uv sync --extra crosscheck`).
+conditional circuit in PennyLane and compares the estimator, the sampler, the
+amplitude ratios, and the exact model distribution against statevector results.
+It skips unless PennyLane is installed (`uv sync --extra crosscheck`).
 
 ## Status
 
-Extracted from the research repository for the conditional-IQP manuscript.
-Licence and citation metadata are pending author and institutional approval.
+Version 0.1.0, a private development release.  Licence and citation metadata are
+pending author and institutional approval.

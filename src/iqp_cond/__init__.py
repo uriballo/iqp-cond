@@ -9,9 +9,11 @@ basis sampling and amplitude-ratio queries; that requirement is the
 
 The facade is the user journey: build a :class:`ConditionalModel` from an
 :class:`Ansatz` and an :class:`Encoder`, estimate moments or the conditional
-MMD, and train.  The numerical building blocks — operator banks, mask samplers,
-and the raw conditional estimator — live in :mod:`iqp_cond.operators` and
-:mod:`iqp_cond.estimator` for advanced use.
+MMD, and train.  For registers small enough to hold the full state,
+:func:`exact_probabilities` and :func:`sample_exact` evaluate the model
+distribution without Monte Carlo.  The numerical building blocks — operator
+banks, mask samplers, and the raw conditional estimator — live in
+:mod:`iqp_cond.operators` and :mod:`iqp_cond.estimator` for advanced use.
 
 Note: importing this package enables JAX float64
 (``jax.config.update("jax_enable_x64", True)``).  The estimator, the loss, and
@@ -23,24 +25,24 @@ import jax
 
 jax.config.update("jax_enable_x64", True)
 
-from .ancilla import ancilla_support, pad_visible_masks
-from .ansatz import (
+from .core import (
     Ansatz,
+    ConditionalModel,
+    ancilla_support,
     ansatz_from_generators,
     complete_ansatz,
-    generators_from_graph,
+    exact_probabilities,
+    pad_visible_masks,
+    sample_exact,
 )
 from .encoders import (
     ANGLE,
-    PRODUCT,
     AngleEncoder,
     Encoder,
     ExactEncoder,
-    ProductEncoder,
     angle_encoder,
     available_encoders,
     encoder,
-    product_encoder,
     register_encoder,
 )
 from .estimator import (
@@ -50,14 +52,12 @@ from .estimator import (
 )
 from .initialization import parameters_from_data, random_parameters
 from .loss import ConditionalMMDResult, mmd
-from .model import ConditionalModel
 from .operators import expected_bodyness_sigmas
 from .trainer import CACHE, STEP, TrainingConfig, TrainingResult, train
 
 __all__ = [
     "ANGLE",
     "CACHE",
-    "PRODUCT",
     "STEP",
     "AngleEncoder",
     "Ansatz",
@@ -66,7 +66,6 @@ __all__ = [
     "Encoder",
     "ExactEncoder",
     "ExpectationEstimate",
-    "ProductEncoder",
     "TrainingConfig",
     "TrainingResult",
     "ancilla_support",
@@ -77,13 +76,13 @@ __all__ = [
     "encoder",
     "estimate_pauli_z",
     "estimate_pauli_z_unchecked",
+    "exact_probabilities",
     "expected_bodyness_sigmas",
-    "generators_from_graph",
     "mmd",
     "pad_visible_masks",
     "parameters_from_data",
-    "product_encoder",
     "random_parameters",
     "register_encoder",
+    "sample_exact",
     "train",
 ]

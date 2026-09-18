@@ -24,8 +24,8 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
+from .core import ConditionalModel
 from .initialization import parameters_from_data
-from .model import ConditionalModel
 from .operators import OperatorBank, expected_bodyness_sigmas, operator_bank
 
 __all__ = [

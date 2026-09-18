@@ -5,6 +5,10 @@ description = "Conditional IQP generation with classically tractable encoders."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
+authors = [
+    { name = "Oriol Balló-Gimbernat" },
+    { name = "Emiliano Tolotti" },
+]
 keywords = ["quantum machine learning", "IQP circuits", "generative models", "JAX"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -14,10 +18,8 @@ classifiers = [
 ]
 dependencies = [
     "jax>=0.10.1",
-    "jaxlib>=0.10.1",
     "numpy>=2.0",
     "optax>=0.2.8",
-    "networkx>=3.5",
 ]
 
 [project.optional-dependencies]

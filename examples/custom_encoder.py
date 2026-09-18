@@ -16,7 +16,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-import iqp_cond as iqc
+import iqp_cond as ciqp
 
 
 @dataclass(frozen=True)
@@ -49,11 +49,11 @@ class HadamardEncoder:
 
 
 def main() -> None:
-    iqc.register_encoder("hadamard", lambda angles, **_: HadamardEncoder(angles))
+    ciqp.register_encoder("hadamard", lambda angles, **_: HadamardEncoder(angles))
 
     n_qubits, n_conditions = 6, 3
-    encoders = iqc.encoder("hadamard", np.zeros((n_conditions, n_qubits)))
-    model = iqc.ConditionalModel(iqc.complete_ansatz(n_qubits), encoders)
+    encoders = ciqp.encoder("hadamard", np.zeros((n_conditions, n_qubits)))
+    model = ciqp.ConditionalModel(ciqp.complete_ansatz(n_qubits), encoders)
 
     # The trained circuit has to turn the uniform reference into a biased
     # product law whose bias moves with the condition.
@@ -64,12 +64,12 @@ def main() -> None:
     )
     validation = targets[:, :200]
 
-    result = iqc.train(
+    result = ciqp.train(
         model,
         targets,
         validation,
         seed=0,
-        config=iqc.TrainingConfig(
+        config=ciqp.TrainingConfig(
             steps=100,
             batch_size=64,
             n_ops=32,

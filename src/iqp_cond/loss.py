@@ -34,7 +34,7 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 
-from .ancilla import pad_visible_masks
+from .core import pad_visible_masks
 from .encoders import Encoder, select_encoder
 from .estimator import estimate_pauli_z_unchecked
 from .operators import OperatorBank, sample_nonidentity_masks_jax

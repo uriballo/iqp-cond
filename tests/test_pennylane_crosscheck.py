@@ -18,8 +18,15 @@ import jax
 import numpy as np
 import pytest
 
-import iqp_cond as iqc
+import iqp_cond as ciqp
 from iqp_cond.operators import mmd_operator_probability
+
+
+def y_layer(angles: np.ndarray) -> ciqp.AngleEncoder:
+    """One ``RY`` layer per qubit: the plain product-state encoding."""
+    angles = np.asarray(angles)
+    return ciqp.angle_encoder(angles[:, None, :], axes=("Y" * angles.shape[1],))
+
 
 pennylane = pytest.importorskip("pennylane")
 qml = pennylane
@@ -43,7 +50,7 @@ def angles_for(seed: int = 3) -> np.ndarray:
     return np.random.default_rng(seed).uniform(0.4, 2.2, size=(N_CONDITIONS, N_QUBITS))
 
 
-def prepare_product_encoder(angles: np.ndarray, n_qubits: int) -> None:
+def prepare_ry_layer(angles: np.ndarray, n_qubits: int) -> None:
     """State preparation for one condition, in PennyLane's wire ordering."""
     for wire, angle in enumerate(angles):
         qml.RY(float(angle), wires=wire)
@@ -73,7 +80,7 @@ def pl_state_after_first_hadamard(angles: np.ndarray, n_qubits: int) -> np.ndarr
 
     @qml.qnode(dev)
     def circuit() -> np.ndarray:
-        prepare_product_encoder(angles, n_qubits)
+        prepare_ry_layer(angles, n_qubits)
         for wire in range(n_qubits):
             qml.Hadamard(wire)
         return qml.state()
@@ -119,7 +126,7 @@ def pl_expectation(
 
     @qml.qnode(dev)
     def circuit() -> float:
-        prepare_product_encoder(angles, n_qubits)
+        prepare_ry_layer(angles, n_qubits)
         apply_iqp(params, generators, n_qubits)
         return qml.expval(observable)
 
@@ -128,7 +135,7 @@ def pl_expectation(
 
 def test_encoder_state_matches_pennylane() -> None:
     angles = angles_for()
-    encoders = iqc.encoder(iqc.PRODUCT, angles)
+    encoders = y_layer(angles)
     state = np.asarray(encoders.post_hadamard_amplitudes())
 
     for condition in range(N_CONDITIONS):
@@ -139,7 +146,7 @@ def test_encoder_state_matches_pennylane() -> None:
 
 def test_amplitude_ratios_match_pennylane() -> None:
     angles = angles_for(seed=5)
-    encoders = iqc.encoder(iqc.PRODUCT, angles)
+    encoders = y_layer(angles)
     state = np.asarray(encoders.post_hadamard_amplitudes())
     rng = np.random.default_rng(6)
     samples = np.asarray(encoders.sample(jax.random.PRNGKey(0), 32))
@@ -166,14 +173,14 @@ def test_pauli_moments_match_pennylane() -> None:
     on the same visible wires and identity elsewhere.
     """
     angles = angles_for(seed=7)
-    ansatz = iqc.complete_ansatz(N_QUBITS)
+    ansatz = ciqp.complete_ansatz(N_QUBITS)
     rng = np.random.default_rng(8)
     params = rng.normal(0.0, 0.4, size=ansatz.n_parameters)
     masks = rng.integers(0, 2, size=(6, N_VISIBLE)).astype(np.float64)
     masks[0] = [1.0, 0.0, 0.0]
-    encoders = iqc.encoder(iqc.PRODUCT, angles)
+    encoders = y_layer(angles)
 
-    estimate = iqc.estimate_pauli_z(
+    estimate = ciqp.estimate_pauli_z(
         params,
         ansatz.generators,
         encoders,
@@ -209,7 +216,7 @@ def test_reference_sampling_matches_pennylane() -> None:
     first Hadamard layer.
     """
     angles = angles_for(seed=11)
-    encoders = iqc.encoder(iqc.PRODUCT, angles)
+    encoders = y_layer(angles)
     n_samples = 100_000
 
     samples = np.asarray(encoders.sample(jax.random.PRNGKey(13), n_samples))
@@ -231,7 +238,7 @@ def test_layered_angle_encoder_state_matches_pennylane() -> None:
         2.2,
         size=(N_CONDITIONS, len(axes), N_QUBITS),
     )
-    encoders = iqc.angle_encoder(angles, axes)
+    encoders = ciqp.angle_encoder(angles, axes)
     state = np.asarray(encoders.post_hadamard_amplitudes())
 
     for condition in range(N_CONDITIONS):
@@ -251,7 +258,7 @@ def test_mmd_expectation_matches_exact_pennylane_value() -> None:
     sigma = 2.0
     n_ops, n_samples, n_keys = 32, 64, 240
     angles = angles_for(seed=17)
-    ansatz = iqc.complete_ansatz(N_QUBITS)
+    ansatz = ciqp.complete_ansatz(N_QUBITS)
     rng = np.random.default_rng(18)
     params = rng.normal(0.0, 0.4, size=ansatz.n_parameters)
     generators = np.asarray(ansatz.generators)
@@ -293,10 +300,10 @@ def test_mmd_expectation_matches_exact_pennylane_value() -> None:
         exact[condition] = np.sum(weights * (mu_q - mu_p) ** 2)
     exact_loss = float(exact.mean())
 
-    encoders = iqc.encoder(iqc.PRODUCT, angles)
+    encoders = y_layer(angles)
 
     def one_loss(key: jax.Array) -> jax.Array:
-        return iqc.mmd(
+        return ciqp.mmd(
             params,
             ansatz.generators,
             encoders,
@@ -312,3 +319,46 @@ def test_mmd_expectation_matches_exact_pennylane_value() -> None:
     )
     standard_error = losses.std(ddof=1) / np.sqrt(n_keys)
     assert abs(losses.mean() - exact_loss) < 5.0 * standard_error + 1e-9
+
+
+def pl_visible_probabilities(
+    angles: np.ndarray,
+    params: np.ndarray,
+    generators: np.ndarray,
+    n_visible: int,
+    n_qubits: int,
+) -> np.ndarray:
+    """PennyLane distribution over the visible wires after the full circuit."""
+    dev = qml.device("default.qubit", wires=n_qubits)
+
+    @qml.qnode(dev)
+    def circuit() -> np.ndarray:
+        prepare_ry_layer(angles, n_qubits)
+        apply_iqp(params, generators, n_qubits)
+        return qml.probs(wires=range(n_visible))
+
+    return np.asarray(circuit())
+
+
+def test_exact_probabilities_match_pennylane() -> None:
+    """The exact model distribution, including ancilla marginalization."""
+    angles = angles_for(seed=29)
+    ansatz = ciqp.complete_ansatz(N_QUBITS)
+    rng = np.random.default_rng(30)
+    params = rng.normal(0.0, 0.4, size=ansatz.n_parameters)
+    model = ciqp.ConditionalModel(ansatz, y_layer(angles), n_visible=N_VISIBLE)
+    probabilities = ciqp.exact_probabilities(model, params)
+
+    for condition in range(N_CONDITIONS):
+        expected = pl_visible_probabilities(
+            angles[condition],
+            params,
+            np.asarray(ansatz.generators),
+            N_VISIBLE,
+            N_QUBITS,
+        )
+        # PennyLane returns wire 0 as the most significant bit.
+        reordered = probabilities[condition][
+            reverse_bits(np.arange(2**N_VISIBLE), N_VISIBLE)
+        ]
+        assert np.allclose(reordered, expected, atol=1e-12)

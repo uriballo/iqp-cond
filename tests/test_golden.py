@@ -19,7 +19,14 @@ import jax
 import numpy as np
 import pytest
 
-import iqp_cond as iqc
+import iqp_cond as ciqp
+
+
+def y_layer(angles: np.ndarray) -> ciqp.AngleEncoder:
+    """One ``RY`` layer per qubit: the plain product-state encoding."""
+    angles = np.asarray(angles)
+    return ciqp.angle_encoder(angles[:, None, :], axes=("Y" * angles.shape[1],))
+
 
 FIXTURES = Path(__file__).parent / "fixtures" / "golden.npz"
 
@@ -50,8 +57,8 @@ def test_estimate_pauli_z_matches_research(
 ) -> None:
     prefix = "product_"
     angles = golden[prefix + "angles"]
-    encoders = iqc.encoder(iqc.PRODUCT, angles)
-    estimate = iqc.estimate_pauli_z(
+    encoders = y_layer(angles)
+    estimate = ciqp.estimate_pauli_z(
         golden[prefix + "params"],
         golden[prefix + "generators"],
         encoders,
@@ -78,7 +85,7 @@ def test_post_hadamard_amplitudes_match_research(
 ) -> None:
     prefix = "product_"
     angles = golden[prefix + "angles"]
-    encoders = iqc.encoder(iqc.PRODUCT, angles)
+    encoders = y_layer(angles)
     assert_identical(
         encoders.post_hadamard_amplitudes(),
         golden[prefix + "reference_state"],
@@ -88,7 +95,7 @@ def test_post_hadamard_amplitudes_match_research(
 
 def test_parameters_from_data_matches_research(golden: dict[str, np.ndarray]) -> None:
     assert_identical(
-        iqc.parameters_from_data(
+        ciqp.parameters_from_data(
             golden["init_data"],
             golden["init_generators"],
         ),
@@ -96,7 +103,7 @@ def test_parameters_from_data_matches_research(golden: dict[str, np.ndarray]) ->
         "init_params",
     )
     assert_identical(
-        iqc.parameters_from_data(
+        ciqp.parameters_from_data(
             golden["init_data"],
             golden["ancilla_generators"],
             n_visible=golden["init_data"].shape[1],
