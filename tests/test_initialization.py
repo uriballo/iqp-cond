@@ -51,6 +51,19 @@ def test_unsupported_rows_start_at_zero(generators: np.ndarray) -> None:
     assert params[-1] == 0.0
 
 
+def test_exactly_uncorrelated_pairs_stay_at_zero() -> None:
+    """A balanced product design has no covariance direction to scale."""
+    data = np.array([[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]])
+    generators = np.asarray(iqc.complete_ansatz(2).generators)
+    one_body = np.arcsin(np.sqrt(0.5))
+    expected = np.array([one_body, one_body, 0.0])
+    assert np.array_equal(iqc.parameters_from_data(data, generators), expected)
+    assert np.array_equal(
+        iqc.parameters_from_data(data, generators, scale=1.0),
+        expected,
+    )
+
+
 def test_ancilla_noise_is_confined_to_the_ancilla_support(
     data: np.ndarray,
 ) -> None:

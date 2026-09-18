@@ -33,7 +33,13 @@ def _data_parameters(
     rows: np.ndarray,
     scale: float | None,
 ) -> np.ndarray:
-    """One- and two-body phases from binary observations (unsupported rows zero)."""
+    """One- and two-body phases from binary observations (zero elsewhere).
+
+    The prescription normalizes by the largest observed pair covariance.  If
+    every visible pair is exactly uncorrelated there is no direction to scale,
+    so the two-body phases stay zero; the IQPopt reference divides by that zero
+    and returns NaN instead.
+    """
     n_features = data.shape[1]
     signed = 2.0 * data - 1.0
     covariance = np.cov(signed, rowvar=False, bias=True)
@@ -43,23 +49,19 @@ def _data_parameters(
     result = np.zeros(rows.shape[0], dtype=np.float64)
     means = np.mean(data, axis=0)
     has_two_body = bool(np.any(np.sum(rows, axis=1) == 2))
-    max_abs_cov = 0.0
-    if has_two_body:
-        max_abs_cov = float(np.max(np.abs(off_diagonal)))
-        if max_abs_cov == 0.0:
-            raise ValueError(
-                "covariance initialization requires nonzero off-diagonal covariance",
-            )
+    max_abs_cov = float(np.max(np.abs(off_diagonal))) if has_two_body else 0.0
+    if has_two_body and max_abs_cov > 0.0:
         if scale is None:
             cov_sq_sum = float(np.sum(off_diagonal**2))
             scale = np.sqrt(2.0 * n_features / cov_sq_sum) * max_abs_cov / np.pi
+    else:
+        scale = None
     for index, row in enumerate(rows):
         weight = int(np.sum(row))
         if weight == 1:
             result[index] = np.arcsin(np.sqrt(means[np.flatnonzero(row)[0]]))
-        elif weight == 2:
+        elif weight == 2 and scale is not None:
             left, right = np.flatnonzero(row)
-            assert scale is not None
             result[index] = covariance[left, right] * scale * np.pi / max_abs_cov
     return result
 
@@ -82,10 +84,13 @@ def parameters_from_data(
     without being exactly symmetric.
 
     One-body rows use ``arcsin(sqrt(mean))``.  For two-body rows, the
-    covariance of the ``{-1,+1}`` representation is scaled by ``pi`` and by
-    ``scale / max_abs_cov``.  With ``scale=None`` the IQPopt heuristic
-    ``sqrt(2*n_features/sum(cov**2))*max_abs_cov/pi`` is used.  Rows of other
-    weights are deterministically initialized to zero.
+    population covariance (``bias=True``) of the ``{-1,+1}`` representation is
+    scaled by ``pi`` and by ``scale / max_abs_cov``.  With ``scale=None`` the
+    IQPopt heuristic ``sqrt(2*n_features/sum(cov**2))*max_abs_cov/pi`` is used.
+    Rows of other weights are deterministically initialized to zero, and so are
+    two-body rows when every visible pair covariance is exactly zero: the
+    prescription has no observed direction to scale, which is the limit the
+    IQPopt reference leaves undefined.
     """
     values = np.asarray(data)
     rows = np.asarray(generators)
