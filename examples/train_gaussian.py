@@ -1,9 +1,10 @@
 """End-to-end conditional training and sampling on a synthetic Gaussian family.
 
-A translated discrete Gaussian over Hamming weight, a broadcast product-state
-encoder, and a short training run; the trained model is then sampled exactly
-(the register is small enough) and compared with the targets.  Sample counts
-are small so the script runs in seconds.
+The example draws a translated discrete Gaussian over Hamming weight, builds a
+broadcast product-state encoder, and runs a short training job.  It then
+samples the trained model exactly, because the register is small enough, and
+compares the samples with the targets.  Sample counts are small so the script
+runs in seconds.
 
     uv run python examples/train_gaussian.py
 """
@@ -51,8 +52,8 @@ def main() -> None:
     training = np.stack([gaussian_samples(rng, c, N_TRAIN) for c in conditions])
     validation = np.stack([gaussian_samples(rng, c, N_VALIDATION) for c in conditions])
 
-    # The encoder owns "condition -> angle": one angle per condition,
-    # alpha(c) = pi (0.35 - 0.70 c), broadcast to every qubit.
+    # Each condition maps to one angle, alpha(c) = pi (0.35 - 0.70 c),
+    # broadcast to every qubit.
     angles = np.repeat((np.pi * (0.35 - 0.70 * conditions))[:, None], N_QUBITS, axis=1)
     model = ciqp.ConditionalModel(
         ciqp.complete_ansatz(N_QUBITS),
@@ -100,7 +101,7 @@ def main() -> None:
         for index in range(conditions.size)
     ]
     print(f"exact samples {draws.shape}, mean profile TVD {np.mean(profile_tvds):.3f}")
-    print("raise steps, n_ops, and mc_samples to tighten the fit")
+    print("Increase steps, n_ops, and mc_samples to tighten the fit.")
 
 
 if __name__ == "__main__":

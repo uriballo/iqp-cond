@@ -12,10 +12,11 @@ three capabilities:
     Describe how ``|phi(c)>`` is prepared as single-qubit rotations, so the
     model can be compiled to a circuit and sampled on a simulator or backend.
 
-The first two are the whole classical-tractability requirement for training and
-keep the trainer independent of any circuit simulator.  The third is required
-at registration time and used only by :mod:`iqp_cond.simulation`.  Encoders are
-looked up by name and can be added without touching this package::
+The first two operations make training classically tractable and keep the
+trainer independent of any circuit simulator.  The third is required at
+registration time and used only by :mod:`iqp_cond.simulation`.  The registry
+looks up encoders by name, so you can add a family without editing this
+module::
 
     import iqp_cond as ciqp
 
@@ -24,7 +25,7 @@ looked up by name and can be added without touching this package::
 
 The built-in family is :class:`AngleEncoder`, a product state built from any
 number of fixed-axis single-qubit rotation layers.  Implementations are batched
-over conditions: ``angles`` always carries a leading condition axis, and every
+over conditions.  ``angles`` always has a leading condition axis, and every
 method keeps that axis, because the estimator samples all conditions from a
 single random key.  Exact small-system work needs a further capability,
 ``post_hadamard_amplitudes``, declared separately by :class:`ExactEncoder`.
@@ -80,11 +81,11 @@ class Encoder(Protocol):
     """A condition-parameterised encoder evaluated over a batch of conditions.
 
     Shapes are ``C`` conditions, ``S`` samples, ``R`` masks, ``n`` qubits.
-    The library evaluates one condition at a time for memory; it does that with
+    To save memory, the library evaluates one condition at a time through
     :func:`select_encoder`, which slices every condition-batched leaf of a JAX
-    pytree or falls back to an optional ``select`` method.  Families therefore
-    either register as pytrees or implement ``select``; nothing else about them
-    is required.
+    pytree or uses an optional ``select`` method.  Families therefore either
+    register as pytrees or implement ``select``; nothing else about them is
+    required.
     """
 
     @property
@@ -122,7 +123,7 @@ class CircuitEncoder(Encoder, Protocol):
     without reference to any simulator.  :mod:`iqp_cond.simulation` compiles
     those operations plus the shared diagonal into a PennyLane circuit, so any
     registered family can be sampled on a classical simulator or a backend.
-    Registered families are validated against this protocol.
+    The :func:`encoder` factory validates every result against this protocol.
     """
 
     def preparation_ops(self, condition: int) -> tuple[Operation, ...]:
@@ -193,9 +194,9 @@ def available_encoders() -> tuple[str, ...]:
 def encoder(family: str, angles: jnp.ndarray, **params: object) -> Encoder:
     """Build the encoder of ``family`` for every supplied condition.
 
-    The factory's result is checked against the :class:`Encoder` protocol, so a
-    mistyped plugin fails here instead of silently returning something the
-    estimator cannot use.
+    The function checks the factory's result against the :class:`CircuitEncoder`
+    protocol, so a mistyped plugin fails here instead of silently returning
+    something the estimator cannot use.
     """
     if family not in _REGISTRY:
         raise ValueError(
@@ -224,9 +225,9 @@ def _local_amplitudes(
 
     Writing ``c = cos(a/2)`` and ``s = sin(a/2)`` the state is
     ``(c + s)/sqrt(2) |0> + (c - s)/sqrt(2) |1>``.  The amplitudes are real, so
-    they are returned in float64: the ratio query then runs on real arithmetic,
-    which halves the memory traffic of its ``(samples, masks, qubits)``
-    intermediate.
+    the function returns them in float64.  The ratio query then runs on real
+    arithmetic, which halves the memory traffic of its
+    ``(samples, masks, qubits)`` intermediate.
     """
     angles = jnp.asarray(angles, dtype=jnp.float64)
     cosine = jnp.cos(angles / 2.0)
@@ -236,9 +237,10 @@ def _local_amplitudes(
     pre_zero = cosine * zero - sine * one
     pre_one = sine * zero + cosine * one
     scale = jnp.sqrt(jnp.asarray(2.0, dtype=jnp.float64))
-    # XLA divides complex by real differently from real by real (reciprocal
-    # multiply), so the components are extracted from the complex expression
-    # the regression fixtures pin rather than recomputed in real arithmetic.
+    # XLA divides complex by real differently from real by real, a reciprocal
+    # multiply, so the code extracts the components from the complex expression
+    # the regression fixtures pin rather than recomputing them in real
+    # arithmetic.
     return (
         jnp.real((pre_zero + pre_one) / scale),
         jnp.real((pre_zero - pre_one) / scale),
@@ -253,9 +255,9 @@ def _normalize_axes(
     """Return ``axes`` as a validated ``(n_layers, n_qubits)`` tuple.
 
     A layer may be any sequence of labels, so ``("YYY", ("X", "Y", "X"))`` is
-    valid for three qubits.  The first layer must not contain ``Z``: ``R_Z``
-    on ``|0>`` is a global phase, which cancels from every probability and
-    ratio, so accepting it would silently ignore its angle.
+    valid for three qubits.  The first layer must not contain ``Z``, because
+    ``R_Z`` on ``|0>`` is a global phase, which cancels from every probability
+    and ratio, so accepting it would silently ignore its angle.
     """
     if isinstance(axes, str):
         raise TypeError(
@@ -297,9 +299,9 @@ def layered_amplitudes(
 
     ``angles`` is ``(n_conditions, n_layers, n_qubits)`` and ``axes`` the
     matching rotation labels, layer 0 applied first.  The amplitudes are real
-    when every layer is ``Y`` (including the one-layer case, which defers to
-    the pinned ``RY`` expression) and complex whenever an ``X`` or ``Z``
-    rotation is present.
+    when every layer is ``Y``, including the one-layer case, which uses the
+    pinned ``RY`` expression, and complex whenever an ``X`` or ``Z`` rotation
+    is present.
     """
     values = jnp.asarray(angles, dtype=jnp.float64)
     if values.ndim != 3:
@@ -352,10 +354,10 @@ def layered_amplitudes(
 class ProductEncoder:
     """Batched product-state encoder with per-qubit local amplitudes.
 
-    The one-layer ``RY`` base of :class:`AngleEncoder`: subclasses store the
-    condition-batched local amplitudes and inherit sampling, ratio queries, and
-    the exact state expansion.  Registered as a JAX pytree so
-    :func:`select_encoder` can slice it to one condition.
+    This is the one-layer ``RY`` base of :class:`AngleEncoder`.  Subclasses
+    store the condition-batched local amplitudes and inherit sampling, ratio
+    queries, and the exact state expansion.  The class registers as a JAX
+    pytree so :func:`select_encoder` can slice it to one condition.
     """
 
     name: str
@@ -430,13 +432,14 @@ class AngleEncoder(ProductEncoder):
     first.  A single all-``Y`` layer is the plain ``RY`` product state;
     anything else composes rotations, which makes the local amplitudes complex
     as soon as ``X`` or ``Z`` appears, since only ``Y`` keeps the single-qubit
-    matrices real.  Sampling and ratio queries are inherited unchanged.
+    matrices real.  The class inherits sampling and ratio queries unchanged.
     """
 
     axes: tuple[tuple[str, ...], ...] = ()
 
     def __post_init__(self) -> None:
-        # Static checks only: JAX rebuilds this dataclass while tracing.
+        # Check only static properties. JAX rebuilds this dataclass while
+        # tracing.
         if self.angles.ndim != 3:
             raise ValueError(
                 "angles must have shape (n_conditions, n_layers, n_qubits)",
@@ -486,9 +489,9 @@ def angle_encoder(
     layer 0 applied first.  A layer may be any sequence of labels, so
     ``("Y" * n, ("X", "Z") * (n // 2))`` is valid.
 
-    The first layer must not contain ``Z``: ``R_Z`` on ``|0>`` is a global
-    phase, which cancels from probabilities and ratios, so accepting it would
-    silently ignore its angle.  Later ``Z`` layers are allowed; all-``Y``
+    The first layer must not contain ``Z``, because ``R_Z`` on ``|0>`` is a
+    global phase, which cancels from probabilities and ratios, so accepting it
+    would silently ignore its angle.  Later ``Z`` layers are allowed; all-``Y``
     sequences keep the real-amplitude path.
     """
     if np.iscomplexobj(angles):

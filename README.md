@@ -2,20 +2,21 @@
 
 Conditional generation with instantaneous quantum polynomial-time circuits.
 
-A conditional IQP model applies **one shared diagonal unitary** to a
-**condition-dependent input state**: the learned circuit never changes with the
-condition, only the state that feeds it. Training uses sampled Pauli-character
-estimates of a multiscale Hamming-RBF maximum mean discrepancy, which is
-classically computable whenever the encoder supports two operations:
+A conditional IQP model applies one shared diagonal unitary to a
+condition-dependent input state. The condition changes only the state; the
+learned circuit stays fixed. Training uses sampled Pauli-character estimates of
+a multiscale Hamming-RBF maximum mean discrepancy, which is classically
+computable whenever the encoder supports two operations:
 
 - draw bitstrings from its own Born distribution, and
 - evaluate amplitude ratios `phi(z xor a) / phi(z)` for Fourier masks `a`.
 
-That pair is the whole training interface, and it is also what keeps training
-classical — the model itself is still hard to sample from in general.  Sampled
-evaluation of the trained model goes through PennyLane: registered encoders also
-describe their preparation as single-qubit rotations, so the same model runs on
-a classical simulator or a quantum backend without touching the training code.
+Training needs only those two operations, and they are what keeps training
+classical; the model itself is still hard to sample from in general.  Sampled
+evaluation of the trained model goes through PennyLane.  Registered encoders
+also describe their preparation as single-qubit rotations, so the same model
+runs on a classical simulator or a quantum backend without changes to the
+training code.
 
 ## Install
 
@@ -25,8 +26,8 @@ uv sync   # library plus dev tools
 
 The project is managed with [uv](https://docs.astral.sh/uv/); `uv sync` installs
 the package in editable mode, and `uv run <command>` runs commands inside the
-environment.  Python 3.11+ with JAX; dependencies are `jax`, `numpy`, `optax`,
-and `pennylane` (which installs `pennylane-lightning`).
+environment.  The package requires Python 3.11+ and depends on `jax`, `numpy`,
+`optax`, and `pennylane` (which installs `pennylane-lightning`).
 
 To use it from another project (private repository, access required):
 
@@ -73,15 +74,15 @@ result = ciqp.train(
 params = result.best_params  # selected on the validation split
 ```
 
-Parameters are initialized by default from the pooled training conditions with
-the mean-covariance prescription, so training starts from the target's one- and
-two-body structure rather than noise.
+By default the trainer initializes parameters from the pooled training
+conditions with the mean-covariance prescription, matching the target's one- and
+two-body structure instead of noise.
 
 ## Querying expectations
 
 At inference only the encoder state changes with the condition; the learned
-diagonal stays fixed.  Visible-width masks are padded with identity on the
-ancillas automatically.
+diagonal stays fixed.  The estimator pads visible-width masks with identity on
+the ancillas automatically.
 
 ```python
 import jax
@@ -97,16 +98,16 @@ estimate.values  # (conditions, masks)
 ```
 
 Pass `samples=` instead of `key=` to evaluate a pre-drawn reference draw, and
-`return_samples=True` to materialise the per-sample values that
+`return_samples=True` to produce the per-sample values that
 `estimate.standard_errors` needs.  Inside `jax.jit`, use the free function
 `ciqp.estimate_pauli_z_unchecked`, which skips validation; the loss uses it.
 
 ## Sampling and backends
 
-Training never touches PennyLane; sampling the trained model does.  The model is
-compiled into a PennyLane circuit — encoder preparation, `H^n`, the shared
-diagonal as `MultiRZ` per generator, `H^n` — and evaluated on the device you
-choose:
+Training does not use PennyLane.  Sampling the trained model compiles it into a
+PennyLane circuit that runs the encoder preparation, `H^n`, the shared diagonal
+as `MultiRZ` per generator, and a second `H^n`, then evaluates it on the device
+you choose:
 
 ```python
 import pennylane as qml
@@ -138,21 +139,22 @@ same circuit.
 `ciqp.encoder(family, angles, **params)` returns an object implementing the
 three operations of the `CircuitEncoder` interface:
 
-- `sample(key, n_samples)` — `(conditions, samples, qubits)` bitstrings from the
+- `sample(key, n_samples)`: `(conditions, samples, qubits)` bitstrings from the
   encoder's Born law `|phi(c)|^2`;
-- `amplitude_ratios(samples, masks)` — `(conditions, samples, masks)` ratios
+- `amplitude_ratios(samples, masks)`: `(conditions, samples, masks)` ratios
   `phi(z xor a) / phi(z)`;
-- `preparation_ops(condition)` — `(gate, wires, parameters)` rotations that
+- `preparation_ops(condition)`: `(gate, wires, parameters)` rotations that
   prepare `|phi(c)>`, used only by `ciqp.simulation`.
 
-The first two are all training needs and never touch PennyLane.  Registered
-families are validated against the full `CircuitEncoder` protocol, so anything
-you can train you can also sample.  `n_conditions` and `n_qubits` complete the
-interface.
+Training needs only the first two operations.  `ciqp.encoder` validates the
+built object against the full `CircuitEncoder` protocol, so any encoder it
+returns supports both training and sampling.  The interface also exposes
+`n_conditions` and `n_qubits`.
 
-The built-in family is `angle`: a product state whose qubits carry a stack of
-fixed-axis rotations.  `ciqp.encoder("angle", angles, axes=...)` takes angles
-of shape `(conditions, layers, qubits)` and one axis label (`"X"`, `"Y"`, or
+The built-in family is `angle`.  It is a product state with a stack of
+fixed-axis rotations per qubit.  `ciqp.encoder("angle", angles, axes=...)` takes
+angles of shape `(conditions, layers, qubits)` and one axis label (`"X"`, `"Y"`,
+or
 `"Z"`) per layer and qubit, with layer 0 applied first.  A layer can be any
 sequence of labels, so `axes=("YXXY", "ZXYZ")` is valid for four qubits; a
 single all-`Y` layer is the plain `RY` product state.
@@ -160,12 +162,12 @@ single all-`Y` layer is the plain `RY` product state.
 The first layer may not contain `Z`, because `R_Z` on `|0>` is a global phase
 that cancels from every probability and ratio, so accepting it would silently
 ignore its angle.  Local amplitudes stay real for all-`Y` sequences and become
-complex as soon as `X` or `Z` appears; sampling and ratio queries are unchanged
-either way.
+complex as soon as `X` or `Z` appears; sampling and ratio queries behave the
+same either way.
 
-The library evaluates one condition at a time for memory, and does that with
-`ciqp.encoders.select_encoder`: it slices every condition-batched leaf of a JAX
-pytree, or falls back to an optional `select(condition)` method when the
+To save memory, the library evaluates one condition at a time through
+`ciqp.encoders.select_encoder`.  That function slices every condition-batched
+leaf of a JAX pytree, or uses the optional `select(condition)` method when the
 encoder is not a pytree.  The built-in family is a pytree, so a custom family
 needs `select` only if it is plain Python.  The built-in family also implements
 `post_hadamard_amplitudes`, the optional `ExactEncoder` capability used by the
@@ -215,8 +217,8 @@ Registering a name that already exists raises unless `replace=True`.
 
 ## Ancillas
 
-Extra qubits are allowed and are marginalized after measurement. Qubits are
-ordered **visible first, ancillas last**; the model declares the split:
+The model allows extra qubits and marginalizes them after measurement.  Qubits
+are ordered visible first, ancillas last, and the model declares the split:
 
 ```python
 model = ciqp.ConditionalModel(ansatz_on_5_qubits, encoder, n_visible=3)
@@ -224,10 +226,10 @@ model.n_ancillas  # 2
 ```
 
 The encoder and the generator bank cover the full register, targets keep the
-visible width only, and visible masks are padded with identity on the ancilla
-positions automatically by the estimator and the loss (or explicitly with
-`ciqp.pad_visible_masks`).  `ciqp.ancilla_support(generators, n_visible)`
-returns the parameter mask whose generators touch an ancilla, which is what
+visible width only, and the estimator and the loss pad visible masks with
+identity on the ancilla positions automatically.  Call
+`ciqp.pad_visible_masks` to pad them yourself.  `ciqp.ancilla_support(generators,
+n_visible)` returns the parameter mask whose generators act on an ancilla, which
 `ciqp.parameters_from_data` uses to leave ancilla parameters near zero.
 
 ## API
@@ -242,11 +244,12 @@ returns the parameter mask whose generators touch an ancilla, which is what
 | `iqp_cond.trainer` | `TrainingConfig`, `TrainingResult`, `train`, `STEP`, `CACHE` |
 | `iqp_cond.initialization` | `random_parameters`, `parameters_from_data` |
 
-Advanced building blocks live in `iqp_cond.operators` (mask law, `OperatorBank`,
-`operator_bank`, `bank_from_ragged`, `sample_nonidentity_masks`,
-`sample_nonidentity_masks_jax`, `mmd_operator_probability`); only
-`expected_bodyness_sigmas` is re-exported, because `TrainingConfig` resolves
-its default bandwidths through it.
+The advanced building blocks are in `iqp_cond.operators` (mask law,
+`OperatorBank`, `operator_bank`, `bank_from_ragged`,
+`sample_nonidentity_masks`, `sample_nonidentity_masks_jax`,
+`mmd_operator_probability`).  The package re-exports only
+`expected_bodyness_sigmas`, because `TrainingConfig` resolves its default
+bandwidths through it.
 
 ## Masks and the MMD estimator
 
@@ -266,7 +269,7 @@ target into its bandwidth; the default targets are `(2, n/4, 0.49n)`, capped at
 `0.49n` because `p_sigma < 1/2` strictly.  `TrainingConfig.sigmas=None`
 resolves through that helper once the model width is known.
 
-Skipping the identity mask is exact: it contributes zero to the kernel MMD, so
+Skipping the identity mask is exact.  It contributes zero to the kernel MMD, so
 spending draws on it only adds variance.  Both mask sources accept
 `shared_samples=True`, which draws one reference sample set per condition and
 evaluates every bandwidth on it; the default resamples per (bandwidth,
@@ -277,33 +280,32 @@ and retains it.  Validation always uses one fixed bank, so checkpoint selection
 stays comparable across steps.
 
 The shipped defaults are 512 masks and 1000 Monte Carlo samples per condition.
-At 12 visible qubits and 5 conditions, one 2000-step fit with 2000 masks and
-8192 Monte Carlo samples per condition takes ~55–62 s on an idle 32-core host,
-with mixed precision (`TrainingConfig(gemm_dtype=jnp.float32)`) another 6–16%
-faster.  Peak memory is dominated by the `(samples, masks, qubits)` reduction
-inside the per-condition evaluation, so it scales roughly as
+At 12 visible qubits and 5 conditions, a 2000-step fit with 2000 masks and
+8192 Monte Carlo samples per condition takes ~55–62 s on an idle 32-core host.
+Mixed precision (`TrainingConfig(gemm_dtype=jnp.float32)`) is another 6–16%
+faster.  Peak memory comes from the `(samples, masks, qubits)` reduction inside
+the per-condition evaluation, so it scales roughly as
 `mc_samples × distinct_masks × n_qubits × 16` bytes.
 
 ## Precision
 
 Importing `iqp_cond` enables JAX float64
 (`jax.config.update("jax_enable_x64", True)`). The estimator, the loss, and the
-trainer assume it: the Monte Carlo settings were chosen for float64, and
-disabling it silently changes the numbers. Set it yourself if you import JAX
-before this package.
+trainer assume float64, and the Monte Carlo settings depend on it; disabling it
+silently changes the numbers. Set it yourself if you import JAX before this
+package.
 
-Two opt-in knobs cover large-budget regimes.
+Two opt-in settings cover large-budget regimes.
 
 - `TrainingConfig(gemm_dtype=jnp.float32)` (or `gemm_dtype` on `mmd` /
   `estimate_pauli_z`) runs only the phase contraction in float32 and casts the
-  result back to float64, so the loss and gradient stay float64-precise. It is
-  the dominant lever on GPUs — a sibling GPU benchmark of the same estimator
-  structure reports 15–28× — and is worth 6–16% of a full fit on CPU with
-  ~1e-7 gradient error.
+  result back to float64, so the loss and gradient stay float64-precise. It
+  gives the largest speedup on GPUs, and on CPU it saves 6–16% of a full fit
+  with ~1e-7 gradient error.
 - `TrainingConfig(sample_chunk=N)` streams the Monte Carlo samples in slices
-  and accumulates the per-mask moments, bounding the live ratio tensor. It pays
-  off at large sample budgets (1.1–1.24× faster at 8192+ samples) and costs a
-  little for small ones.
+  and accumulates the per-mask moments, bounding the live ratio tensor. It is
+  faster at large sample budgets (1.1–1.24× at 8192+ samples) and slightly
+  slower for small ones.
 
 ## Examples
 

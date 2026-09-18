@@ -5,26 +5,26 @@ expansion, so the squared MMD is a weighted sum over Fourier masks whose
 probability under each bandwidth is Bernoulli with
 ``p = (1 - exp(-1/(2 sigma^2))) / 2``.  The loss averages over conditions and
 bandwidths, uses the unbiased ``(B-1)`` normalization for both target and model
-moments, and consumes only quantities the encoder makes classically computable:
-sampled masks, sampled bitstrings, and amplitude ratios.
+moments, and needs only the quantities the encoder makes classically
+computable: sampled masks, sampled bitstrings, and amplitude ratios.
 
 :func:`mmd` is the single objective; its masks come from exactly one of two
 sources, which differ in cost and statistics, not in target:
 
 ``key``
     Draw nonidentity masks afresh, one draw per condition and bandwidth, exactly
-    as ``iqpopt`` redraws its observables every call.  No host loop, but no
-    duplicate compression either, so at equal draw budgets it evaluates more
-    mask columns.
+    as ``iqpopt`` redraws its observables every call.  This path has no host
+    loop, but it does not compress duplicates either, so at equal draw budgets
+    it evaluates more mask columns.
 ``bank``
-    Consume a prebuilt compressed
-    :class:`~iqp_cond.operators.OperatorBank` (duplicates collapsed to
-    multiplicities).  This is the evaluation and campaign-reproduction path, and
-    the one the golden fixtures pin.
+    Evaluate a prebuilt compressed
+    :class:`~iqp_cond.operators.OperatorBank` with duplicates collapsed to
+    multiplicities.  This is the evaluation and paper-reproduction path, and the
+    one the golden fixtures pin.
 
-Both skip the identity mask exactly: it contributes zero to the kernel MMD, so
-spending draws on it only adds variance.  Mask law, samplers, and banks live in
-:mod:`iqp_cond.operators`.
+Both sources skip the identity mask exactly.  It contributes zero to the kernel
+MMD, so spending draws on it only adds variance.  Mask law, samplers, and banks
+are in :mod:`iqp_cond.operators`.
 """
 
 from __future__ import annotations
@@ -99,11 +99,11 @@ def _validate_loss_inputs(
     encoders: Encoder,
     n_samples: int,
 ) -> int:
-    """Shared shape checks; returns the number of target (visible) qubits.
+    """Shared shape checks; returns the number of target visible qubits.
 
-    Only static properties are inspected, so the checks stay valid while the
-    trainer traces ``mmd`` under ``jax.jit``.  They mirror the checked
-    estimator's messages, because the loss itself must call the unchecked
+    The function inspects only static properties, so the checks stay valid
+    while the trainer traces ``mmd`` under ``jax.jit``.  The messages mirror
+    the checked estimator's, because the loss itself must call the unchecked
     kernel.
     """
     if targets.ndim != 3:
@@ -150,7 +150,8 @@ def _condition_value(
 
     ``target_condition`` has shape ``(1, n_targets, n_visible)`` and
     ``visible_masks`` ``(n_masks, n_visible)``; the U-statistic corrections for
-    both the model and target terms are the paper's finite-sample estimator.
+    both the model and target terms come from the paper's finite-sample
+    estimator.
     ``sample_chunk`` streams the sample axis and accumulates the per-mask
     moments, bounding the live ``(samples, masks, qubits)`` ratio tensor.
     """
@@ -219,11 +220,12 @@ def mmd(
     ``key`` always supplies the reference-state randomness.  Pass ``sigmas``
     and ``n_ops`` to draw fresh nonidentity masks from that key, or pass
     ``bank`` to evaluate a prebuilt compressed bank instead; the two mask
-    sources are exclusive.  One condition is evaluated at a time, so the
-    sample/mask buffer covers a single condition instead of the whole batch.
+    sources are exclusive.  The function evaluates one condition at a time, so
+    the sample/mask buffer covers a single condition instead of the whole
+    batch.
 
     With ``shared_samples=True`` each condition draws one reference sample set
-    and evaluates every bandwidth's masks on it, whichever mask source is used;
+    and evaluates every bandwidth's masks on it, regardless of the mask source;
     this is the paper's estimator form and avoids resampling once per
     bandwidth.  The default resamples per (bandwidth, condition) entry.
     """
@@ -278,7 +280,7 @@ def mmd(
     assert sigmas is not None and n_ops is not None
     n_bandwidths = len(sigmas)
     if shared_samples:
-        # The paper's estimator form: one reference draw per condition serves
+        # The paper's estimator form. One reference draw per condition covers
         # every bandwidth's masks.
         keys = jax.random.split(key, n_bandwidths * n_conditions + n_conditions)
         mask_keys = keys[: n_bandwidths * n_conditions]

@@ -1,10 +1,10 @@
 """Mask law, samplers, and compressed operator banks.
 
-The NumPy sampler is pinned against the campaign implementation (the same
-generator state must produce the same draws), the JAX sampler is checked against
-the analytic conditional Bernoulli law, and the bank is checked for the
-properties training relies on: inert padding, static shapes, per-bandwidth
-widths, and pytree registration.
+The tests pin the NumPy sampler against the campaign implementation, so the
+same generator state must produce the same draws.  They check the JAX sampler
+against the analytic conditional Bernoulli law, and the bank for the properties
+training relies on: inert padding, static shapes, per-bandwidth widths, and
+pytree registration.
 """
 
 from __future__ import annotations
@@ -202,10 +202,11 @@ def test_compressed_bank_shrinks_the_mask_set() -> None:
 
 
 def test_operator_bank_evaluates_each_bandwidth_at_its_own_width() -> None:
-    """A bandwidth whose law cannot reach many masks must not pay the widest one.
+    """A bandwidth whose law cannot reach many masks must not widen the bank.
 
     The three default bandwidths differ by ~5x in how many distinct masks their
-    Bernoulli law reaches, so one width for the whole bank is most of the cost.
+    Bernoulli law reaches, so one width for the whole bank carries most of the
+    cost.
     """
     bank = operator_bank(SIGMAS, 128, 2, 6, seed=11)
     assert bank.widths[0] > bank.widths[-1]

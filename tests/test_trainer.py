@@ -1,4 +1,4 @@
-"""Training behaviour: the loop must reduce held-out MMD and respect shapes."""
+"""The training loop must reduce the held-out MMD and respect shapes."""
 
 from __future__ import annotations
 

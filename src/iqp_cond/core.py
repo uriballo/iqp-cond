@@ -40,9 +40,9 @@ __all__ = [
 def _validated_generators(generators: jnp.ndarray | np.ndarray) -> jnp.ndarray:
     """Return binary generator rows as float64, or raise.
 
-    The diagonal phase is defined for bitmasks only: the estimator reads rows
+    The diagonal phase is defined for bitmasks only.  The estimator reads rows
     modulo two, so a non-binary row would silently describe a different
-    generator.  Construction is therefore the place to reject it.
+    generator.  The constructor therefore rejects it.
     """
     rows = np.asarray(generators)
     if rows.ndim != 2 or rows.shape[0] < 1 or rows.shape[1] < 1:
@@ -106,7 +106,7 @@ def ancilla_support(
     generators: jnp.ndarray | np.ndarray,
     n_visible: int,
 ) -> np.ndarray:
-    """Return the parameter mask whose generators touch an ancilla qubit.
+    """Return the parameter mask whose generators act on an ancilla qubit.
 
     Under the visible-first ordering this is the set of parameters that have no
     data-based initialization and receive seeded noise instead; pass it to

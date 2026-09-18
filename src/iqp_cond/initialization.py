@@ -1,10 +1,9 @@
 """Parameter initialization in the IQPopt convention.
 
-One-body phases come from the observed marginals, two-body phases from the
-observed covariance; both are classical statistics of the training sample, so
-the model starts from the target's single- and two-body structure instead of
-noise.  Unsupported rows start at zero.  Ancilla-supported parameters have no
-data to learn from, so they start from small seeded noise instead.
+The one-body phases come from the observed marginals and the two-body phases
+from the observed covariance; both are classical statistics of the training
+sample.  Unsupported rows are set to zero.  Ancilla-supported parameters have
+no data to learn from, so they are initialized from small seeded noise instead.
 """
 
 from __future__ import annotations
@@ -36,9 +35,9 @@ def _data_parameters(
     """One- and two-body phases from binary observations (zero elsewhere).
 
     The prescription normalizes by the largest observed pair covariance.  If
-    every visible pair is exactly uncorrelated there is no direction to scale,
-    so the two-body phases stay zero; the IQPopt reference divides by that zero
-    and returns NaN instead.
+    every visible pair is exactly uncorrelated, no pair covariance is nonzero
+    to normalize by, so the two-body phases stay zero; the IQPopt reference
+    divides by that zero and returns NaN instead.
     """
     n_features = data.shape[1]
     signed = 2.0 * data - 1.0
@@ -79,18 +78,19 @@ def parameters_from_data(
     ``data`` carries only visible-qubit observations, one column per visible
     qubit; ``n_visible`` says how many of the generator columns those are, and
     defaults to the data width.  When the generator bank is wider than the
-    data, the remaining columns are ancillas: their parameters are drawn from a
-    seeded Gaussian of width ``0.01/sqrt(P)`` so ancilla blocks start near zero
-    without being exactly symmetric.
+    data, the remaining columns are ancillas, and the function draws their
+    parameters from a seeded Gaussian of width ``0.01/sqrt(P)`` so ancilla
+    blocks start near zero without being exactly symmetric.
 
-    One-body rows use ``arcsin(sqrt(mean))``.  For two-body rows, the
-    population covariance (``bias=True``) of the ``{-1,+1}`` representation is
-    scaled by ``pi`` and by ``scale / max_abs_cov``.  With ``scale=None`` the
-    IQPopt heuristic ``sqrt(2*n_features/sum(cov**2))*max_abs_cov/pi`` is used.
-    Rows of other weights are deterministically initialized to zero, and so are
-    two-body rows when every visible pair covariance is exactly zero: the
-    prescription has no observed direction to scale, which is the limit the
-    IQPopt reference leaves undefined.
+    One-body rows use ``arcsin(sqrt(mean))``.  For two-body rows, the function
+    scales the population covariance, with ``bias=True``, of the ``{-1,+1}``
+    representation by ``pi`` and by ``scale / max_abs_cov``.  With
+    ``scale=None`` it uses the IQPopt heuristic
+    ``sqrt(2*n_features/sum(cov**2))*max_abs_cov/pi``.  Rows of other weights
+    are deterministically initialized to zero, and so are two-body rows when
+    every visible pair covariance is exactly zero, because the prescription has
+    no observed covariance to scale by.  That is the limit the IQPopt reference
+    leaves undefined.
     """
     values = np.asarray(data)
     rows = np.asarray(generators)

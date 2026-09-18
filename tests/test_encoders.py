@@ -1,8 +1,8 @@
 """The encoder contract: what any family must satisfy to be trainable.
 
-Each registered family is checked against the defining identity of its own
-interface — the ratio query must equal ``phi(z xor a) / phi(z)`` computed from
-the full post-Hadamard state — rather than against the code path that produced
+The tests check each registered family against the defining identity of its own
+interface: the ratio query must equal ``phi(z xor a) / phi(z)`` computed from
+the full post-Hadamard state, rather than against the code path that produced
 it.  A custom family registered from outside the package must train too.
 """
 
@@ -200,7 +200,7 @@ def test_unknown_family_is_rejected() -> None:
 
 
 def test_only_the_core_families_are_registered() -> None:
-    """The shipped registry is exactly the core conditional-IQP surface."""
+    """The shipped registry is exactly the core conditional-IQP API."""
     assert available_encoders() == ("angle",)
 
 

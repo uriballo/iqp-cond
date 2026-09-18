@@ -1,4 +1,4 @@
-"""Data-based initialization: what the parameters are pinned to."""
+"""Data-based initialization and the exact parameter values it assigns."""
 
 from __future__ import annotations
 

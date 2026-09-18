@@ -1,24 +1,25 @@
 """Conditional IQP generation with classically tractable encoders.
 
 A conditional IQP model applies one shared diagonal unitary to a
-condition-dependent input state, so conditioning never touches the learned
+condition-dependent input state, so the condition never changes the learned
 circuit.  Training uses sampled Pauli-character estimates of a multiscale
 Hamming-RBF MMD, which is computable classically whenever the encoder supports
 basis sampling and amplitude-ratio queries; that requirement is the
 :mod:`iqp_cond.encoders` interface.
 
-The facade is the user journey: build a :class:`ConditionalModel` from an
-:class:`Ansatz` and an :class:`Encoder`, estimate moments or the conditional
+The public API covers the full workflow: build a :class:`ConditionalModel` from
+an :class:`Ansatz` and an :class:`Encoder`, estimate moments or the conditional
 MMD, and train.  For registers small enough to hold the full state,
-:func:`exact_probabilities` and :func:`sample_exact` evaluate the model
-distribution without Monte Carlo.  The numerical building blocks — operator
-banks, mask samplers, and the raw conditional estimator — live in
-:mod:`iqp_cond.operators` and :mod:`iqp_cond.estimator` for advanced use.
+:func:`iqp_cond.simulation.probabilities` evaluates the model distribution
+exactly and :func:`iqp_cond.simulation.sample_model` draws samples from it, both
+through PennyLane.  The numerical building blocks are in
+:mod:`iqp_cond.operators` and :mod:`iqp_cond.estimator`: operator banks, mask
+samplers, and the raw conditional estimator.
 
-Note: importing this package enables JAX float64
+Importing this package enables JAX float64
 (``jax.config.update("jax_enable_x64", True)``).  The estimator, the loss, and
-the trainer assume float64 throughout, so this must be set before JAX arrays are
-created.  Disable it only if you know the precision change is acceptable.
+the trainer assume float64 throughout, so enable it before you create JAX
+arrays.  Disable it only if you know the precision change is acceptable.
 """
 
 import jax

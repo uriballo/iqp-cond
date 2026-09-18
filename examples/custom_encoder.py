@@ -1,10 +1,10 @@
 """Register a custom encoder and train through the public interface.
 
-The encoder here is the simplest useful one: its post-Hadamard state is
+The encoder here is the simplest useful one.  Its post-Hadamard state is
 ``|+>^n``, so sampling is uniform bits and every amplitude ratio is one.  It
-needs the three interface operations (sampling, amplitude ratios, and the
-circuit representation) plus ``select`` (it is not a JAX pytree), and the
-estimator, loss, trainer, and simulation bridge consume it unchanged.
+needs the three interface operations: sampling, amplitude ratios, and the
+circuit representation.  It also needs ``select``, because it is not a JAX
+pytree.  The estimator, loss, trainer, and simulation bridge use it unchanged.
 
     uv run python examples/custom_encoder.py
 """
@@ -60,8 +60,8 @@ def main() -> None:
     encoders = ciqp.encoder("hadamard", np.zeros((n_conditions, n_qubits)))
     model = ciqp.ConditionalModel(ciqp.complete_ansatz(n_qubits), encoders)
 
-    # The trained circuit has to turn the uniform reference into a biased
-    # product law whose bias moves with the condition.
+    # Training must map the uniform reference to a biased product law whose
+    # bias depends on the condition.
     rng = np.random.default_rng(0)
     probabilities = (0.2 + 0.3 * np.arange(n_conditions))[:, None, None]
     targets = (rng.uniform(size=(n_conditions, 1000, n_qubits)) < probabilities).astype(

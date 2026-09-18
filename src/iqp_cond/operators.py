@@ -2,15 +2,15 @@
 
 The Hamming-RBF kernel has a product character expansion, so its squared MMD is
 a weighted sum over Pauli masks whose law under bandwidth ``sigma`` is Bernoulli
-with ``p = (1 - exp(-1/(2 sigma^2))) / 2``.  Training needs to draw those masks —
-in NumPy when building a bank once, in JAX when refreshing inside a compiled
-step — and to collapse duplicate draws exactly, because a repeated mask is a
-bit-identical column that costs compute and adds no information.
+with ``p = (1 - exp(-1/(2 sigma^2))) / 2``.  Training draws those masks in NumPy
+when it builds a bank once and in JAX when it refreshes the bank inside a
+compiled step.  It must also collapse duplicate draws exactly, because a
+repeated mask is a bit-identical column that wastes compute.
 
-Mask draws are conditioned on ``mask != 0``: the identity contributes exactly
-zero to the kernel MMD, so spending budget on it only adds variance.  The
-remaining mass ``1 - (1 - p)**n`` is folded into the returned weights, and
-duplicates are represented once with their exact empirical multiplicity.
+Mask draws exclude the identity mask.  The identity contributes exactly zero to
+the kernel MMD, so spending budget on it only adds variance.  The sampler folds
+the remaining mass ``1 - (1 - p)**n`` into the returned weights, and it
+represents each duplicate once with its exact empirical multiplicity.
 """
 
 from __future__ import annotations
@@ -49,9 +49,8 @@ def expected_bodyness_sigmas(
 
     No bandwidth reaches ``K = n/2``, because ``p_sigma < 1/2`` strictly;
     equality holds only in the degenerate ``sigma -> 0`` limit.  Every target
-    is therefore capped at ``0.49 n``, the campaign's convention for staying
-    inside that boundary, which matters for narrow registers where ``2`` would
-    otherwise exceed ``n/2``.
+    is therefore capped at ``0.49 n``.  The cap matters for narrow registers
+    where ``2`` would otherwise exceed ``n/2``.
     """
     if n_visible < 1:
         raise ValueError("n_visible must be positive")
@@ -79,7 +78,7 @@ def _mask_probability(sigma: float) -> float:
     The public :func:`mmd_operator_probability` goes through JAX, whose dispatch
     costs ~0.04 ms per call; the bank path calls it several times per build, so
     it uses the scalar version instead.  The pinned NumPy sampler keeps the JAX
-    expression so its draws stay identical to the campaign fixtures.
+    expression so its draws stay identical to the pinned test fixtures.
     """
     return (1.0 - math.exp(-1.0 / (2.0 * sigma * sigma))) / 2.0
 
@@ -92,11 +91,11 @@ def sample_nonidentity_masks_jax(
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Draw ``n_ops`` nonidentity masks from the Hamming-RBF mask law, in JAX.
 
-    The draw is exact and loop-free: the Hamming weight is sampled from
-    ``Binomial(n, p)`` conditioned on ``k >= 1`` by inverse CDF, and a
-    uniformly random ``k``-subset is produced from one order statistic of
-    ``n`` uniforms.  Shapes are static, so the sampler is safe inside a jitted
-    training step and masks refresh with the step key.
+    The draw is exact and loop-free.  The sampler draws the Hamming weight from
+    ``Binomial(n, p)`` conditioned on ``k >= 1`` by inverse CDF, and it builds a
+    uniformly random ``k``-subset from one order statistic of ``n`` uniforms.
+    Shapes are static, so the sampler is safe inside a jitted training step and
+    the trainer can redraw masks with the step key.
 
     Returns ``(masks, weights)`` with ``masks`` of shape ``(n_ops, n_visible)``
     and constant weights summing to the nonidentity mass ``1 - (1 - p)**n``,
@@ -133,12 +132,14 @@ def sample_nonidentity_masks(
     """Draw ``n_ops`` nonidentity masks and return them compressed with weights.
 
     The identity mask has exactly zero population-MMD contribution, so drawing
-    from ``q(mask | mask != 0)`` costs only the analytic factor
-    ``1 - q(0)``; that factor is folded into the returned weights.  Duplicate
-    masks are represented once with their exact empirical multiplicity, which
-    reproduces the unweighted mean exactly while evaluating far fewer masks.
+    from ``q(mask | mask != 0)`` only rescales by the analytic factor
+    ``1 - q(0)``; the sampler folds that factor into the returned weights.  It
+    represents duplicate masks once with their exact empirical multiplicity,
+    which reproduces the unweighted mean exactly while evaluating far fewer
+    masks.
 
-    Runs outside any JIT: rejection sampling needs a concrete NumPy generator.
+    This function runs outside any JIT, because rejection sampling needs a
+    concrete NumPy generator.
     """
     if n_ops < 1 or n_qubits < 1 or sigma <= 0.0:
         raise ValueError("n_ops, n_qubits, and sigma must be positive")
@@ -199,7 +200,7 @@ def _sample_nonidentity_codes(
     powers = 1 << np.arange(n_qubits, dtype=np.int64)
     # 32-bit integer ranks: the order statistic only needs a total order, and a
     # tie is a 2**-32 event, so the subset law is unchanged.  Draws and sorts
-    # run for every condition at once, which measured ~1.7x faster than float64
+    # run for every condition at once; this measured ~1.7x faster than float64
     # uniforms drawn per condition.
     weights = np.searchsorted(cdf, rng.random((n_conditions, n_ops)), side="right") + 1
     ranks = rng.integers(
@@ -248,20 +249,20 @@ class OperatorBank:
     ``masks`` has shape ``(n_bandwidths, n_conditions, n_masks, n_visible)`` and
     ``weights`` the matching ``(n_bandwidths, n_conditions, n_masks)``; each
     weight is ``q_nonidentity * count / n_ops``, so one entry's weights sum to the
-    nonidentity mass.  Rows past an entry's distinct-mask count are padding — a
-    zero mask with a zero weight, which contributes nothing to the weighted sum.
+    nonidentity mass.  Rows past an entry's distinct-mask count are padding, a
+    zero mask with a zero weight that contributes nothing to the weighted sum.
 
-    Padding exists so bank shape is static.  A bank that is refreshed during
-    training is passed into the compiled step as an argument rather than closed
-    over, and a change of shape would force a recompilation; the bank is
-    registered as a pytree for the same reason.  Build one from ragged per-entry
-    arrays with :func:`bank_from_ragged`.
+    The class pads every entry so the bank shape is static.  The trainer passes
+    a refreshed bank into the compiled step as an argument rather than closing
+    over it, because a change of shape would force a recompilation.  The module
+    registers the bank as a pytree for the same reason.  Build one from ragged
+    per-entry arrays with :func:`bank_from_ragged`.
 
-    ``widths`` gives the mask-axis width *evaluated* for each bandwidth; it is
-    what keeps bandwidths with small effective support (large sigma) from paying
-    the width of the widest one.  An empty tuple means every bandwidth is
-    evaluated at the full padded ``n_masks``, which is what a bank built from
-    ragged arrays does.
+    ``widths`` gives the mask-axis width *evaluated* for each bandwidth, so a
+    bandwidth with large sigma and small effective support does not evaluate the
+    width of the widest one.  An empty tuple means every bandwidth is evaluated
+    at the full padded ``n_masks``, which is what :func:`bank_from_ragged`
+    produces.
     """
 
     sigmas: tuple[float, ...]
@@ -273,8 +274,8 @@ class OperatorBank:
     widths: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
-        # Static checks only: JAX reconstructs this dataclass while tracing a
-        # bank argument, where any Python-level value test would fail.
+        # Check only static properties. JAX reconstructs this dataclass while
+        # tracing a bank argument, where any Python-level value test would fail.
         if self.masks.ndim != 4 or self.weights.ndim != 3:
             raise ValueError(
                 "masks must be (n_bandwidths, n_conditions, n_masks, n_visible) "
@@ -313,8 +314,9 @@ class OperatorBank:
     def entry(self, bandwidth: int, condition: int) -> tuple[jnp.ndarray, jnp.ndarray]:
         """Return ``(masks, weights)`` for one bandwidth and condition, padded.
 
-        The entry is cut to its bandwidth's width, so entries whose law cannot
-        reach many masks are not charged for the widest bandwidth's columns.
+        The method cuts the entry to its bandwidth's width, so an entry whose
+        law cannot reach many masks does not evaluate the widest bandwidth's
+        columns.
         """
         width = self.width(bandwidth)
         return (
@@ -434,8 +436,8 @@ def _draw_batched(
             n_conditions,
         )
         groups, unique_codes, counts = _compress_codes(codes, n_visible)
-        # Keys are sorted, so the groups are nondecreasing: slice each
-        # condition out with one search over the boundaries instead of a
+        # Keys are sorted, so the groups are nondecreasing. The code slices
+        # each condition out with one search over the boundaries instead of a
         # boolean pass per condition.
         bounds = np.searchsorted(groups, np.arange(n_conditions + 1))
         row = []
@@ -444,7 +446,7 @@ def _draw_batched(
             condition_codes = unique_codes[lo:hi]
             condition_counts = counts[lo:hi]
             if cap is not None and condition_codes.shape[0] > cap:
-                # Rare with calibrated caps: redraw this entry only.
+                # This is rare with calibrated caps, so redraw this entry only.
                 entry = None
                 for _ in range(max_attempts):
                     masks, weights = sample_nonidentity_masks(
@@ -527,19 +529,19 @@ def operator_bank(
 ) -> OperatorBank:
     """Draw a compressed operator bank for every (bandwidth, condition).
 
-    ``n_ops`` is the number of nonidentity draws per entry.  Entries are padded
-    to the largest distinct count present, or to ``max_masks`` when given — pass
-    a fixed width when the bank will be handed to a compiled step as an
-    argument, so that refreshed banks keep one shape.  With ``max_masks`` set, an
-    entry that draws more distinct masks than that is redrawn, so the result
-    never depends on truncation.
+    ``n_ops`` is the number of nonidentity draws per entry.  The function pads
+    entries to the largest distinct count present, or to ``max_masks`` when
+    given.  Pass a fixed width when the trainer will hand the bank to a compiled
+    step as an argument, so that refreshed banks keep one shape.  With
+    ``max_masks`` set, an entry that draws more distinct masks than that is
+    redrawn, so the result never depends on truncation.
 
     Each bandwidth is evaluated at its own width, the largest distinct count its
     own entries reached, so a bandwidth whose mask law cannot reach many masks
-    does not pay for the widest one.  ``max_masks`` may therefore be one width
-    for every bandwidth (an int) or one per bandwidth (a sequence) — the latter
-    keeps a refreshed bank's *per-bandwidth* widths fixed while each bandwidth
-    stays as narrow as its own law allows.
+    does not evaluate the widest one's columns.  ``max_masks`` may therefore be
+    one width for every bandwidth, an int, or one per bandwidth, a sequence.
+    The per-bandwidth form keeps a refreshed bank's *per-bandwidth* widths fixed
+    while each bandwidth stays as narrow as its own law allows.
     """
     if not sigmas:
         raise ValueError("sigmas must not be empty")
@@ -588,13 +590,13 @@ def operator_bank(
 
     natural = tuple(max(entry[0].shape[0] for entry in row) for row in drawn)
     if max_masks is None:
-        # Each bandwidth is evaluated at the width its own law reached.
+        # The bank evaluates each bandwidth at the width its own law reached.
         widths = natural
     elif per_bandwidth:
-        # A fixed width per bandwidth: refreshed banks keep every shape.
+        # The per-bandwidth caps keep every refreshed bank shape unchanged.
         widths = caps  # type: ignore[assignment]
     else:
-        # One width for the whole bank (the pre-existing contract).
+        # The int form gives one width for the whole bank.
         widths = (int(max_masks),) * len(sigmas)  # type: ignore[arg-type]
     n_masks = max(widths)
     return _assemble_bank(sigmas, drawn, n_ops, n_visible, n_masks, widths)

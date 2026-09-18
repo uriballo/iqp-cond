@@ -1,17 +1,17 @@
 """Training loop for shared conditional IQP models.
 
-One parameter vector serves every condition; only the encoder state changes
-with the condition.  Updates are condition-balanced (each condition contributes
-the same number of samples per step) and checkpoints are selected on a held-out
-validation split by the same MMD objective.
+The model uses one parameter vector for every condition; only the encoder state
+changes with the condition.  Updates are condition-balanced, each condition
+contributing the same number of samples per step, and the trainer selects
+checkpoints on a held-out validation split by the same MMD objective.
 
-Masks refresh like ``iqpopt``: unless ``mask_refresh="cache"`` is requested,
-every optimization step draws a fresh compressed, nonidentity mask bank and
-hands it to the compiled step as an argument.  Building the bank on the host
-rather than in JAX is deliberate: the in-JAX sampler cannot collapse duplicates
-cheaply, so at equal draw budgets it evaluates more mask columns.  Validation
-always consumes one fixed bank, so checkpoint scores stay comparable across
-steps.
+The trainer refreshes masks as in ``iqpopt``.  Unless
+``mask_refresh="cache"`` is requested, every optimization step draws a fresh
+compressed, nonidentity mask bank and passes it to the compiled step as an
+argument.  The trainer builds the bank on the host rather than in JAX on
+purpose, because the in-JAX sampler cannot collapse duplicates cheaply and so
+evaluates more mask columns at equal draw budgets.  Validation always uses one
+fixed bank, so checkpoint scores stay comparable across steps.
 """
 
 from __future__ import annotations
@@ -39,10 +39,10 @@ __all__ = [
 STEP = "step"
 CACHE = "cache"
 
-#: Headroom over the pilot distinct-mask count when fixing a refreshed bank's
-#: width.  Distinct counts concentrate across banks, so this margin makes a
-#: redraw (which conditions the entry on ``distinct <= width``) rare, while every
-#: step still pays only the columns the law realistically reaches.
+#: Extra width over the pilot distinct-mask count when fixing a refreshed bank's
+#: width.  Distinct counts concentrate across banks, so this margin keeps a
+#: redraw rare.  A redraw conditions the entry on ``distinct <= width``, and
+#: every step still evaluates only the columns the law realistically reaches.
 _BANK_HEADROOM = 1.15
 _BANK_MARGIN = 2
 
@@ -54,28 +54,29 @@ class TrainingConfig:
     The defaults follow the paper's protocol where the library can: 2000
     updates, batches of 256 per condition, initialization from the pooled
     training data by the mean-covariance prescription, checkpoints every 25
-    steps by validation MMD, and a width-aware bandwidth schedule
-    (``sigmas=None`` resolves through :meth:`resolved_sigmas` to the bodyness
-    targets ``(2, n/4, 0.49 n)``).  The mask and Monte Carlo budgets are
-    lighter than the campaign's so that default runs finish quickly:
-    ``n_ops``/``validation_n_ops`` default to 512 (campaign: 2000 masks), and
-    ``mc_samples``/``validation_mc_samples`` to 1000 (campaign: 8192 reference
-    draws, the smallest calibrated budget passing the estimator gates).  Raise
-    them for production fidelity.  The campaign also retained one mask bank per
-    fit (``mask_refresh="cache"``) instead of redrawing every step.
+    steps by validation MMD, and a width-aware bandwidth schedule, with
+    ``sigmas=None`` resolving through :meth:`resolved_sigmas` to the bodyness
+    targets ``(2, n/4, 0.49 n)``.  The mask and Monte Carlo budgets are
+    lighter than the paper's so that default runs finish quickly:
+    ``n_ops``/``validation_n_ops`` default to 512 where the paper used 2000
+    masks, and ``mc_samples``/``validation_mc_samples`` to 1000 where the paper
+    used 8192 reference draws, the smallest calibrated budget passing the
+    estimator gates.  Raise them for production fidelity.  The paper also
+    retained one mask bank per fit, the ``mask_refresh="cache"`` setting,
+    instead of redrawing every step.
 
-    ``n_ops`` and ``validation_n_ops`` are the number of nonidentity operator
+    ``n_ops`` and ``validation_n_ops`` give the number of nonidentity operator
     draws per condition and bandwidth that feed the compressed operator banks.
-    Under the default per-step refresh a training bank is built before every
-    update; the validation bank is drawn once.
+    Under the default per-step refresh the trainer builds a training bank
+    before every update and draws the validation bank once.
 
-    ``gemm_dtype`` runs the phase contraction in a reduced dtype (for example
-    ``jnp.float32``) and casts the result back to float64, which is the mixed
-    precision mode that pays off on GPUs; the reductions stay float64.
+    ``gemm_dtype`` runs the phase contraction in a reduced dtype such as
+    ``jnp.float32`` and casts the result back to float64, which is the mixed
+    precision mode that helps on GPUs; the reductions stay float64.
 
     ``sample_chunk`` streams the Monte Carlo samples in slices, bounding the live
-    ``(samples, masks, qubits)`` ratio tensor.  It pays off at large sample
-    budgets and costs a little for small ones, so it is off by default.
+    ``(samples, masks, qubits)`` ratio tensor.  It is faster at large sample
+    budgets and slightly slower for small ones, so it is off by default.
     """
 
     steps: int = 2_000
@@ -232,11 +233,11 @@ def train(
     """Train one shared conditional model with fixed validation randomness.
 
     ``config.mask_refresh`` selects how the training masks are drawn:
-    ``"step"`` (default) draws a fresh bank inside every compiled step from a
-    per-step key, so each update's expectation equals the true kernel MMD;
+    ``"step"``, the default, draws a fresh bank inside every compiled step from
+    a per-step key, so each update's expectation equals the true kernel MMD;
     ``"cache"`` draws one compressed NumPy bank and retains it, which
-    reproduces the published campaign's mask protocol.  Every update uses the
-    paper's estimator form either way: one reference draw per condition is
+    reproduces the mask protocol of the paper.  Every update uses the
+    paper's estimator form either way, with one reference draw per condition
     shared by all masks and bandwidths.
 
     Without ``initial_params`` the parameters start from the paper's
@@ -283,9 +284,9 @@ def train(
     )
     random_key = jax.random.PRNGKey(seed)
 
-    # One width per bandwidth for every refreshed bank, so the compiled step is
-    # built once.  The pilot draw sizes each width; the margin keeps a redraw
-    # (which conditions the entry on ``distinct <= width``) rare.
+    # One width per bandwidth for every refreshed bank, so the trainer compiles
+    # the step once.  The pilot draw sizes each width.  The margin keeps a
+    # redraw rare; a redraw conditions the entry on ``distinct <= width``.
     max_masks: tuple[int, ...] | None = None
     if config.mask_refresh == STEP:
         max_masks = _refreshed_widths(sigmas, config, model, seed)
@@ -391,8 +392,8 @@ def train(
         )
         params = optax.apply_updates(params, updates)
         train_steps.append(step + 1)
-        # Defer the device sync: no ``float(loss)`` here, so next step's host
-        # bank build overlaps with the running device program.
+        # Defer the device sync. There is no ``float(loss)`` here, so the host
+        # bank build for the next step overlaps with the running device program.
         train_losses.append(loss)
 
         completed_step = step + 1

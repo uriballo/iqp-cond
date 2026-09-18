@@ -1,22 +1,23 @@
 """Independent cross-check of the conditional IQP model against PennyLane.
 
-PennyLane is not a package dependency; these tests skip when it is absent.  They
-rebuild the encoder state and the full conditional circuit from scratch with
+PennyLane is a package dependency, so these tests always run.  They rebuild the
+encoder state and the full conditional circuit from scratch with
 ``default.qubit`` and compare the exact statevector expectations against the
-library's classically computable estimator, so a shared convention bug cannot
-hide behind the library's own exact path.
+library's classically computable estimator.  The reference comes from PennyLane
+rather than from the library's own exact path, so a shared convention bug cannot
+pass unnoticed.
 
-Wire order differs: PennyLane returns states with wire 0 as the most significant
-bit, the library is little-endian.  State comparisons bit-reverse the index;
-expectation comparisons build PennyLane observables on the same wires and are
-order-independent.
+Wire order differs.  PennyLane returns states with wire 0 as the most significant
+bit, and the library is little-endian.  State comparisons bit-reverse the index;
+expectation comparisons build PennyLane observables on the same wires and do not
+depend on the order.
 """
 
 from __future__ import annotations
 
 import jax
 import numpy as np
-import pytest
+import pennylane as qml
 
 import iqp_cond as ciqp
 from iqp_cond.operators import mmd_operator_probability
@@ -27,9 +28,6 @@ def y_layer(angles: np.ndarray) -> ciqp.AngleEncoder:
     angles = np.asarray(angles)
     return ciqp.angle_encoder(angles[:, None, :], axes=("Y" * angles.shape[1],))
 
-
-pennylane = pytest.importorskip("pennylane")
-qml = pennylane
 
 N_VISIBLE = 3
 N_ANCILLAS = 1

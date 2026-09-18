@@ -7,8 +7,8 @@
 The port reorganises the code but must not change a computed number, so every
 assertion below is exact equality.
 
-The compressed operator-bank loss — the training objective — is pinned bit-for-bit
-against the campaign implementation in ``test_loss.py``.
+``test_loss.py`` pins the compressed operator-bank loss, the training
+objective, bit-for-bit against the campaign implementation.
 """
 
 from __future__ import annotations

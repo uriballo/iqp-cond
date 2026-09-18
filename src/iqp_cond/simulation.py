@@ -1,9 +1,9 @@
 """Sampling the conditional model through PennyLane backends.
 
-The trainer never touches this module: it consumes the encoder's sampling and
+The trainer does not use this module.  It calls the encoder's sampling and
 amplitude-ratio interface directly.  Sampling the trained model, by contrast,
-is a statevector or hardware operation, so the model is compiled into a
-PennyLane circuit and handed to a device chosen by the caller::
+is a statevector or hardware operation, so this module compiles the model into
+a PennyLane circuit and runs it on a device chosen by the caller::
 
     import pennylane as qml
 
@@ -111,11 +111,11 @@ def build_qnode(
 ) -> qml.QNode:
     """Compile one condition's model circuit into a PennyLane QNode.
 
-    ``device`` is a PennyLane device name (default ``"lightning.qubit"``) or an
-    already-built device, which must act on ``model.n_qubits`` wires.  ``seed``
-    applies only to devices built from a name.  The QNode measures the visible
-    wires and needs finite shots; pass ``shots`` here or wrap the result with
-    ``qml.set_shots``.
+    ``device`` is a PennyLane device name, defaulting to
+    ``"lightning.qubit"``, or an already-built device that must act on
+    ``model.n_qubits`` wires.  ``seed`` applies only to devices built from a
+    name.  The QNode measures the visible wires and needs finite shots; pass
+    ``shots`` here or wrap the result with ``qml.set_shots``.
     """
     encoders = _require_circuit_encoder(model)
     if not 0 <= condition < encoders.n_conditions:
@@ -149,10 +149,11 @@ def sample_model(
 ) -> np.ndarray:
     """Draw ``(conditions, n_samples, n_visible)`` bitstrings from the model.
 
-    One circuit per condition, sampled with finite shots.  ``device`` may be a
-    simulator (default ``"lightning.qubit"``) or a backend plugin; ``seed``
-    applies only to devices built from a name and is folded by condition so
-    each one has its own stream.
+    The function builds one circuit per condition and draws finite shots from
+    it.  ``device`` may be a simulator, ``"lightning.qubit"`` by default, or a
+    backend plugin.  ``seed`` applies only to devices built from a name; the
+    function adds the condition index to it so each condition has its own
+    stream.
     """
     encoders = _require_circuit_encoder(model)
     _validate_params(model, params)
@@ -190,10 +191,10 @@ def probabilities(
 ) -> np.ndarray:
     """Return the exact visible distribution ``(conditions, 2**n_visible)``.
 
-    Analytic evaluation, so this is a small-system path: the device must
-    support analytic execution (a statevector simulator).  For hardware or
-    shot-based evaluation use :func:`sample_model`.  Indices are little-endian,
-    matching the rest of the package.
+    Analytic evaluation, so this is a small-system path.  The device must
+    support analytic execution, which means a statevector simulator.  Use
+    :func:`sample_model` for hardware or shot-based evaluation.  Indices are
+    little-endian, matching the rest of the package.
     """
     encoders = _require_circuit_encoder(model)
     values = _validate_params(model, params)

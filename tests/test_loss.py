@@ -3,9 +3,9 @@
 ``fixtures/golden.npz`` records the compressed-loss value computed by the
 research campaign's ``exact_tvd_runner._weighted_loss_functions`` together with
 the bank it built (masks and weights per bandwidth and condition).  Feeding that
-same bank to :func:`iqp_cond.mmd` must reproduce the value bit-for-bit: the
-library's job is to compute the paper's estimator, not an approximation of it.
-The mask samplers and banks themselves are covered by ``test_operators.py``.
+same bank to :func:`iqp_cond.mmd` must reproduce the value bit-for-bit, because
+the library computes the paper's estimator, not an approximation of it.  The
+mask samplers and banks themselves are covered by ``test_operators.py``.
 """
 
 from __future__ import annotations
@@ -447,7 +447,7 @@ def test_shared_samples_keeps_the_result_shape() -> None:
     assert shared.per_bandwidth_condition.shape == (3, 2)
     assert per_entry.per_bandwidth_condition.shape == (3, 2)
     assert np.all(np.isfinite(np.asarray(shared.per_bandwidth_condition)))
-    # Different reference layouts, same objective: the values need not match.
+    # The two layouts share the objective, so the values need not match.
     assert np.allclose(
         np.asarray(shared.per_condition),
         np.asarray(per_entry.per_condition),

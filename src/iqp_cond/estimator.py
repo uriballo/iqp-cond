@@ -7,11 +7,11 @@ comes from the encoder and ``Delta_a f`` from the diagonal phase bank.  Both
 pieces are classically computable, so the estimator is unbiased with bounded
 variance and its parameter gradient is available in closed form.
 
-One estimator, two entry points: :func:`estimate_pauli_z` validates its inputs
-and pads visible-width masks with identity on the ancillas, while
-:func:`estimate_pauli_z_unchecked` skips both and is safe to trace under
-``jax.jit``.  Either accepts a random key or pre-drawn reference samples, so
-several mask banks can share one draw.
+The module exposes two entry points.  :func:`estimate_pauli_z` validates its
+inputs and pads visible-width masks with identity on the ancillas.
+:func:`estimate_pauli_z_unchecked` skips both checks and is safe to trace under
+``jax.jit``.  Either function accepts a random key or pre-drawn reference
+samples, so several mask banks can share one draw.
 """
 
 from __future__ import annotations
@@ -37,9 +37,9 @@ class ExpectationEstimate:
 
     ``values`` has shape ``(n_conditions, n_masks)``.  ``sample_values`` holds
     the ``(conditions, samples, masks)`` per-sample values and is ``None``
-    unless ``return_samples=True``; it is a memory trap otherwise, and only the
-    loss and callers computing their own variance need it.  ``standard_errors``
-    derives from it on demand.
+    unless ``return_samples=True``.  It needs a large allocation, so only the
+    loss and callers computing their own variance ask for it.
+    ``standard_errors`` derives from it on demand.
     """
 
     values: jnp.ndarray
@@ -99,7 +99,8 @@ def _phase_differences(
     contraction in a reduced dtype and casts the result back to float64, so the
     exponentiation and every reduction stay precise.  This is the mixed
     precision mode that gives large speedups on GPUs, whose float64 throughput
-    is a small fraction of float32; on CPU it measured neutral to profitable.
+    is a small fraction of float32.  On CPU it ranges from no change to a small
+    speedup.
     """
     sample_parities = jnp.einsum("bsn,mn->bsm", samples, generators)
     sample_characters = 1.0 - 2.0 * jnp.mod(sample_parities, 2.0)
@@ -231,9 +232,9 @@ def estimate_pauli_z_unchecked(
     gemm_dtype: jnp.dtype | None = None,
     return_samples: bool = False,
 ) -> ExpectationEstimate:
-    """Traceable estimator kernel: no validation, model-width masks.
+    """Traceable estimator kernel with no validation and model-width masks.
 
-    Safe to call under ``jax.jit``, which is why the loss uses it.
+    The loss calls this function under ``jax.jit``.
     """
     drawn = _draw(encoders, key, samples, n_samples)
     return _estimate(
