@@ -18,6 +18,11 @@ also describe their preparation as single-qubit rotations, so the same model
 runs on a classical simulator or a quantum backend without changes to the
 training code.
 
+The library is consumed by the private
+[`conditional-generation-iqp`](https://github.com/uriballo/conditional-generation-iqp)
+experiments repository, which mounts it as a git submodule tracking `main` and
+installs it editable.
+
 ## Install
 
 ```bash
