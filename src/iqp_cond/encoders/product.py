@@ -17,7 +17,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .kernels import safe_ratio
 from .protocol import as_condition_batch
 
 __all__ = [
@@ -35,6 +34,11 @@ PRODUCT = "product"
 ANGLE = "angle"
 
 _ROTATION_AXES = ("X", "Y", "Z")
+
+
+def safe_ratio(numerator: jnp.ndarray, denominator: jnp.ndarray) -> jnp.ndarray:
+    """Divide, mapping division by zero to zero."""
+    return jnp.where(denominator != 0.0, numerator / denominator, 0.0)
 
 
 def local_amplitudes(

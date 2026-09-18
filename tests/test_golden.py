@@ -4,11 +4,8 @@
 (plus the 2026-09-16 working-tree edits) by
 ``.scratch/library-extraction/record_golden.py``.
 
-The port reorganises the code but must not change a computed number, so almost
-every assertion below is exact equality.  One comparison needs a tolerance, with
-a stated numerical cause: the spin-flip exact state, because the encoder is now
-evaluated for a batch of conditions where the research code evaluated one
-condition at a time.
+The port reorganises the code but must not change a computed number, so every
+assertion below is exact equality.
 
 The compressed operator-bank loss — the training objective — is pinned bit-for-bit
 against the campaign implementation in ``test_loss_sampled.py``.
@@ -25,17 +22,6 @@ import pytest
 import iqp_cond as iqc
 
 FIXTURES = Path(__file__).parent / "fixtures" / "golden.npz"
-
-
-def broadcast_row(angles: np.ndarray) -> np.ndarray:
-    """Turn a recorded random angle matrix into a spin-flip broadcast row.
-
-    The fixture stores the ``(n_conditions, n_qubits)`` matrix the research code
-    handed in; spin-flip read only column 0, so broadcasting that column
-    reproduces the recorded numbers exactly while satisfying the library's
-    one-angle-per-condition contract.
-    """
-    return np.broadcast_to(angles[:, :1], angles.shape)
 
 
 @pytest.fixture(scope="module")
@@ -59,41 +45,18 @@ def assert_identical(actual: np.ndarray, expected: np.ndarray, label: str) -> No
         assert np.array_equal(actual, expected), f"{label}: values differ"
 
 
-def assert_close(
-    actual: np.ndarray,
-    expected: np.ndarray,
-    label: str,
-    *,
-    rtol: float,
-    atol: float = 0.0,
-) -> None:
-    actual = np.asarray(actual)
-    expected = np.asarray(expected)
-    assert actual.shape == expected.shape, f"{label}: shape {actual.shape}"
-    deviation = float(np.max(np.abs(actual - expected))) if actual.size else 0.0
-    scale = float(np.max(np.abs(expected))) if expected.size else 0.0
-    assert deviation <= atol + rtol * scale, (
-        f"{label}: max abs deviation {deviation!r} exceeds "
-        f"atol {atol} + rtol {rtol} * scale {scale}"
-    )
-
-
-@pytest.mark.parametrize("family", ["product", "spin_flip"])
 def test_estimate_pauli_z_matches_research(
     golden: dict[str, np.ndarray],
-    family: str,
 ) -> None:
-    prefix = f"{family}_"
+    prefix = "product_"
     angles = golden[prefix + "angles"]
-    encoders = iqc.encoder(
-        family, broadcast_row(angles) if family == "spin_flip" else angles
-    )
+    encoders = iqc.encoder(iqc.PRODUCT, angles)
     estimate = iqc.estimate_pauli_z(
         golden[prefix + "params"],
         golden[prefix + "generators"],
         encoders,
         golden[prefix + "masks"],
-        key=jax.random.PRNGKey(11 if family == "product" else 12),
+        key=jax.random.PRNGKey(11),
         n_samples=64,
         return_samples=True,
     )
@@ -110,35 +73,17 @@ def test_estimate_pauli_z_matches_research(
     )
 
 
-@pytest.mark.parametrize("family", ["product", "spin_flip"])
 def test_post_hadamard_amplitudes_match_research(
     golden: dict[str, np.ndarray],
-    family: str,
 ) -> None:
-    prefix = f"{family}_"
+    prefix = "product_"
     angles = golden[prefix + "angles"]
-    encoders = iqc.encoder(
-        family, broadcast_row(angles) if family == "spin_flip" else angles
+    encoders = iqc.encoder(iqc.PRODUCT, angles)
+    assert_identical(
+        encoders.post_hadamard_amplitudes(),
+        golden[prefix + "reference_state"],
+        f"{prefix}reference_state",
     )
-    expected = golden[prefix + "reference_state"]
-    if family == "spin_flip":
-        # The research shell table for the two-branch family is not normalised
-        # (norms 2.276 and 3.684); sampling and ratio queries are invariant to
-        # that scale, and the library normalises the state it returns.
-        expected = expected / np.linalg.norm(expected, axis=-1, keepdims=True)
-        assert_close(
-            encoders.post_hadamard_amplitudes(),
-            expected,
-            f"{prefix}reference_state",
-            rtol=0.0,
-            atol=1e-14,
-        )
-    else:
-        assert_identical(
-            encoders.post_hadamard_amplitudes(),
-            expected,
-            f"{prefix}reference_state",
-        )
 
 
 def test_parameters_from_data_matches_research(golden: dict[str, np.ndarray]) -> None:

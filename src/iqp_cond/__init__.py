@@ -33,18 +33,15 @@ from .ansatz import (
 from .encoders import (
     ANGLE,
     PRODUCT,
-    SPIN_FLIP,
     AngleEncoder,
     Encoder,
     ExactEncoder,
     ProductEncoder,
-    SpinFlipEncoder,
     angle_encoder,
     available_encoders,
     encoder,
     product_encoder,
     register_encoder,
-    spin_flip_encoder,
 )
 from .estimator import (
     ExpectationEstimate,
@@ -61,7 +58,6 @@ __all__ = [
     "ANGLE",
     "CACHE",
     "PRODUCT",
-    "SPIN_FLIP",
     "STEP",
     "AngleEncoder",
     "Ansatz",
@@ -71,7 +67,6 @@ __all__ = [
     "ExactEncoder",
     "ExpectationEstimate",
     "ProductEncoder",
-    "SpinFlipEncoder",
     "TrainingConfig",
     "TrainingResult",
     "ancilla_support",
@@ -90,6 +85,5 @@ __all__ = [
     "product_encoder",
     "random_parameters",
     "register_encoder",
-    "spin_flip_encoder",
     "train",
 ]

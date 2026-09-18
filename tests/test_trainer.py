@@ -69,10 +69,9 @@ def test_ancilla_model_trains_against_visible_targets(
     """A five-qubit model with two ancillas trains against three-bit targets."""
     training, validation = targets
     angles = np.random.default_rng(7).uniform(0.4, 2.2, size=(N_CONDITIONS, 5))
-    angles = np.broadcast_to(angles[:, :1], angles.shape)
     model = iqc.ConditionalModel(
         iqc.complete_ansatz(5),
-        iqc.encoder("spin_flip", angles),
+        iqc.encoder(iqc.PRODUCT, angles),
         n_visible=N_QUBITS,
     )
     config = iqc.TrainingConfig(

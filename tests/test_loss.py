@@ -35,8 +35,6 @@ N_VISIBLE = 4
 N_OPS = 64
 N_SAMPLES = 64
 
-CASES = {"bank_plain": 0, "bank_ancilla": 2}
-
 
 @pytest.fixture(scope="module")
 def golden() -> dict[str, np.ndarray]:
@@ -71,19 +69,12 @@ def rebuild_bank(golden: dict[str, np.ndarray], label: str) -> OperatorBank:
     )
 
 
-@pytest.mark.parametrize("label", sorted(CASES))
 def test_mmd_reproduces_the_campaign_value(
     golden: dict[str, np.ndarray],
-    label: str,
 ) -> None:
-    n_ancillas = CASES[label]
-    ansatz = iqc.complete_ansatz(N_VISIBLE + n_ancillas)
-    family = iqc.PRODUCT if n_ancillas == 0 else iqc.SPIN_FLIP
-    angles = golden[f"{label}_angles"]
-    if family == iqc.SPIN_FLIP:
-        # The campaign stored a full matrix but spin-flip read column 0.
-        angles = np.broadcast_to(angles[:, :1], angles.shape)
-    encoders = iqc.encoder(family, angles)
+    label = "bank_plain"
+    ansatz = iqc.complete_ansatz(N_VISIBLE)
+    encoders = iqc.encoder(iqc.PRODUCT, golden[f"{label}_angles"])
     bank = rebuild_bank(golden, label)
     key = jax.random.wrap_key_data(np.asarray(golden[f"{label}_key"]))
 

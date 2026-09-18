@@ -38,37 +38,15 @@ def reverse_bits(indices: np.ndarray, n_bits: int) -> np.ndarray:
     return out
 
 
-def angles_for(family: str, seed: int = 3) -> np.ndarray:
-    """Angles in the well-spread regime.
-
-    The two-branch state is nearly deterministic at ``alpha = pi/2`` (the
-    reference state collapses towards ``|0...0>``), where the estimator is still
-    unbiased but heavy-tailed: rare sampled strings carry huge amplitude ratios,
-    so a sample-standard-error tolerance is meaningless.  Staying away from that
-    point keeps these checks about correctness, not about rare events.
-    """
-    rng = np.random.default_rng(seed)
-    if family == "spin_flip":
-        return np.broadcast_to(
-            rng.uniform(0.1, 0.6, size=(N_CONDITIONS, 1)),
-            (N_CONDITIONS, N_QUBITS),
-        )
-    return rng.uniform(0.4, 2.2, size=(N_CONDITIONS, N_QUBITS))
+def angles_for(seed: int = 3) -> np.ndarray:
+    """Well-spread product-state angles, one per condition and qubit."""
+    return np.random.default_rng(seed).uniform(0.4, 2.2, size=(N_CONDITIONS, N_QUBITS))
 
 
-def prepare_encoder(family: str, angles: np.ndarray, n_qubits: int) -> None:
+def prepare_product_encoder(angles: np.ndarray, n_qubits: int) -> None:
     """State preparation for one condition, in PennyLane's wire ordering."""
-    if family == "product":
-        for wire, angle in enumerate(angles):
-            qml.RY(float(angle), wires=wire)
-        return
-    angle = float(angles[0])
-    single = np.array([np.cos(angle / 2.0), np.sin(angle / 2.0)])
-    state = np.ones(1)
-    for _ in range(n_qubits):
-        state = np.kron(state, single)
-    state = state + state[::-1]
-    qml.StatePrep(state / np.linalg.norm(state), wires=range(n_qubits))
+    for wire, angle in enumerate(angles):
+        qml.RY(float(angle), wires=wire)
 
 
 def prepare_angle_encoder(axes: tuple[str, ...], angles: np.ndarray) -> None:
@@ -76,6 +54,31 @@ def prepare_angle_encoder(axes: tuple[str, ...], angles: np.ndarray) -> None:
     for layer, labels in enumerate(axes):
         for wire, label in enumerate(labels):
             getattr(qml, f"R{label}")(float(angles[layer, wire]), wires=wire)
+
+
+def apply_iqp(params: np.ndarray, generators: np.ndarray, n_qubits: int) -> None:
+    """The shared IQP block: H, diagonal phases, H."""
+    for wire in range(n_qubits):
+        qml.Hadamard(wire)
+    for generator, theta in zip(generators, params, strict=True):
+        wires = [int(i) for i, bit in enumerate(generator) if bit]
+        # MultiRZ(phi) = exp(-i phi/2 Z^g), so -2 theta gives exp(+i theta Z^g).
+        qml.MultiRZ(-2.0 * float(theta), wires=wires)
+    for wire in range(n_qubits):
+        qml.Hadamard(wire)
+
+
+def pl_state_after_first_hadamard(angles: np.ndarray, n_qubits: int) -> np.ndarray:
+    dev = qml.device("default.qubit", wires=n_qubits)
+
+    @qml.qnode(dev)
+    def circuit() -> np.ndarray:
+        prepare_product_encoder(angles, n_qubits)
+        for wire in range(n_qubits):
+            qml.Hadamard(wire)
+        return qml.state()
+
+    return np.asarray(circuit())
 
 
 def pl_layered_state(
@@ -95,54 +98,7 @@ def pl_layered_state(
     return np.asarray(circuit())
 
 
-def test_layered_angle_encoder_state_matches_pennylane() -> None:
-    """The multi-layer family composes rotations in the documented order."""
-    axes = ("YXXY", "ZXYZ", "YYZZ")
-    angles = np.random.default_rng(23).uniform(
-        0.4,
-        2.2,
-        size=(N_CONDITIONS, len(axes), N_QUBITS),
-    )
-    encoders = iqc.angle_encoder(angles, axes)
-    state = np.asarray(encoders.post_hadamard_amplitudes())
-
-    for condition in range(N_CONDITIONS):
-        expected = pl_layered_state(axes, angles[condition], N_QUBITS)
-        reordered = state[condition][reverse_bits(np.arange(2**N_QUBITS), N_QUBITS)]
-        assert np.max(np.abs(reordered - expected)) < 1e-12
-
-
-def apply_iqp(params: np.ndarray, generators: np.ndarray, n_qubits: int) -> None:
-    """The shared IQP block: H, diagonal phases, H."""
-    for wire in range(n_qubits):
-        qml.Hadamard(wire)
-    for generator, theta in zip(generators, params, strict=True):
-        wires = [int(i) for i, bit in enumerate(generator) if bit]
-        # MultiRZ(phi) = exp(-i phi/2 Z^g), so -2 theta gives exp(+i theta Z^g).
-        qml.MultiRZ(-2.0 * float(theta), wires=wires)
-    for wire in range(n_qubits):
-        qml.Hadamard(wire)
-
-
-def pl_state_after_first_hadamard(
-    family: str,
-    angles: np.ndarray,
-    n_qubits: int,
-) -> np.ndarray:
-    dev = qml.device("default.qubit", wires=n_qubits)
-
-    @qml.qnode(dev)
-    def circuit() -> np.ndarray:
-        prepare_encoder(family, angles, n_qubits)
-        for wire in range(n_qubits):
-            qml.Hadamard(wire)
-        return qml.state()
-
-    return np.asarray(circuit())
-
-
 def pl_expectation(
-    family: str,
     angles: np.ndarray,
     params: np.ndarray,
     generators: np.ndarray,
@@ -163,47 +119,27 @@ def pl_expectation(
 
     @qml.qnode(dev)
     def circuit() -> float:
-        prepare_encoder(family, angles, n_qubits)
+        prepare_product_encoder(angles, n_qubits)
         apply_iqp(params, generators, n_qubits)
         return qml.expval(observable)
 
     return float(circuit())
 
 
-def pl_probabilities(
-    family: str,
-    angles: np.ndarray,
-    params: np.ndarray,
-    generators: np.ndarray,
-    n_qubits: int,
-) -> np.ndarray:
-    dev = qml.device("default.qubit", wires=n_qubits)
-
-    @qml.qnode(dev)
-    def circuit() -> np.ndarray:
-        prepare_encoder(family, angles, n_qubits)
-        apply_iqp(params, generators, n_qubits)
-        return qml.probs(wires=range(n_qubits))
-
-    return np.asarray(circuit())
-
-
-@pytest.mark.parametrize("family", ["product", "spin_flip"])
-def test_encoder_state_matches_pennylane(family: str) -> None:
-    angles = angles_for(family)
-    encoders = iqc.encoder(family, angles)
+def test_encoder_state_matches_pennylane() -> None:
+    angles = angles_for()
+    encoders = iqc.encoder(iqc.PRODUCT, angles)
     state = np.asarray(encoders.post_hadamard_amplitudes())
 
     for condition in range(N_CONDITIONS):
-        expected = pl_state_after_first_hadamard(family, angles[condition], N_QUBITS)
+        expected = pl_state_after_first_hadamard(angles[condition], N_QUBITS)
         reordered = state[condition][reverse_bits(np.arange(2**N_QUBITS), N_QUBITS)]
         assert np.max(np.abs(reordered - expected)) < 1e-12
 
 
-@pytest.mark.parametrize("family", ["product", "spin_flip"])
-def test_amplitude_ratios_match_pennylane(family: str) -> None:
-    angles = angles_for(family, seed=5)
-    encoders = iqc.encoder(family, angles)
+def test_amplitude_ratios_match_pennylane() -> None:
+    angles = angles_for(seed=5)
+    encoders = iqc.encoder(iqc.PRODUCT, angles)
     state = np.asarray(encoders.post_hadamard_amplitudes())
     rng = np.random.default_rng(6)
     samples = np.asarray(encoders.sample(jax.random.PRNGKey(0), 32))
@@ -222,21 +158,20 @@ def test_amplitude_ratios_match_pennylane(family: str) -> None:
                 assert abs(ratios[condition, index, mask_index] - expected) < 1e-12
 
 
-@pytest.mark.parametrize("family", ["product", "spin_flip"])
-def test_pauli_moments_match_pennylane(family: str) -> None:
+def test_pauli_moments_match_pennylane() -> None:
     """Estimator moments against exact PennyLane expectation values.
 
     The model carries one ancilla, so the comparison also exercises the
     visible-mask padding and the ancilla marginalization: PennyLane measures Z
     on the same visible wires and identity elsewhere.
     """
-    angles = angles_for(family, seed=7)
+    angles = angles_for(seed=7)
     ansatz = iqc.complete_ansatz(N_QUBITS)
     rng = np.random.default_rng(8)
     params = rng.normal(0.0, 0.4, size=ansatz.n_parameters)
     masks = rng.integers(0, 2, size=(6, N_VISIBLE)).astype(np.float64)
     masks[0] = [1.0, 0.0, 0.0]
-    encoders = iqc.encoder(family, angles)
+    encoders = iqc.encoder(iqc.PRODUCT, angles)
 
     estimate = iqc.estimate_pauli_z(
         params,
@@ -253,7 +188,6 @@ def test_pauli_moments_match_pennylane(family: str) -> None:
     for condition in range(N_CONDITIONS):
         for mask_index, mask in enumerate(masks):
             expected = pl_expectation(
-                family,
                 angles[condition],
                 params,
                 np.asarray(ansatz.generators),
@@ -267,27 +201,43 @@ def test_pauli_moments_match_pennylane(family: str) -> None:
             )
 
 
-@pytest.mark.parametrize("family", ["product", "spin_flip"])
-def test_reference_sampling_matches_pennylane(family: str) -> None:
+def test_reference_sampling_matches_pennylane() -> None:
     """Sampled bitstring frequencies against the reference state's Born law.
 
     ``Encoder.sample`` draws from the post-Hadamard state, not from the model
     output, so the reference is PennyLane's state after the encoder and the
     first Hadamard layer.
     """
-    angles = angles_for(family, seed=11)
-    encoders = iqc.encoder(family, angles)
+    angles = angles_for(seed=11)
+    encoders = iqc.encoder(iqc.PRODUCT, angles)
     n_samples = 100_000
 
     samples = np.asarray(encoders.sample(jax.random.PRNGKey(13), n_samples))
     for condition in range(N_CONDITIONS):
         codes = (samples[condition] * 2 ** np.arange(N_QUBITS)).sum(axis=-1)
         empirical = np.bincount(codes.astype(int), minlength=2**N_QUBITS) / n_samples
-        state = pl_state_after_first_hadamard(family, angles[condition], N_QUBITS)
+        state = pl_state_after_first_hadamard(angles[condition], N_QUBITS)
         expected = np.abs(state) ** 2
         expected = expected[reverse_bits(np.arange(2**N_QUBITS), N_QUBITS)]
         sigma = 0.5 * np.sqrt(np.sum(expected * (1.0 - expected)) / n_samples)
         assert 0.5 * np.sum(np.abs(empirical - expected)) < 5.0 * sigma + 1e-4
+
+
+def test_layered_angle_encoder_state_matches_pennylane() -> None:
+    """The multi-layer family composes rotations in the documented order."""
+    axes = ("YXXY", "ZXYZ", "YYZZ")
+    angles = np.random.default_rng(23).uniform(
+        0.4,
+        2.2,
+        size=(N_CONDITIONS, len(axes), N_QUBITS),
+    )
+    encoders = iqc.angle_encoder(angles, axes)
+    state = np.asarray(encoders.post_hadamard_amplitudes())
+
+    for condition in range(N_CONDITIONS):
+        expected = pl_layered_state(axes, angles[condition], N_QUBITS)
+        reordered = state[condition][reverse_bits(np.arange(2**N_QUBITS), N_QUBITS)]
+        assert np.max(np.abs(reordered - expected)) < 1e-12
 
 
 def test_mmd_expectation_matches_exact_pennylane_value() -> None:
@@ -300,8 +250,7 @@ def test_mmd_expectation_matches_exact_pennylane_value() -> None:
     """
     sigma = 2.0
     n_ops, n_samples, n_keys = 32, 64, 240
-    family = "spin_flip"
-    angles = angles_for(family, seed=17)
+    angles = angles_for(seed=17)
     ansatz = iqc.complete_ansatz(N_QUBITS)
     rng = np.random.default_rng(18)
     params = rng.normal(0.0, 0.4, size=ansatz.n_parameters)
@@ -331,7 +280,6 @@ def test_mmd_expectation_matches_exact_pennylane_value() -> None:
         mu_q = np.array(
             [
                 pl_expectation(
-                    family,
                     angles[condition],
                     params,
                     generators,
@@ -345,7 +293,7 @@ def test_mmd_expectation_matches_exact_pennylane_value() -> None:
         exact[condition] = np.sum(weights * (mu_q - mu_p) ** 2)
     exact_loss = float(exact.mean())
 
-    encoders = iqc.encoder(family, angles)
+    encoders = iqc.encoder(iqc.PRODUCT, angles)
 
     def one_loss(key: jax.Array) -> jax.Array:
         return iqc.mmd(

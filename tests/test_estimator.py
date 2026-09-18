@@ -18,11 +18,8 @@ N_CONDITIONS = 2
 def setup() -> tuple[iqc.Ansatz, iqc.Encoder, np.ndarray]:
     ansatz = iqc.complete_ansatz(N_VISIBLE + N_ANCILLAS)
     rng = np.random.default_rng(31)
-    angles = np.broadcast_to(
-        rng.uniform(0.4, 2.2, size=(N_CONDITIONS, 1)),
-        (N_CONDITIONS, N_VISIBLE + N_ANCILLAS),
-    )
-    encoders = iqc.encoder(iqc.SPIN_FLIP, angles)
+    angles = rng.uniform(0.4, 2.2, size=(N_CONDITIONS, N_VISIBLE + N_ANCILLAS))
+    encoders = iqc.encoder(iqc.PRODUCT, angles)
     return (
         ansatz,
         encoders,

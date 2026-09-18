@@ -35,11 +35,11 @@ n_qubits, n_conditions = 8, 3
 # A conditional model is a shared generator bank plus an encoder.
 ansatz = iqc.complete_ansatz(n_qubits)
 
-# spin_flip takes one angle per condition, broadcast over the model qubits.
+# One angle per condition and qubit; the angle family below stacks layers.
 angles = np.broadcast_to(
     np.linspace(0.6, 2.0, n_conditions)[:, None], (n_conditions, n_qubits)
 )
-model = iqc.ConditionalModel(ansatz, iqc.encoder(iqc.SPIN_FLIP, angles))
+model = iqc.ConditionalModel(ansatz, iqc.encoder(iqc.PRODUCT, angles))
 
 # Bitstring samples from the target family: (conditions, samples, visible qubits).
 rng = np.random.default_rng(0)
@@ -113,7 +113,6 @@ All built-ins also implement `post_hadamard_amplitudes` (the optional
 |---|---|---|
 | `product` | `RY(a_i)` on each qubit | translated Gaussian target |
 | `angle` | stack of fixed-axis rotations per qubit | general product conditioning |
-| `spin_flip` | `\|p>^n + X^n \|p>^n`, a spin-flip-symmetric radial state | Curie–Weiss target |
 
 The `angle` family generalizes `product` to several layers of non-commuting
 single-qubit rotations: `iqc.encoder("angle", angles, axes=...)` takes angles of
@@ -125,11 +124,6 @@ cancels from every probability and ratio, so accepting it would silently ignore
 its angle.  Local amplitudes stay real for all-`Y` sequences and become complex
 as soon as `X` or `Z` appears; sampling and ratio queries are unchanged either
 way.
-
-`spin_flip` rotates every qubit by a single angle, so its matrix must be a
-broadcast row: every column equal to the first, or zero (the natural ancilla
-column). A matrix with differing columns raises instead of silently reading only
-column 0.
 
 ### Adding your own
 
