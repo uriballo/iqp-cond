@@ -5,7 +5,7 @@ a translated discrete Gaussian over Hamming weight, a broadcast product-state
 encoder, and a short training run.  Sample counts are small so the script runs
 in seconds; the shipped `TrainingConfig` defaults are a starting point.
 
-    PYTHONPATH=src python examples/train_gaussian.py
+    uv run python examples/train_gaussian.py
 """
 
 from __future__ import annotations

@@ -17,12 +17,13 @@ classical — the model itself is still hard to sample from in general.
 ## Install
 
 ```bash
-pip install .        # from a checkout
-pip install -e .     # editable
+uv sync          # create .venv and install the package plus dev tools
 ```
 
-Python 3.11+ with JAX. Dependencies: `jax`, `jaxlib`, `numpy`, `optax`,
-`networkx`.
+The project is managed with [uv](https://docs.astral.sh/uv/); `uv sync` installs
+the package in editable mode, and `uv run <command>` runs commands inside the
+environment. Python 3.11+ with JAX. Dependencies: `jax`, `jaxlib`, `numpy`,
+`optax`, `networkx`.
 
 ## Quickstart
 
@@ -266,18 +267,19 @@ Two opt-in knobs cover large-budget regimes.
 `examples/train_gaussian.py` runs the manuscript's simplest benchmark shape end
 to end on synthetic data, and `examples/custom_encoder.py` registers a custom
 encoder and trains through the public interface. Both run from a checkout with
-`PYTHONPATH=src python examples/<name>.py`.
+`uv run python examples/<name>.py`.
 
 ## Tests
 
 ```bash
-uv run pytest          # library suite
+uv run pytest                     # library suite
+uv run --extra crosscheck pytest  # include the PennyLane cross-checks
 ```
 
 `tests/test_pennylane_crosscheck.py` rebuilds the encoder states and the full
 conditional circuit in PennyLane and compares the estimator, the sampler, and
 the amplitude ratios against exact statevector results. It skips unless
-`pennylane` is installed (`pip install .[crosscheck]`).
+`pennylane` is installed (`uv sync --extra crosscheck`).
 
 ## Status
 

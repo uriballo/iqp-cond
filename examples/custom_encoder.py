@@ -5,7 +5,7 @@ sampling is uniform bits and every amplitude ratio is one.  It needs the two
 interface operations plus ``select`` (it is not a JAX pytree), and the
 estimator, loss, and trainer consume it without any change.
 
-    PYTHONPATH=src python examples/custom_encoder.py
+    uv run python examples/custom_encoder.py
 """
 
 from __future__ import annotations

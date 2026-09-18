@@ -21,7 +21,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = ["pytest>=9.0.3"]
 # Independent statevector cross-checks; the tests skip when it is absent.
 crosscheck = ["pennylane>=0.45"]
 
