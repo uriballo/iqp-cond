@@ -161,6 +161,14 @@ class ConditionalModel:
                 f"ansatz acts on {self.ansatz.n_qubits} qubits but the encoder "
                 f"acts on {self.encoders.n_qubits}",
             )
+        if self.n_visible is not None and not isinstance(
+            self.n_visible,
+            (int, np.integer),
+        ):
+            raise ValueError(
+                f"n_visible must be an integer or None, got "
+                f"{type(self.n_visible).__name__}",
+            )
         if not 1 <= self.visible <= self.ansatz.n_qubits:
             raise ValueError(
                 f"n_visible must be between 1 and {self.ansatz.n_qubits}",

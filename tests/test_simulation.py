@@ -189,3 +189,70 @@ def test_simulation_validates_the_setup() -> None:
     plain = ciqp.ConditionalModel(ciqp.complete_ansatz(1), Minimal())
     with pytest.raises(TypeError, match="preparation_ops"):
         ciqp.simulation.probabilities(plain, np.zeros(1))
+
+
+@dataclass(frozen=True)
+class _PreparedEncoder:
+    """A test encoder whose preparation and exact reference state are given."""
+
+    operations: tuple[ciqp.Operation, ...]
+    amplitudes: np.ndarray
+
+    @property
+    def n_conditions(self) -> int:
+        return 1
+
+    @property
+    def n_qubits(self) -> int:
+        return int(np.log2(self.amplitudes.shape[-1]))
+
+    def sample(self, key, n_samples):  # pragma: no cover - interface only
+        raise NotImplementedError
+
+    def amplitude_ratios(self, samples, masks):  # pragma: no cover
+        raise NotImplementedError
+
+    def preparation_ops(self, condition: int) -> tuple[ciqp.Operation, ...]:
+        return self.operations
+
+    def post_hadamard_amplitudes(self) -> np.ndarray:
+        return self.amplitudes
+
+
+def test_cnot_preparation_is_supported() -> None:
+    """A GHZ-type preparation compiles and matches the reference state."""
+    bell = np.zeros((1, 4), dtype=np.complex128)
+    bell[0, 0] = 1.0 / np.sqrt(2.0)
+    bell[0, 3] = 1.0 / np.sqrt(2.0)
+    encoder = _PreparedEncoder(
+        operations=(
+            ciqp.Operation("RY", (0,), (np.pi / 2.0,)),
+            ciqp.Operation("CNOT", (0, 1)),
+        ),
+        amplitudes=bell,
+    )
+    model = ciqp.ConditionalModel(ciqp.complete_ansatz(2), encoder)
+    params = _params(model, seed=8)
+    expected = np.abs(_exact_joint(model, params)) ** 2
+    probabilities = ciqp.simulation.probabilities(model, params)
+    assert probabilities.shape == (1, 4)
+    assert np.allclose(probabilities[0], expected)
+
+
+def test_preparation_gate_arity_is_validated() -> None:
+    cases = (
+        ((ciqp.Operation("CNOT", (0,)),), "CNOT preparation needs 2 wire"),
+        (
+            (ciqp.Operation("CNOT", (0, 1), (0.3,)),),
+            "0 parameter",
+        ),
+        ((ciqp.Operation("RY", (0, 1), (0.3,)),), "RY preparation needs 1 wire"),
+    )
+    for operations, message in cases:
+        encoder = _PreparedEncoder(
+            operations=operations,
+            amplitudes=np.zeros((1, 4), dtype=np.complex128),
+        )
+        model = ciqp.ConditionalModel(ciqp.complete_ansatz(2), encoder)
+        with pytest.raises(ValueError, match=message):
+            ciqp.simulation.probabilities(model, np.zeros(model.ansatz.n_parameters))

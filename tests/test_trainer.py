@@ -112,6 +112,19 @@ def test_model_rejects_mismatched_widths() -> None:
         )
 
 
+def test_model_requires_an_integer_visible_width() -> None:
+    """A float would be truncated silently, so it is rejected."""
+    encoders = y_layer(np.zeros((2, 3)))
+    with pytest.raises(ValueError, match="n_visible must be an integer"):
+        ciqp.ConditionalModel(ciqp.complete_ansatz(3), encoders, n_visible=2.5)
+    integral = ciqp.ConditionalModel(
+        ciqp.complete_ansatz(3),
+        encoders,
+        n_visible=np.int64(2),
+    )
+    assert integral.visible == 2
+
+
 def test_visible_width_mismatch_is_rejected(
     model: ciqp.ConditionalModel,
     targets: tuple[np.ndarray, np.ndarray],

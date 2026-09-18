@@ -9,8 +9,8 @@ three capabilities:
 ``amplitude_ratios``
     Evaluate ``phi(z xor a) / phi(z)`` for sampled ``z`` and Fourier masks ``a``.
 ``preparation_ops``
-    Describe how ``|phi(c)>`` is prepared as single-qubit rotations, so the
-    model can be compiled to a circuit and sampled on a simulator or backend.
+    Describe how ``|phi(c)>`` is prepared as named gates, so the model can be
+    compiled to a circuit and sampled on a simulator or backend.
 
 The first two operations make training classically tractable and keep the
 trainer independent of any circuit simulator.  The third is required at
@@ -68,7 +68,8 @@ class Operation:
     """One backend-agnostic gate in an encoder's state preparation.
 
     The simulation bridge maps the name to a PennyLane gate; the whitelist is
-    ``RX``, ``RY``, and ``RZ``, each acting on one wire with one angle.
+    ``RX``, ``RY``, and ``RZ``, each acting on one wire with one angle, and
+    ``CNOT``, acting on two wires with no parameters.
     """
 
     name: str
@@ -119,9 +120,9 @@ class ExactEncoder(Encoder, Protocol):
 class CircuitEncoder(Encoder, Protocol):
     """The registered encoder interface: training plus a circuit representation.
 
-    ``preparation_ops`` describes ``|phi(c)>`` as single-qubit rotations,
-    without reference to any simulator.  :mod:`iqp_cond.simulation` compiles
-    those operations plus the shared diagonal into a PennyLane circuit, so any
+    ``preparation_ops`` describes ``|phi(c)>`` as named gates, without
+    reference to any simulator.  :mod:`iqp_cond.simulation` compiles those
+    operations plus the shared diagonal into a PennyLane circuit, so any
     registered family can be sampled on a classical simulator or a backend.
     The :func:`encoder` factory validates every result against this protocol.
     """

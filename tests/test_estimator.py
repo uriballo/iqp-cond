@@ -124,6 +124,52 @@ def test_rank_two_samples_require_a_single_condition() -> None:
         )
 
 
+def test_sample_condition_axis_must_match_the_encoder() -> None:
+    """A mismatched condition axis must fail instead of broadcasting."""
+    ansatz = ciqp.complete_ansatz(N_VISIBLE)
+    params = np.zeros(ansatz.n_parameters)
+    masks = np.ones((1, N_VISIBLE))
+    rng = np.random.default_rng(34)
+    five_conditions = rng.integers(0, 2, size=(5, 8, N_VISIBLE)).astype(np.float64)
+
+    single = y_layer(rng.uniform(0.4, 2.4, size=(1, N_VISIBLE)))
+    with pytest.raises(ValueError, match="condition axis has 5 entries"):
+        ciqp.estimate_pauli_z(
+            params,
+            ansatz.generators,
+            single,
+            masks,
+            samples=five_conditions,
+        )
+    paired = y_layer(rng.uniform(0.4, 2.4, size=(2, N_VISIBLE)))
+    with pytest.raises(ValueError, match="condition axis has 5 entries"):
+        ciqp.estimate_pauli_z(
+            params,
+            ansatz.generators,
+            paired,
+            masks,
+            samples=five_conditions,
+        )
+
+
+def test_sample_qubit_axis_must_match_the_encoder() -> None:
+    """A size-1 qubit axis broadcasts in einsum, so it must be rejected."""
+    ansatz = ciqp.complete_ansatz(N_VISIBLE)
+    params = np.zeros(ansatz.n_parameters)
+    masks = np.ones((1, N_VISIBLE))
+    rng = np.random.default_rng(35)
+    narrow = rng.integers(0, 2, size=(1, 8, 1)).astype(np.float64)
+    encoders = y_layer(rng.uniform(0.4, 2.4, size=(1, N_VISIBLE)))
+    with pytest.raises(ValueError, match="qubit axis has 1 entries"):
+        ciqp.estimate_pauli_z(
+            params,
+            ansatz.generators,
+            encoders,
+            masks,
+            samples=narrow,
+        )
+
+
 def test_exactly_one_sample_source_is_required(setup) -> None:
     ansatz, encoders, _targets = setup
     params = np.zeros(ansatz.n_parameters)
@@ -248,6 +294,36 @@ def test_unchecked_kernel_is_jittable(setup) -> None:
         ).values
 
     assert jax.jit(estimate)(params).shape == (N_CONDITIONS, 1)
+
+
+def test_parameter_gradient_matches_finite_differences(setup) -> None:
+    """Autodiff through the estimator is exact for fixed reference draws."""
+    ansatz, encoders, _targets = setup
+    masks = np.array([[1.0, 0.0, 1.0], [0.0, 1.0, 1.0]])
+    params = jnp.asarray(np.linspace(-0.4, 0.4, ansatz.n_parameters))
+    key = jax.random.PRNGKey(19)
+
+    def value(current: jax.Array) -> jax.Array:
+        return jnp.sum(
+            ciqp.estimate_pauli_z(
+                current,
+                ansatz.generators,
+                encoders,
+                masks,
+                key=key,
+                n_samples=256,
+            ).values,
+        )
+
+    gradient = np.asarray(jax.grad(value)(params))
+    epsilon = 1e-6
+    finite = np.array(
+        [
+            float(value(params + step) - value(params - step)) / (2.0 * epsilon)
+            for step in epsilon * np.eye(params.size)
+        ],
+    )
+    assert np.max(np.abs(gradient - finite)) < 1e-8
 
 
 def test_mixed_precision_gemm_stays_close_to_float64(setup) -> None:

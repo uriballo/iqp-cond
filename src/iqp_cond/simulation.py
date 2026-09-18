@@ -16,7 +16,7 @@ a PennyLane circuit and runs it on a device chosen by the caller::
 The circuit is the encoder preparation, a Hadamard layer, the shared diagonal
 as ``MultiRZ(-2 theta_j)`` per nonzero generator, a second Hadamard layer, and
 measurement of the visible wires.  Encoders describe their preparation as
-single-qubit rotations
+named gates
 (:meth:`~iqp_cond.encoders.CircuitEncoder.preparation_ops`), so the same
 description runs on a classical simulator or on hardware.
 """
@@ -31,7 +31,15 @@ from .encoders import CircuitEncoder, Operation
 
 __all__ = ["build_qnode", "probabilities", "sample_model"]
 
-_ROTATION_GATES = {"RX": qml.RX, "RY": qml.RY, "RZ": qml.RZ}
+#: Allowed preparation gates as ``(gate, wires, parameters)``.  Single-qubit
+#: rotations cover the product-state families; ``CNOT`` covers entangling
+#: preparations such as the GHZ ladder a symmetric encoder needs.
+_GATE_SPECS: dict[str, tuple[object, int, int]] = {
+    "RX": (qml.RX, 1, 1),
+    "RY": (qml.RY, 1, 1),
+    "RZ": (qml.RZ, 1, 1),
+    "CNOT": (qml.CNOT, 2, 0),
+}
 
 
 def _validate_params(model: ConditionalModel, params: np.ndarray) -> np.ndarray:
@@ -53,7 +61,11 @@ def _require_circuit_encoder(model: ConditionalModel) -> CircuitEncoder:
     return model.encoders
 
 
-def _resolve_device(device: str | qml.device, n_qubits: int, seed: int | None):
+def _resolve_device(
+    device: str | qml.devices.Device,
+    n_qubits: int,
+    seed: int | None,
+) -> qml.devices.Device:
     if isinstance(device, str):
         return qml.device(device, wires=n_qubits, seed=seed)
     if seed is not None:
@@ -74,17 +86,19 @@ def _prepare(encoders: CircuitEncoder, condition: int) -> None:
                 "preparation_ops must yield Operation instances, got "
                 f"{type(operation).__name__}",
             )
-        gate = _ROTATION_GATES.get(operation.name)
-        if gate is None:
+        spec = _GATE_SPECS.get(operation.name)
+        if spec is None:
             raise ValueError(
                 f"unsupported preparation operation {operation.name!r}; "
-                f"expected one of {', '.join(sorted(_ROTATION_GATES))}",
+                f"expected one of {', '.join(sorted(_GATE_SPECS))}",
             )
-        if len(operation.wires) != 1 or len(operation.parameters) != 1:
+        gate, n_wires, n_parameters = spec
+        if len(operation.wires) != n_wires or len(operation.parameters) != n_parameters:
             raise ValueError(
-                f"{operation.name} preparation needs one wire and one angle",
+                f"{operation.name} preparation needs {n_wires} wire(s) and "
+                f"{n_parameters} parameter(s)",
             )
-        gate(operation.parameters[0], wires=operation.wires[0])
+        gate(*operation.parameters, wires=operation.wires)
 
 
 def _hadamard_layer(n_qubits: int) -> None:
@@ -104,7 +118,7 @@ def build_qnode(
     model: ConditionalModel,
     params: np.ndarray,
     condition: int,
-    device: str | qml.device | None = None,
+    device: str | qml.devices.Device | None = None,
     *,
     shots: int | None = None,
     seed: int | None = None,
@@ -145,7 +159,7 @@ def sample_model(
     n_samples: int,
     *,
     seed: int | None = None,
-    device: str | qml.device = "lightning.qubit",
+    device: str | qml.devices.Device = "lightning.qubit",
 ) -> np.ndarray:
     """Draw ``(conditions, n_samples, n_visible)`` bitstrings from the model.
 
@@ -186,7 +200,7 @@ def probabilities(
     model: ConditionalModel,
     params: np.ndarray,
     *,
-    device: str | qml.device = "lightning.qubit",
+    device: str | qml.devices.Device = "lightning.qubit",
     seed: int | None = None,
 ) -> np.ndarray:
     """Return the exact visible distribution ``(conditions, 2**n_visible)``.

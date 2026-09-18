@@ -143,8 +143,10 @@ three operations of the `CircuitEncoder` interface:
   encoder's Born law `|phi(c)|^2`;
 - `amplitude_ratios(samples, masks)`: `(conditions, samples, masks)` ratios
   `phi(z xor a) / phi(z)`;
-- `preparation_ops(condition)`: `(gate, wires, parameters)` rotations that
-  prepare `|phi(c)>`, used only by `ciqp.simulation`.
+- `preparation_ops(condition)`: `(gate, wires, parameters)` operations that
+  prepare `|phi(c)>`, used only by `ciqp.simulation`.  The bridge maps `RX`,
+  `RY`, and `RZ` (one wire, one angle) and `CNOT` (two wires, no parameter),
+  which covers product states and entangling preparations.
 
 Training needs only the first two operations.  `ciqp.encoder` validates the
 built object against the full `CircuitEncoder` protocol, so any encoder it

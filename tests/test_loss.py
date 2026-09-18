@@ -558,6 +558,39 @@ def test_sample_chunk_must_be_positive() -> None:
         )
 
 
+def test_parameter_gradient_matches_finite_differences() -> None:
+    """Autodiff through the sampled objective is exact for fixed randomness."""
+    rng = np.random.default_rng(71)
+    ansatz = ciqp.complete_ansatz(4)
+    encoders = y_layer(rng.uniform(0.4, 2.4, size=(2, 4)))
+    targets = rng.integers(0, 2, size=(2, 32, 4)).astype(np.float64)
+    params = jnp.asarray(rng.normal(0.0, 0.3, size=ansatz.n_parameters))
+    bank = operator_bank(SIGMAS, 16, 2, 4, seed=13)
+    key = jax.random.PRNGKey(7)
+
+    def loss(current: jax.Array) -> jax.Array:
+        return ciqp.mmd(
+            current,
+            ansatz.generators,
+            encoders,
+            targets,
+            key,
+            bank=bank,
+            n_samples=256,
+            shared_samples=True,
+        ).loss
+
+    gradient = np.asarray(jax.grad(loss)(params))
+    epsilon = 1e-6
+    finite = np.array(
+        [
+            float(loss(params + step) - loss(params - step)) / (2.0 * epsilon)
+            for step in epsilon * np.eye(params.size)
+        ],
+    )
+    assert np.max(np.abs(gradient - finite)) < 1e-8
+
+
 def test_mixed_precision_gemm_stays_close_to_float64() -> None:
     """The mixed-precision knob does not move the objective."""
     rng = np.random.default_rng(51)

@@ -136,6 +136,24 @@ def _estimate(
     )
 
 
+def _validate_sample_axes(encoders: Encoder, drawn: jnp.ndarray) -> None:
+    """Reject draws whose condition or qubit axis does not match the encoder.
+
+    A size-1 axis would otherwise broadcast through the encoder and the phase
+    contraction, silently mixing reference states or qubits.
+    """
+    if drawn.shape[0] != encoders.n_conditions:
+        raise ValueError(
+            f"sample condition axis has {drawn.shape[0]} entries but the encoder "
+            f"covers {encoders.n_conditions} conditions",
+        )
+    if drawn.shape[2] != encoders.n_qubits:
+        raise ValueError(
+            f"sample qubit axis has {drawn.shape[2]} entries but the encoder "
+            f"acts on {encoders.n_qubits} qubits",
+        )
+
+
 def _draw(
     encoders: Encoder,
     key: jax.Array | None,
@@ -175,10 +193,12 @@ def estimate_pauli_z(
     """Estimate Pauli-Z expectations for one or more conditions.
 
     Pass ``key`` with ``n_samples`` to draw fresh reference samples, or
-    ``samples`` to reuse a ``(conditions, samples, qubits)`` draw.  A rank-two
-    ``(samples, qubits)`` draw is accepted only for a single-condition encoder,
-    because sharing one draw across different reference states would bias
-    every condition but the one it was sampled from.  ``masks`` has shape
+    ``samples`` to reuse a ``(conditions, samples, qubits)`` draw; the draw
+    must match the encoder's condition and qubit axes, because a size-1 axis
+    would otherwise broadcast silently.  A rank-two ``(samples, qubits)`` draw
+    is accepted only for a single-condition encoder, because sharing one draw
+    across different reference states would bias every condition but the one
+    it was sampled from.  ``masks`` has shape
     ``(n_masks, n_qubits)``; visible-width masks are accepted and padded with
     identity on the ancilla positions, following the visible-first convention
     of :mod:`iqp_cond.core`.
@@ -208,6 +228,7 @@ def estimate_pauli_z(
     _validate_binary("masks", masks)
 
     drawn = _draw(encoders, key, samples, n_samples)
+    _validate_sample_axes(encoders, drawn)
     _validate_binary("samples", drawn)
     return _estimate(
         params,
