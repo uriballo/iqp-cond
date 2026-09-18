@@ -291,7 +291,7 @@ def test_mmd_rejects_mixed_or_missing_mask_sources() -> None:
     targets = rng.integers(0, 2, size=(2, 16, 3)).astype(np.float64)
     params = np.zeros(ansatz.n_parameters)
     bank = operator_bank(SIGMAS, 8, 2, 3, seed=1)
-    with pytest.raises(ValueError, match="sigmas must not be empty"):
+    with pytest.raises(ValueError, match="or a prebuilt bank"):
         iqc.mmd(
             params,
             ansatz.generators,

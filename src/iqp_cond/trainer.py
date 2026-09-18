@@ -174,6 +174,16 @@ def _validate_training_inputs(
         raise ValueError("training_targets must be rank three")
     if validation_targets.ndim != 3:
         raise ValueError("validation_targets must be rank three")
+    for name, values in (
+        ("training_targets", training_targets),
+        ("validation_targets", validation_targets),
+    ):
+        if not np.isfinite(values).all() or not np.isin(values, (0, 1)).all():
+            raise ValueError(
+                f"{name} must contain only finite binary values 0 and 1",
+            )
+        if values.shape[1] < 2:
+            raise ValueError("each condition needs at least two target samples")
     if model.encoders.n_conditions != training_targets.shape[0]:
         raise ValueError(
             f"model covers {model.encoders.n_conditions} conditions but targets "
@@ -276,7 +286,9 @@ def train(
     # One width per bandwidth for every refreshed bank, so the compiled step is
     # built once.  The pilot draw sizes each width; the margin keeps a redraw
     # (which conditions the entry on ``distinct <= width``) rare.
-    max_masks = _refreshed_widths(sigmas, config, model, seed)
+    max_masks: tuple[int, ...] | None = None
+    if config.mask_refresh == STEP:
+        max_masks = _refreshed_widths(sigmas, config, model, seed)
     training_bank: OperatorBank | None = None
     if config.mask_refresh == CACHE:
         # Retained for the whole run; the loop never rebuilds it.

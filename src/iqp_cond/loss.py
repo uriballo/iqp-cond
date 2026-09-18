@@ -234,7 +234,9 @@ def mmd(
         raise ValueError("sample_chunk must be positive")
     if bank is None:
         if not sigmas:
-            raise ValueError("sigmas must not be empty")
+            raise ValueError(
+                "pass sigmas and n_ops for fresh masks, or a prebuilt bank",
+            )
         if n_ops is None or n_ops < 1:
             raise ValueError("n_ops must be positive")
     elif sigmas is not None or n_ops is not None:

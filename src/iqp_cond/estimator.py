@@ -207,6 +207,7 @@ def estimate_pauli_z(
     _validate_binary("masks", masks)
 
     drawn = _draw(encoders, key, samples, n_samples)
+    _validate_binary("samples", drawn)
     return _estimate(
         params,
         generators,

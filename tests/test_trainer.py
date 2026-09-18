@@ -274,3 +274,54 @@ def test_train_initializes_from_the_pooled_training_data(
     assert isinstance(kwargs, dict)
     assert kwargs["n_visible"] == N_QUBITS
     assert kwargs["seed"] == 11
+
+
+def test_train_rejects_non_binary_targets(
+    model: iqc.ConditionalModel,
+    targets: tuple[np.ndarray, np.ndarray],
+    config: iqc.TrainingConfig,
+) -> None:
+    training, validation = targets
+    fractional = training.copy()
+    fractional[0, 0, 0] = 0.5
+    with pytest.raises(ValueError, match="only finite binary values"):
+        iqc.train(model, fractional, validation, seed=1, config=config)
+
+
+def test_train_rejects_splits_with_one_sample_per_condition(
+    model: iqc.ConditionalModel,
+    targets: tuple[np.ndarray, np.ndarray],
+    config: iqc.TrainingConfig,
+) -> None:
+    training, validation = targets
+    with pytest.raises(ValueError, match="at least two target samples"):
+        iqc.train(model, training[:, :1, :], validation, seed=1, config=config)
+
+
+def test_angle_encoder_trains_end_to_end(
+    targets: tuple[np.ndarray, np.ndarray],
+) -> None:
+    """A layered encoder survives selection and jit inside the trainer."""
+    training, validation = targets
+    angles = np.random.default_rng(16).uniform(
+        0.3,
+        2.4,
+        size=(N_CONDITIONS, 2, N_QUBITS),
+    )
+    model = iqc.ConditionalModel(
+        iqc.complete_ansatz(N_QUBITS),
+        iqc.angle_encoder(angles, axes=("XYX", "ZYZ")),
+    )
+    config = iqc.TrainingConfig(
+        steps=5,
+        batch_size=8,
+        validation_interval=5,
+        n_ops=8,
+        mc_samples=16,
+        validation_n_ops=8,
+        validation_mc_samples=16,
+    )
+    result = iqc.train(model, training, validation, seed=13, config=config)
+    assert np.all(np.isfinite(result.train_losses))
+    assert np.all(np.isfinite(result.validation_losses))
+    assert result.best_params.shape == (model.ansatz.n_parameters,)

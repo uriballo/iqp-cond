@@ -272,3 +272,20 @@ def test_mixed_precision_gemm_stays_close_to_float64(setup) -> None:
     )
     # Nonzero pins the cast as active; the bound pins it as harmless.
     assert 0.0 < deviation < 1e-5
+
+
+def test_checked_estimator_rejects_non_binary_samples(setup) -> None:
+    """A fractional sample matrix would be read mod two by the kernel."""
+    ansatz, encoders, _targets = setup
+    fractional = np.full(
+        (N_CONDITIONS, 4, N_VISIBLE + N_ANCILLAS),
+        0.5,
+    )
+    with pytest.raises(ValueError, match="samples must contain only zeros and ones"):
+        iqc.estimate_pauli_z(
+            np.zeros(ansatz.n_parameters),
+            ansatz.generators,
+            encoders,
+            np.ones((1, N_VISIBLE)),
+            samples=fractional,
+        )
