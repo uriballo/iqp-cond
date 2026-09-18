@@ -142,7 +142,19 @@ def _draw(
     n_samples: int | None,
 ) -> jnp.ndarray:
     if samples is not None:
-        return samples if samples.ndim == 3 else samples[None, :, :]
+        if samples.ndim == 2:
+            if encoders.n_conditions != 1:
+                raise ValueError(
+                    "a rank-two samples draw covers a single condition; pass "
+                    "one reference set per condition with shape "
+                    "(conditions, samples, qubits)",
+                )
+            return samples[None, :, :]
+        if samples.ndim != 3:
+            raise ValueError(
+                "samples must have shape (conditions, samples, qubits)",
+            )
+        return samples
     assert key is not None and n_samples is not None
     return encoders.sample(key, n_samples)
 
@@ -162,10 +174,13 @@ def estimate_pauli_z(
     """Estimate Pauli-Z expectations for one or more conditions.
 
     Pass ``key`` with ``n_samples`` to draw fresh reference samples, or
-    ``samples`` to reuse a ``(conditions, samples, qubits)`` draw.  ``masks``
-    has shape ``(n_masks, n_qubits)``; visible-width masks are accepted and
-    padded with identity on the ancilla positions, following the visible-first
-    convention of :mod:`iqp_cond.ancilla`.
+    ``samples`` to reuse a ``(conditions, samples, qubits)`` draw.  A rank-two
+    ``(samples, qubits)`` draw is accepted only for a single-condition encoder,
+    because sharing one draw across different reference states would bias
+    every condition but the one it was sampled from.  ``masks`` has shape
+    ``(n_masks, n_qubits)``; visible-width masks are accepted and padded with
+    identity on the ancilla positions, following the visible-first convention
+    of :mod:`iqp_cond.ancilla`.
     """
     params = jnp.asarray(params, dtype=jnp.float64)
     generators = jnp.asarray(generators, dtype=jnp.float64)

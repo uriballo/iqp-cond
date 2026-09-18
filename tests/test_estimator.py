@@ -87,6 +87,39 @@ def test_pre_drawn_samples_match_the_key_source(setup) -> None:
     )
 
 
+def test_rank_two_samples_require_a_single_condition() -> None:
+    """One shared draw across different reference states would be biased."""
+    ansatz = iqc.complete_ansatz(N_VISIBLE)
+    generators = ansatz.generators
+    masks = np.ones((1, N_VISIBLE))
+    params = np.zeros(ansatz.n_parameters)
+    rng = np.random.default_rng(32)
+    draw = rng.integers(0, 2, size=(16, N_VISIBLE)).astype(np.float64)
+
+    single = iqc.encoder(iqc.PRODUCT, rng.uniform(0.4, 2.4, size=(1, N_VISIBLE)))
+    estimate = iqc.estimate_pauli_z(
+        params,
+        generators,
+        single,
+        masks,
+        samples=draw,
+    )
+    assert estimate.values.shape == (1, 1)
+    assert estimate.n_samples == 16
+
+    paired = iqc.encoder(iqc.PRODUCT, rng.uniform(0.4, 2.4, size=(2, N_VISIBLE)))
+    with pytest.raises(ValueError, match="single condition"):
+        iqc.estimate_pauli_z(params, generators, paired, masks, samples=draw)
+    with pytest.raises(ValueError, match="shape \\(conditions, samples, qubits\\)"):
+        iqc.estimate_pauli_z(
+            params,
+            generators,
+            single,
+            masks,
+            samples=draw.ravel(),
+        )
+
+
 def test_exactly_one_sample_source_is_required(setup) -> None:
     ansatz, encoders, _targets = setup
     params = np.zeros(ansatz.n_parameters)
