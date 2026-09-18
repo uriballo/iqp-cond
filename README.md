@@ -280,8 +280,8 @@ Two opt-in knobs cover large-budget regimes.
 ## Examples
 
 `examples/train_gaussian.py` trains a conditional model on a synthetic Gaussian
-family, and `examples/custom_encoder.py` registers a custom encoder and trains
-through the public interface. Both run from a checkout with
+family, then samples and scores it exactly; `examples/custom_encoder.py`
+registers a custom encoder and trains through the public interface. Both run from a checkout with
 `uv run python examples/<name>.py`.
 
 ## Tests

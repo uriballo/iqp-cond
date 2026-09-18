@@ -1,9 +1,9 @@
-"""End-to-end conditional training on a synthetic Gaussian family.
+"""End-to-end conditional training and sampling on a synthetic Gaussian family.
 
-Reproduces the manuscript's simplest benchmark shape without any external data:
-a translated discrete Gaussian over Hamming weight, a broadcast product-state
-encoder, and a short training run.  Sample counts are small so the script runs
-in seconds; the shipped `TrainingConfig` defaults are a starting point.
+A translated discrete Gaussian over Hamming weight, a broadcast product-state
+encoder, and a short training run; the trained model is then sampled exactly
+(the register is small enough) and compared with the targets.  Sample counts
+are small so the script runs in seconds.
 
     uv run python examples/train_gaussian.py
 """
@@ -24,7 +24,7 @@ def gaussian_samples(
     condition: float,
     n_samples: int,
 ) -> np.ndarray:
-    """Bitstrings whose Hamming weight follows the campaign's Gaussian law."""
+    """Bitstrings whose Hamming weight follows the Gaussian law."""
     mean = N_QUBITS * (0.15 + 0.70 * condition)
     width = 0.5 * np.sqrt(N_QUBITS)
     weights = np.arange(N_QUBITS + 1)
@@ -38,14 +38,21 @@ def gaussian_samples(
     return samples
 
 
+def hamming_profile(bits: np.ndarray) -> np.ndarray:
+    """Probability of each Hamming weight under a bitstring sample."""
+    weights = np.asarray(bits).sum(axis=-1).astype(int)
+    counts = np.bincount(weights, minlength=N_QUBITS + 1)
+    return counts / weights.size
+
+
 def main() -> None:
     rng = np.random.default_rng(20260917)
     conditions = np.asarray(TRAINING_CONDITIONS)
     training = np.stack([gaussian_samples(rng, c, N_TRAIN) for c in conditions])
     validation = np.stack([gaussian_samples(rng, c, N_VALIDATION) for c in conditions])
 
-    # The encoder owns "condition -> angle"; the campaign broadcasts one angle
-    # to every qubit, alpha(c) = pi (0.35 - 0.70 c).
+    # The encoder owns "condition -> angle": one angle per condition,
+    # alpha(c) = pi (0.35 - 0.70 c), broadcast to every qubit.
     angles = np.repeat((np.pi * (0.35 - 0.70 * conditions))[:, None], N_QUBITS, axis=1)
     model = ciqp.ConditionalModel(
         ciqp.complete_ansatz(N_QUBITS),
@@ -58,15 +65,36 @@ def main() -> None:
         validation,
         seed=0,
         config=ciqp.TrainingConfig(
-            steps=200,
+            steps=500,
             batch_size=100,
-            n_ops=64,
-            mc_samples=1024,
+            n_ops=128,
+            mc_samples=2048,
         ),
     )
     print(f"best step {result.best_step}")
     print(f"validation MMD {result.best_validation_loss:.6f}")
-    print(f"parameters {result.best_params.shape}")
+
+    # Exact sampling: the register is small enough to avoid Monte Carlo, so the
+    # trained model can be scored directly against the training conditions.
+    draws = ciqp.sample_exact(model, result.best_params, n_samples=2000, seed=1)
+    probabilities = ciqp.exact_probabilities(model, result.best_params)
+    state_weights = np.bitwise_count(np.arange(2**N_QUBITS)).astype(int)
+    profile_tvds = [
+        0.5
+        * float(
+            np.abs(
+                np.bincount(
+                    state_weights,
+                    weights=probabilities[index],
+                    minlength=N_QUBITS + 1,
+                )
+                - hamming_profile(training[index]),
+            ).sum(),
+        )
+        for index in range(conditions.size)
+    ]
+    print(f"exact samples {draws.shape}, mean profile TVD {np.mean(profile_tvds):.3f}")
+    print("raise steps, n_ops, and mc_samples to tighten the fit")
 
 
 if __name__ == "__main__":
