@@ -1,7 +1,7 @@
 """The encoder contract: what any family must satisfy to be trainable.
 
 The tests check each registered family against the defining identity of its own
-interface: the ratio query must equal ``phi(z xor a) / phi(z)`` computed from
+interface: the ratio query must equal ``psi_c(z xor a) / psi_c(z)`` computed from
 the full post-Hadamard state, rather than against the code path that produced
 it.  A custom family registered from outside the package must train too.
 """
@@ -95,7 +95,7 @@ def expected_ratios(
     samples: np.ndarray,
     masks: np.ndarray,
 ) -> np.ndarray:
-    """``phi(z xor a)/phi(z)`` from the exact state, zero where undefined."""
+    """``psi_c(z xor a)/psi_c(z)`` from the exact state, zero where undefined."""
     state = np.asarray(states.post_hadamard_amplitudes())
     base = indices_of(samples)
     conditions = np.arange(samples.shape[0])
@@ -120,7 +120,7 @@ def test_ratios_match_post_hadamard_state(
     angles: np.ndarray,
     masks: np.ndarray,
 ) -> None:
-    """``R(z, a)`` must equal ``phi(z xor a)/phi(z)`` from the full state."""
+    """``R(z, a)`` must equal ``psi_c(z xor a)/psi_c(z)`` from the full state."""
     states = make_encoder(family, angles)
     samples = np.asarray(states.sample(jax.random.PRNGKey(1), 16))
     ratios = np.asarray(states.amplitude_ratios(jnp.asarray(samples), masks))

@@ -5,9 +5,10 @@ condition-dependent input state ``|phi(c)>``.  A registered encoder provides
 three capabilities:
 
 ``sample``
-    Draw bitstrings from ``|phi(c)|^2`` in polynomial time.
+    Draw bitstrings from ``|psi_c(z)|^2`` in polynomial time, where
+    ``psi_c(z) = <z|H^n|phi(c)>`` is the post-Hadamard reference amplitude.
 ``amplitude_ratios``
-    Evaluate ``phi(z xor a) / phi(z)`` for sampled ``z`` and Fourier masks ``a``.
+    Evaluate ``psi_c(z xor a) / psi_c(z)`` for sampled ``z`` and Fourier masks ``a``.
 ``preparation_ops``
     Describe how ``|phi(c)>`` is prepared as named gates, so the model can be
     compiled to a circuit and sampled on a simulator or backend.
@@ -98,10 +99,10 @@ class Encoder(Protocol):
         """Number of qubits the encoder state lives on."""
 
     def sample(self, key: jax.Array, n_samples: int) -> jnp.ndarray:
-        """Draw ``(C, S, n)`` bitstrings distributed as ``|phi(c)|^2``."""
+        """Draw ``(C, S, n)`` bitstrings distributed as ``|psi_c(z)|^2``."""
 
     def amplitude_ratios(self, samples: jnp.ndarray, masks: jnp.ndarray) -> jnp.ndarray:
-        """Return ``(C, S, R)`` ratios ``phi(z xor a) / phi(z)``."""
+        """Return ``(C, S, R)`` ratios ``psi_c(z xor a) / psi_c(z)``."""
 
 
 @runtime_checkable

@@ -206,6 +206,62 @@ def test_pauli_moments_match_pennylane() -> None:
             )
 
 
+def test_estimator_gradient_matches_independent_pennylane_gradient() -> None:
+    """Check the complex ratio-gradient estimator against a separate QNode.
+
+    The X/Z encoder layers make the reference amplitudes complex, while the
+    three-bit observable mask is padded across the fourth, ancilla qubit.
+    """
+    axes = ("XYXX", "ZXYZ")
+    angles = np.asarray(
+        np.random.default_rng(41).uniform(0.3, 2.1, size=(1, len(axes), N_QUBITS))
+    )
+    encoders = ciqp.angle_encoder(angles, axes)
+    ansatz = ciqp.complete_ansatz(N_QUBITS)
+    generators = np.asarray(ansatz.generators)
+    params = jax.numpy.asarray(
+        np.random.default_rng(42).normal(0.0, 0.25, ansatz.n_parameters),
+    )
+    visible_mask = jax.numpy.asarray([[1.0, 0.0, 1.0]])
+    samples = encoders.sample(jax.random.PRNGKey(43), 200_000)
+
+    def sample_values(theta: jax.Array) -> jax.Array:
+        estimate = ciqp.estimate_pauli_z(
+            theta,
+            ansatz.generators,
+            encoders,
+            visible_mask,
+            samples=samples,
+            return_samples=True,
+        )
+        assert estimate.sample_values is not None
+        return estimate.sample_values[0, :, 0]
+
+    per_sample_grad = np.asarray(jax.jacfwd(sample_values)(params))
+    gradient = per_sample_grad.mean(axis=0)
+    standard_error = per_sample_grad.std(axis=0, ddof=1) / np.sqrt(samples.shape[1])
+
+    dev = qml.device("default.qubit", wires=N_QUBITS)
+    jax_angles = jax.numpy.asarray(angles[0])
+
+    @qml.qnode(dev, interface="jax")
+    def circuit(theta: jax.Array) -> jax.Array:
+        for layer, labels in enumerate(axes):
+            for wire, label in enumerate(labels):
+                getattr(qml, f"R{label}")(jax_angles[layer, wire], wires=wire)
+        for wire in range(N_QUBITS):
+            qml.Hadamard(wire)
+        for index, generator in enumerate(generators):
+            wires = [int(i) for i, bit in enumerate(generator) if bit]
+            qml.MultiRZ(-2.0 * theta[index], wires=wires)
+        for wire in range(N_QUBITS):
+            qml.Hadamard(wire)
+        return qml.expval(qml.PauliZ(0) @ qml.PauliZ(2))
+
+    exact_gradient = np.asarray(jax.grad(circuit)(params))
+    assert np.all(np.abs(gradient - exact_gradient) <= 5.0 * standard_error + 2e-5)
+
+
 def test_reference_sampling_matches_pennylane() -> None:
     """Sampled bitstring frequencies against the reference state's Born law.
 

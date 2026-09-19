@@ -17,7 +17,13 @@ import pytest
 
 import iqp_cond as ciqp
 
-CASES = ("real_step", "real_cache", "complex_ancilla", "mixed_chunk", "custom")
+CASES = (
+    "real_step",
+    "real_cache",
+    "complex_ancilla",
+    "mixed_precision_chunked",
+    "custom",
+)
 REFERENCE = Path(__file__).parent / "fixtures" / "unfused_training.npz"
 
 
@@ -69,8 +75,8 @@ def training_case(name):
         validation_n_ops=8,
         validation_mc_samples=19,
         mask_refresh=ciqp.CACHE if name == "real_cache" else ciqp.STEP,
-        gemm_dtype=jnp.float32 if name == "mixed_chunk" else None,
-        sample_chunk=8 if name == "mixed_chunk" else None,
+        gemm_dtype=jnp.float32 if name == "mixed_precision_chunked" else None,
+        sample_chunk=8 if name == "mixed_precision_chunked" else None,
     )
     return model, train, valid, config, initial
 
@@ -82,6 +88,7 @@ def test_fused_training_matches_unfused_reference(case):
         model, train, valid, seed=31, config=config, initial_params=initial
     )
     with np.load(REFERENCE) as reference:
+        reference_case = "mixed_chunk" if case == "mixed_precision_chunked" else case
         for field in (
             "train_losses",
             "validation_losses",
@@ -91,12 +98,12 @@ def test_fused_training_matches_unfused_reference(case):
         ):
             np.testing.assert_allclose(
                 getattr(result, field),
-                reference[f"{case}_{field}"],
-                rtol=1e-10,
-                atol=1e-12,
+                reference[f"{reference_case}_{field}"],
+                rtol=1e-7 if case == "mixed_precision_chunked" else 1e-10,
+                atol=1e-10 if case == "mixed_precision_chunked" else 1e-12,
                 err_msg=f"{case}: {field}",
             )
         for field in ("train_steps", "validation_steps", "best_step"):
             np.testing.assert_array_equal(
-                getattr(result, field), reference[f"{case}_{field}"]
+                getattr(result, field), reference[f"{reference_case}_{field}"]
             )

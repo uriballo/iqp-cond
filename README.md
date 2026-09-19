@@ -8,8 +8,9 @@ learned circuit stays fixed. Training uses sampled Pauli-character estimates of
 a multiscale Hamming-RBF maximum mean discrepancy, which is classically
 computable whenever the encoder supports two operations:
 
-- draw bitstrings from its own Born distribution, and
-- evaluate amplitude ratios `phi(z xor a) / phi(z)` for Fourier masks `a`.
+- draw bitstrings from the post-Hadamard reference Born distribution, and
+- evaluate reference-amplitude ratios `psi_c(z xor a) / psi_c(z)` for Fourier
+  masks `a`.
 
 Training needs only those two operations, and they are what keeps training
 classical; the model itself is still hard to sample from in general.  Sampled
@@ -37,7 +38,7 @@ environment.  The package requires Python 3.11+ and depends on `jax`, `numpy`,
 To use it from another project (private repository, access required):
 
 ```bash
-uv add "iqp-cond @ git+https://github.com/uriballo/iqp-cond@v0.3.0"
+uv add "iqp-cond @ git+https://github.com/uriballo/iqp-cond@v0.4.0"
 ```
 
 ## Quickstart
@@ -145,13 +146,15 @@ same circuit.
 three operations of the `CircuitEncoder` interface:
 
 - `sample(key, n_samples)`: `(conditions, samples, qubits)` bitstrings from the
-  encoder's Born law `|phi(c)|^2`;
+  post-Hadamard reference Born law `|psi_c(z)|^2`, where
+  `psi_c(z) = <z|H^n|phi(c)>`;
 - `amplitude_ratios(samples, masks)`: `(conditions, samples, masks)` ratios
-  `phi(z xor a) / phi(z)`;
+  `psi_c(z xor a) / psi_c(z)`;
 - `preparation_ops(condition)`: `(gate, wires, parameters)` operations that
-  prepare `|phi(c)>`, used only by `ciqp.simulation`.  The bridge maps `RX`,
-  `RY`, and `RZ` (one wire, one angle) and `CNOT` (two wires, no parameter),
-  which covers product states and entangling preparations.
+  prepare `|phi(c)>` before the first Hadamard, used only by
+  `ciqp.simulation`.  The bridge maps `RX`, `RY`, and `RZ` (one wire, one
+  angle) and `CNOT` (two wires, no parameter), which covers product states and
+  entangling preparations.
 
 Training needs only the first two operations.  `ciqp.encoder` validates the
 built object against the full `CircuitEncoder` protocol, so any encoder it
@@ -311,9 +314,9 @@ Two opt-in settings cover large-budget regimes.
 
 - `TrainingConfig(gemm_dtype=jnp.float32)` (or `gemm_dtype` on `mmd` /
   `estimate_pauli_z`) runs only the phase contraction in float32 and casts the
-  result back to float64, so the loss and gradient stay float64-precise. It
-  gives the largest speedup on GPUs, and on CPU it saves 6–16% of a full fit
-  with ~1e-7 gradient error.
+  phase result back to float64 before subsequent operations. Outputs remain
+  float64, with measured gradient error of about 1e-7. It gives the largest
+  speedup on GPUs, and on CPU it saves 6–16% of a full fit.
 - `TrainingConfig(sample_chunk=N)` streams the Monte Carlo samples in slices
   and accumulates the per-mask moments, bounding the live ratio tensor. It is
   faster at large sample budgets (1.1–1.24× at 8192+ samples) and slightly
@@ -341,5 +344,5 @@ and the amplitude ratios against statevector results.
 
 ## Status
 
-Version 0.3.0, a private development release.  Licence and citation metadata are
+Version 0.4.0, a private development release.  Licence and citation metadata are
 pending author and institutional approval.

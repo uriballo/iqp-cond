@@ -2,10 +2,11 @@
 
 The estimator is the paper's conditional Pauli estimator: for a Fourier mask
 ``a`` it averages ``Re[R_c(z, a) exp(i Delta_a f_theta(z))]`` over basis samples
-``z`` drawn from the condition state, where ``R_c(z, a) = phi(z xor a)/phi(z)``
-comes from the encoder and ``Delta_a f`` from the diagonal phase bank.  Both
-pieces are classically computable, so the estimator is unbiased with bounded
-variance and its parameter gradient is available in closed form.
+``z`` drawn from the post-Hadamard reference state.  The encoder supplies
+``R_c(z, a) = psi_c(z xor a)/psi_c(z)``, where
+``psi_c(z) = <z|H^n|phi(c)>``; the diagonal phase bank supplies ``Delta_a f``.
+Both pieces are classically computable, so the estimator is unbiased with
+bounded variance and its parameter gradient is available in closed form.
 
 The module exposes two entry points.  :func:`estimate_pauli_z` validates its
 inputs and pads visible-width masks with identity on the ancillas.
