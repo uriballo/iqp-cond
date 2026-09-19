@@ -353,7 +353,8 @@ Two opt-in settings cover large-budget regimes.
 `examples/train_gaussian.py` trains a conditional model on a synthetic Gaussian
 family, then samples it through the PennyLane bridge and scores the Hamming
 profiles; `examples/custom_encoder.py` instantiates a custom encoder and trains
-through the public interface.  Both run from a checkout with
+through the public interface; `examples/unconditional_fixed_encoder.py` shows
+an unconditional, fixed-reference encoder.  All run from a checkout with
 `uv run python examples/<name>.py`.
 
 ## Tests
