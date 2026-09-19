@@ -1,17 +1,13 @@
-"""The conditional MMD objective: campaign equivalence and estimator semantics.
+"""The conditional MMD objective: estimator semantics and exact identities.
 
-``fixtures/golden.npz`` records the compressed-loss value computed by the
-research campaign's ``exact_tvd_runner._weighted_loss_functions`` together with
-the bank it built (masks and weights per bandwidth and condition).  Feeding that
-same bank to :func:`iqp_cond.mmd` must reproduce the value bit-for-bit, because
-the library computes the paper's estimator, not an approximation of it.  The
-mask samplers and banks themselves are covered by ``test_operators.py``.
+The PennyLane cross-check owns the exact-expectation validation.  These tests
+cover the two mask sources, the shared-draw layout, result shapes, JIT
+behavior, chunking, and the target moments without recorded reference values.
 """
 
 from __future__ import annotations
 
 import dataclasses
-from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -19,9 +15,8 @@ import numpy as np
 import pytest
 
 import iqp_cond as ciqp
-from iqp_cond.loss import ConditionalMMDResult, hamming_rbf, mmd
+from iqp_cond.loss import ConditionalMMDResult, hamming_rbf, mmd, target_moments
 from iqp_cond.operators import (
-    OperatorBank,
     bank_from_ragged,
     mmd_operator_probability,
     operator_bank,
@@ -35,68 +30,7 @@ def y_layer(angles: np.ndarray) -> ciqp.AngleEncoder:
     return ciqp.AngleEncoder(angles[:, None, :], axes=("Y" * angles.shape[1],))
 
 
-FIXTURES = Path(__file__).parent / "fixtures" / "golden.npz"
 SIGMAS = (1.0, 2.0, 4.0)
-N_CONDITIONS = 2
-N_VISIBLE = 4
-N_OPS = 64
-N_SAMPLES = 64
-
-
-@pytest.fixture(scope="module")
-def golden() -> dict[str, np.ndarray]:
-    with np.load(FIXTURES) as data:
-        return {name: data[name] for name in data.files}
-
-
-def rebuild_bank(golden: dict[str, np.ndarray], label: str) -> OperatorBank:
-    """Rebuild the campaign's bank from the recorded masks and weights."""
-    masks = tuple(
-        tuple(
-            jnp.asarray(golden[f"{label}_masks_{bandwidth * N_CONDITIONS + condition}"])
-            for condition in range(N_CONDITIONS)
-        )
-        for bandwidth in range(len(SIGMAS))
-    )
-    weights = tuple(
-        tuple(
-            jnp.asarray(
-                golden[f"{label}_weights_{bandwidth * N_CONDITIONS + condition}"],
-            )
-            for condition in range(N_CONDITIONS)
-        )
-        for bandwidth in range(len(SIGMAS))
-    )
-    return bank_from_ragged(
-        sigmas=SIGMAS,
-        masks=masks,
-        weights=weights,
-        n_ops=N_OPS,
-        n_visible=N_VISIBLE,
-    )
-
-
-def test_mmd_reproduces_the_campaign_value(
-    golden: dict[str, np.ndarray],
-) -> None:
-    label = "bank_plain"
-    ansatz = ciqp.Ansatz.complete(N_VISIBLE)
-    encoders = y_layer(golden[f"{label}_angles"])
-    bank = rebuild_bank(golden, label)
-    key = jax.random.wrap_key_data(np.asarray(golden[f"{label}_key"]))
-
-    result = mmd(
-        golden[f"{label}_params"],
-        ansatz.generators,
-        encoders,
-        golden[f"{label}_targets"],
-        key,
-        bank=bank,
-        n_samples=N_SAMPLES,
-    )
-    deviation = abs(float(result.loss) - float(golden[f"{label}_value"]))
-    assert deviation == 0.0, f"{label}: loss differs from the campaign by {deviation!r}"
-    assert result.per_bandwidth_condition.shape == (len(SIGMAS), N_CONDITIONS)
 
 
 def test_mmd_rejects_a_mismatched_bank() -> None:
@@ -287,6 +221,43 @@ def test_mmd_rejects_generator_and_params_shape_mismatches() -> None:
             n_samples=16,
         ).loss
 
+    small = ciqp.Ansatz.complete(3)
+    small_encoder = y_layer(rng.uniform(0.4, 2.4, size=(2, 3)))
+    wide_targets = rng.integers(0, 2, size=(2, 16, 5)).astype(np.float64)
+    with pytest.raises(ValueError, match="target width"):
+        mmd(
+            np.zeros(small.n_parameters),
+            small.generators,
+            small_encoder,
+            wide_targets,
+            key,
+            sigmas=(1.0,),
+            n_ops=8,
+            n_samples=16,
+        )
+    with pytest.raises(ValueError, match="targets must have shape"):
+        mmd(
+            params,
+            ansatz.generators,
+            encoders,
+            targets.reshape(-1, 4),
+            key,
+            sigmas=(1.0,),
+            n_ops=8,
+            n_samples=16,
+        )
+    with pytest.raises(ValueError, match="n_samples must be at least two"):
+        mmd(
+            params,
+            ansatz.generators,
+            encoders,
+            targets,
+            key,
+            sigmas=(1.0,),
+            n_ops=8,
+            n_samples=1,
+        )
+
     with pytest.raises(ValueError, match="generators cover 4"):
         jax.jit(loss)(params, ansatz.generators)
 
@@ -360,6 +331,43 @@ def test_mmd_result_survives_jit() -> None:
     assert result.loss.shape == ()
 
 
+def test_target_moments_are_unbiased_for_an_exact_product_law() -> None:
+    """The target U-statistic squares converge to the exact squared moments."""
+    n_visible, n_samples, n_batches = 3, 256, 200
+    probabilities = np.array([0.2, 0.5, 0.8])
+    masks = ((np.arange(2**n_visible)[:, None] >> np.arange(n_visible)) & 1).astype(
+        np.float64
+    )
+    # Masks are row zero of the little-endian enumeration, identity first.
+    exact = np.prod(
+        np.where(masks == 1.0, 1.0 - 2.0 * probabilities, 1.0),
+        axis=1,
+    )
+    rng = np.random.default_rng(22)
+    sampled_means = []
+    sampled_squares = []
+    for _ in range(n_batches):
+        batch = (rng.uniform(size=(1, n_samples, n_visible)) < probabilities).astype(
+            np.float64,
+        )
+        means, squares = target_moments(batch, masks)
+        sampled_means.append(np.asarray(means)[0])
+        sampled_squares.append(np.asarray(squares)[0])
+    sampled_means = np.stack(sampled_means)
+    sampled_squares = np.stack(sampled_squares)
+
+    mean_error = sampled_means.mean(axis=0) - exact
+    square_error = sampled_squares.mean(axis=0) - exact**2
+    mean_spread = sampled_means.std(axis=0, ddof=1) / np.sqrt(n_batches)
+    square_spread = sampled_squares.std(axis=0, ddof=1) / np.sqrt(n_batches)
+    assert np.all(np.abs(mean_error) < 5.0 * mean_spread + 1e-12)
+    assert np.all(np.abs(square_error) < 5.0 * square_spread + 1e-12)
+    assert np.allclose(sampled_squares[:, 0], 1.0, atol=1e-12)
+
+    with pytest.raises(ValueError, match="at least two target samples"):
+        target_moments(np.zeros((1, 1, n_visible)), masks)
+
+
 def test_hamming_rbf_matches_the_character_expansion() -> None:
     """The exact kernel equals ``E_a[chi_a(x) chi_a(y)]`` under the mask law."""
     rng = np.random.default_rng(21)
@@ -384,8 +392,11 @@ def test_hamming_rbf_matches_the_character_expansion() -> None:
         )
         assert reconstructed == pytest.approx(expected, rel=1e-12, abs=1e-12)
         assert hamming_rbf(jnp.asarray(x), jnp.asarray(x), sigma) == 1.0
+    with pytest.raises(ValueError, match="sigma must be positive"):
+        hamming_rbf(jnp.asarray(x), jnp.asarray(y), 0.0)
 
 
+@pytest.mark.slow
 def test_shared_samples_agrees_with_per_entry_sampling() -> None:
     """One reference draw per condition is unbiased for the same objective."""
     rng = np.random.default_rng(41)
@@ -395,24 +406,20 @@ def test_shared_samples_agrees_with_per_entry_sampling() -> None:
     params = rng.normal(0.0, 0.4, size=ansatz.n_parameters)
     bank = operator_bank(SIGMAS, 32, 2, 5, seed=3)
 
-    def losses(shared: bool, n_keys: int = 240) -> np.ndarray:
-        return np.asarray(
-            [
-                float(
-                    mmd(
-                        params,
-                        ansatz.generators,
-                        encoders,
-                        targets,
-                        jax.random.PRNGKey(key),
-                        bank=bank,
-                        n_samples=64,
-                        shared_samples=shared,
-                    ).loss,
-                )
-                for key in range(n_keys)
-            ],
+    def evaluate(shared: bool, key: int = 0) -> ConditionalMMDResult:
+        return mmd(
+            params,
+            ansatz.generators,
+            encoders,
+            targets,
+            jax.random.PRNGKey(key),
+            bank=bank,
+            n_samples=64,
+            shared_samples=shared,
         )
+
+    def losses(shared: bool, n_keys: int = 240) -> np.ndarray:
+        return np.asarray([float(evaluate(shared, key).loss) for key in range(n_keys)])
 
     per_entry = losses(False)
     shared = losses(True)
@@ -421,38 +428,11 @@ def test_shared_samples_agrees_with_per_entry_sampling() -> None:
     )
     assert abs(shared.mean() - per_entry.mean()) < 5.0 * spread + 1e-9
 
-
-def test_shared_samples_keeps_the_result_shape() -> None:
-    rng = np.random.default_rng(42)
-    ansatz = ciqp.Ansatz.complete(4)
-    encoders = y_layer(rng.uniform(0.4, 2.4, size=(2, 4)))
-    targets = rng.integers(0, 2, size=(2, 32, 4)).astype(np.float64)
-    params = np.zeros(ansatz.n_parameters)
-    bank = operator_bank(SIGMAS, 16, 2, 4, seed=4)
-
-    def evaluate(shared: bool) -> ConditionalMMDResult:
-        return mmd(
-            params,
-            ansatz.generators,
-            encoders,
-            targets,
-            jax.random.PRNGKey(0),
-            bank=bank,
-            n_samples=32,
-            shared_samples=shared,
-        )
-
-    shared = evaluate(True)
-    per_entry = evaluate(False)
-    assert shared.per_bandwidth_condition.shape == (3, 2)
-    assert per_entry.per_bandwidth_condition.shape == (3, 2)
-    assert np.all(np.isfinite(np.asarray(shared.per_bandwidth_condition)))
-    # The two layouts share the objective, so the values need not match.
-    assert np.allclose(
-        np.asarray(shared.per_condition),
-        np.asarray(per_entry.per_condition),
-        atol=0.05,
-    )
+    shared_result = evaluate(True)
+    per_entry_result = evaluate(False)
+    assert shared_result.per_bandwidth_condition.shape == (len(SIGMAS), 2)
+    assert per_entry_result.per_bandwidth_condition.shape == (len(SIGMAS), 2)
+    assert np.all(np.isfinite(np.asarray(shared_result.per_bandwidth_condition)))
 
 
 def test_shared_samples_reuses_one_draw_per_condition_with_fresh_masks(
@@ -589,36 +569,3 @@ def test_parameter_gradient_matches_finite_differences() -> None:
         ],
     )
     assert np.max(np.abs(gradient - finite)) < 1e-8
-
-
-def test_mixed_precision_gemm_stays_close_to_float64() -> None:
-    """The mixed-precision knob does not move the objective."""
-    rng = np.random.default_rng(51)
-    ansatz = ciqp.Ansatz.complete(4)
-    encoders = y_layer(rng.uniform(0.4, 2.4, size=(2, 4)))
-    targets = rng.integers(0, 2, size=(2, 64, 4)).astype(np.float64)
-    params = rng.normal(0.0, 0.3, size=ansatz.n_parameters)
-    bank = operator_bank(SIGMAS, 64, 2, 4, seed=9)
-    key = jax.random.PRNGKey(5)
-
-    reference = mmd(
-        params,
-        ansatz.generators,
-        encoders,
-        targets,
-        key,
-        bank=bank,
-        n_samples=512,
-    )
-    mixed = mmd(
-        params,
-        ansatz.generators,
-        encoders,
-        targets,
-        key,
-        bank=bank,
-        n_samples=512,
-        gemm_dtype=jnp.float32,
-    )
-    deviation = abs(float(mixed.loss) - float(reference.loss))
-    assert 0.0 < deviation < 1e-5

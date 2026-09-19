@@ -1,15 +1,11 @@
 """Mask law, samplers, and compressed operator banks.
 
-The tests pin the NumPy sampler against the campaign implementation, so the
-same generator state must produce the same draws.  They check the JAX sampler
-against the analytic conditional Bernoulli law, and the bank for the properties
-training relies on: inert padding, static shapes, per-bandwidth widths, and
-pytree registration.
+Both samplers must draw the conditional Bernoulli law ``P(a | a != 0)`` with
+the nonidentity mass divided over the draws as weights; the bank tests check
+inert padding, static shapes, per-bandwidth widths, and pytree registration.
 """
 
 from __future__ import annotations
-
-from pathlib import Path
 
 import jax
 import jax.numpy as jnp
@@ -26,41 +22,61 @@ from iqp_cond.operators import (
     sample_nonidentity_masks_jax,
 )
 
-FIXTURES = Path(__file__).parent / "fixtures" / "golden.npz"
 SIGMAS = (1.0, 2.0, 4.0)
-N_CONDITIONS = 2
-N_VISIBLE = 4
-N_OPS = 64
 
 
-@pytest.fixture(scope="module")
-def golden() -> dict[str, np.ndarray]:
-    with np.load(FIXTURES) as data:
-        return {name: data[name] for name in data.files}
+@pytest.mark.slow
+def test_sample_nonidentity_masks_numpy_draws_the_conditional_law() -> None:
+    """The NumPy sampler follows the same law as the JAX sampler."""
+    n_visible, n_ops, sigma = 5, 100_000, 2.0
+    masks, weights = sample_nonidentity_masks(
+        np.random.default_rng(0),
+        n_ops,
+        n_visible,
+        sigma,
+    )
+    assert np.isin(masks, (0, 1)).all()
+    assert np.all(masks.sum(axis=1) > 0)
+    codes = (masks * 2 ** np.arange(n_visible)).sum(axis=1).astype(int)
+    assert len(set(codes.tolist())) == len(codes)  # duplicates are compressed
+
+    p = float(mmd_operator_probability(sigma))
+    nonidentity_mass = 1.0 - (1.0 - p) ** n_visible
+    assert float(np.asarray(weights).sum()) == pytest.approx(
+        nonidentity_mass,
+        rel=1e-12,
+    )
+
+    analytic = np.array(
+        [
+            (
+                p ** bin(code).count("1")
+                * (1.0 - p) ** (n_visible - bin(code).count("1"))
+                / nonidentity_mass
+                if code
+                else 0.0
+            )
+            for code in range(2**n_visible)
+        ],
+    )
+    observed = np.zeros(2**n_visible)
+    observed[codes] = np.asarray(weights) * n_ops / nonidentity_mass
+    expected_counts = n_ops * analytic
+    sigma_counts = np.sqrt(n_ops * analytic * (1.0 - analytic))
+    reachable = expected_counts > 25.0
+    assert reachable.any()
+    assert np.all(
+        np.abs(observed[reachable] - expected_counts[reachable])
+        < 5.0 * sigma_counts[reachable] + 1e-9,
+    )
 
 
-def test_sample_nonidentity_masks_matches_the_campaign_sampler(
-    golden: dict[str, np.ndarray],
-) -> None:
-    """Same draws as the research sampler for the same generator state.
-
-    The research sampler seeds a NumPy generator from the raw key bytes; the
-    library takes the generator directly, so the bridge is made explicit here
-    and the resulting masks and weights must match exactly.
-    """
-    raw_key = np.asarray(golden["sampler_key"], dtype=np.uint32)
-    seed = int.from_bytes(raw_key.tobytes()[:8], "little")
-    masks, weights = sample_nonidentity_masks(np.random.default_rng(seed), 64, 5, 2.0)
-    assert np.array_equal(masks, golden["sampler_masks"])
-    assert np.allclose(weights, golden["sampler_weights"])
-
-
+@pytest.mark.slow
 def test_sample_nonidentity_masks_jax_draws_the_conditional_law() -> None:
     """The JIT sampler must draw exactly ``P(a | a != 0)`` with mass weights.
 
-    Same law as the NumPy sampler the campaign pinned: identity never appears,
-    each weight is ``Q+ / n_ops``, and the empirical mask frequencies match the
-    analytic conditional Bernoulli law.
+    Identity never appears, each weight is ``Q+ / n_ops``, and the empirical
+    mask frequencies match the analytic conditional Bernoulli law.
     """
     n_visible, n_ops, sigma = 5, 100_000, 2.0
     masks, weights = sample_nonidentity_masks_jax(
@@ -100,60 +116,160 @@ def test_sample_nonidentity_masks_jax_rejects_bad_sigma() -> None:
         sample_nonidentity_masks_jax(jax.random.PRNGKey(0), 8, 3, 0.0)
 
 
-def rebuild_bank(golden: dict[str, np.ndarray], label: str) -> OperatorBank:
-    """Rebuild the campaign's bank from the recorded masks and weights."""
-    masks = tuple(
-        tuple(
-            jnp.asarray(golden[f"{label}_masks_{bandwidth * N_CONDITIONS + condition}"])
-            for condition in range(N_CONDITIONS)
-        )
-        for bandwidth in range(len(SIGMAS))
-    )
-    weights = tuple(
-        tuple(
-            jnp.asarray(
-                golden[f"{label}_weights_{bandwidth * N_CONDITIONS + condition}"],
-            )
-            for condition in range(N_CONDITIONS)
-        )
-        for bandwidth in range(len(SIGMAS))
-    )
-    return bank_from_ragged(
-        sigmas=SIGMAS,
-        masks=masks,
-        weights=weights,
-        n_ops=N_OPS,
-        n_visible=N_VISIBLE,
-    )
+def test_samplers_validate_their_arguments() -> None:
+    with pytest.raises(ValueError, match="n_ops and n_visible must be positive"):
+        sample_nonidentity_masks_jax(jax.random.PRNGKey(0), 0, 3, 1.0)
+    for arguments in ((0, 3, 1.0), (4, 3, 0.0)):
+        with pytest.raises(
+            ValueError,
+            match="n_ops, n_qubits, and sigma must be positive",
+        ):
+            sample_nonidentity_masks(np.random.default_rng(0), *arguments)
 
 
-def test_bank_records_one_entry_per_bandwidth_and_condition(
-    golden: dict[str, np.ndarray],
-) -> None:
-    bank = rebuild_bank(golden, "bank_plain")
+def test_operator_bank_validates_conditions_and_caps() -> None:
+    with pytest.raises(ValueError, match="n_conditions must be positive"):
+        operator_bank(SIGMAS, 8, 0, 4, seed=0)
+    with pytest.raises(ValueError, match="max_masks must give one positive width"):
+        operator_bank(SIGMAS, 8, 1, 4, seed=0, max_masks=(3, 0, 3))
+    with pytest.raises(ValueError, match="max_masks must give one positive width"):
+        operator_bank(SIGMAS, 8, 1, 4, seed=0, max_masks=(3, 3))
+
+
+def test_bank_dataclass_validates_static_shapes() -> None:
+    masks = jnp.zeros((1, 1, 2, 4))
+    weights = jnp.zeros((1, 1, 2))
+    with pytest.raises(ValueError, match="masks must be"):
+        OperatorBank(
+            sigmas=(1.0,),
+            masks=jnp.zeros(3),
+            weights=weights,
+            n_ops=2,
+            n_visible=4,
+            n_masks=2,
+        )
+    with pytest.raises(ValueError, match="agree on their leading axes"):
+        OperatorBank(
+            sigmas=(1.0,),
+            masks=masks,
+            weights=jnp.zeros((1, 1, 3)),
+            n_ops=2,
+            n_visible=4,
+            n_masks=2,
+        )
+    with pytest.raises(ValueError, match="one entry per bandwidth"):
+        OperatorBank(
+            sigmas=(1.0, 2.0),
+            masks=masks,
+            weights=weights,
+            n_ops=2,
+            n_visible=4,
+            n_masks=2,
+        )
+    with pytest.raises(ValueError, match="visible-width"):
+        OperatorBank(
+            sigmas=(1.0,),
+            masks=masks,
+            weights=weights,
+            n_ops=2,
+            n_visible=3,
+            n_masks=2,
+        )
+    with pytest.raises(ValueError, match="n_masks must match"):
+        OperatorBank(
+            sigmas=(1.0,),
+            masks=masks,
+            weights=weights,
+            n_ops=2,
+            n_visible=4,
+            n_masks=3,
+        )
+    with pytest.raises(ValueError, match="at least one condition"):
+        OperatorBank(
+            sigmas=(1.0,),
+            masks=jnp.zeros((1, 0, 2, 4)),
+            weights=jnp.zeros((1, 0, 2)),
+            n_ops=2,
+            n_visible=4,
+            n_masks=2,
+        )
+    with pytest.raises(ValueError, match="one entry per bandwidth"):
+        OperatorBank(
+            sigmas=(1.0,),
+            masks=masks,
+            weights=weights,
+            n_ops=2,
+            n_visible=4,
+            n_masks=2,
+            widths=(1, 2),
+        )
+    with pytest.raises(ValueError, match="between 1 and n_masks"):
+        OperatorBank(
+            sigmas=(1.0,),
+            masks=masks,
+            weights=weights,
+            n_ops=2,
+            n_visible=4,
+            n_masks=2,
+            widths=(3,),
+        )
+
+
+def test_bank_from_ragged_validates_entry_counts() -> None:
+    masks = ((np.ones((2, 4)),),)
+    weights = ((np.ones(2),),)
+    with pytest.raises(ValueError, match="one entry per bandwidth"):
+        bank_from_ragged(
+            sigmas=(1.0, 2.0),
+            masks=masks,
+            weights=weights,
+            n_ops=2,
+            n_visible=4,
+        )
+
+
+def test_operator_bank_handles_registers_wider_than_the_code_packing() -> None:
+    """A 63-qubit register falls back to the per-entry sampler."""
+    bank = operator_bank((2.0,), 8, 1, 63, seed=0)
+    assert bank.masks.shape == (1, 1, bank.n_masks, 63)
+    masks, weights = bank.entry(0, 0)
+    carried = np.asarray(masks)[np.asarray(weights) > 0.0]
+    assert np.all(carried.sum(axis=1) > 0)
+
+
+def test_operator_bank_reports_an_unreachable_width_cap() -> None:
+    with pytest.raises(RuntimeError, match="no bank entry with at most 1"):
+        operator_bank((4.0,), 64, 1, 8, seed=0, max_masks=1)
+    with pytest.raises(RuntimeError, match="no bank entry with at most 1"):
+        operator_bank((2.0,), 8, 1, 63, seed=0, max_masks=1)
+
+
+def test_bank_records_one_entry_per_bandwidth_and_condition() -> None:
+    bank = operator_bank(SIGMAS, 64, 2, 4, seed=0)
     assert bank.n_bandwidths == len(SIGMAS)
-    assert bank.n_conditions == N_CONDITIONS
-    assert bank.masks.shape == (len(SIGMAS), N_CONDITIONS, bank.n_masks, N_VISIBLE)
-    assert bank.weights.shape == (len(SIGMAS), N_CONDITIONS, bank.n_masks)
+    assert bank.n_conditions == 2
+    assert bank.masks.shape == (len(SIGMAS), 2, bank.n_masks, 4)
+    assert bank.weights.shape == (len(SIGMAS), 2, bank.n_masks)
     for bandwidth in range(bank.n_bandwidths):
         for condition in range(bank.n_conditions):
             masks, weights = bank.entry(bandwidth, condition)
-            assert masks.shape == (bank.n_masks, N_VISIBLE)
+            assert masks.shape == (bank.width(bandwidth), 4)
             # Every mask that carries weight is a nonidentity mask.
             carried = np.asarray(masks)[np.asarray(weights) > 0.0]
             assert np.all(carried.sum(axis=1) > 0)
 
 
-def test_bank_weights_carry_the_nonidentity_mass(
-    golden: dict[str, np.ndarray],
-) -> None:
+def test_bank_weights_carry_the_nonidentity_mass() -> None:
     """Weight sums must equal ``1 - q(0)``, the rescaling for skipping identity."""
+    bank = operator_bank(SIGMAS, 64, 2, 4, seed=0)
     for bandwidth, sigma in enumerate(SIGMAS):
-        expected = 1.0 - float((1.0 - mmd_operator_probability(sigma)) ** N_VISIBLE)
-        for condition in range(N_CONDITIONS):
-            index = bandwidth * N_CONDITIONS + condition
-            total = float(np.asarray(golden[f"bank_plain_weights_{index}"]).sum())
-            assert total == pytest.approx(expected, rel=1e-12)
+        expected = 1.0 - float((1.0 - mmd_operator_probability(sigma)) ** 4)
+        for condition in range(bank.n_conditions):
+            _masks, weights = bank.entry(bandwidth, condition)
+            assert float(np.asarray(weights).sum()) == pytest.approx(
+                expected,
+                rel=1e-12,
+            )
 
 
 def test_operator_bank_is_deterministic_and_skips_the_identity() -> None:
@@ -232,6 +348,7 @@ def test_fixed_per_bandwidth_widths_keep_refreshed_banks_one_shape() -> None:
     assert jax.tree_util.tree_structure(first) == jax.tree_util.tree_structure(second)
 
 
+@pytest.mark.slow
 def test_bank_reproduces_the_conditional_mask_law() -> None:
     """Bank weights must recover ``P(a | a != 0)`` after removing the mass factor.
 

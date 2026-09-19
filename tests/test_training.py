@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import dataclasses
 
+import jax.numpy as jnp
 import numpy as np
 import pytest
 
 import iqp_cond as ciqp
+from iqp_cond.initialization import parameters_from_data
 from iqp_cond.operators import expected_bodyness_sigmas
 from iqp_cond.training import CACHE, STEP
 
@@ -221,6 +223,8 @@ def test_training_config_validates_its_fields() -> None:
         ciqp.TrainingConfig(mc_samples=1)
     with pytest.raises(ValueError, match="sample_chunk must be positive"):
         ciqp.TrainingConfig(sample_chunk=0)
+    with pytest.raises(ValueError, match="validation_interval must be positive"):
+        ciqp.TrainingConfig(validation_interval=0)
     with pytest.raises(ValueError, match="unknown mask_refresh"):
         ciqp.TrainingConfig(mask_refresh="sometimes")
 
@@ -261,41 +265,73 @@ def test_default_sigmas_resolve_and_train(
     assert np.all(np.isfinite(result.validation_losses))
 
 
-def test_train_initializes_from_the_pooled_training_data(
-    monkeypatch: pytest.MonkeyPatch,
+def test_train_defaults_to_the_pooled_data_initialization(
     model: ciqp.ConditionalModel,
     targets: tuple[np.ndarray, np.ndarray],
+    config: ciqp.TrainingConfig,
 ) -> None:
-    """Without initial_params the trainer pools the conditions for initialization."""
+    """The implicit start equals the pooled mean-covariance prescription."""
     training, validation = targets
-    from iqp_cond.initialization import parameters_from_data as original
-
-    seen: dict[str, object] = {}
-
-    def spy(data: np.ndarray, generators: np.ndarray, **kwargs: object) -> np.ndarray:
-        seen["data"] = np.asarray(data)
-        seen["kwargs"] = kwargs
-        return original(data, generators, **kwargs)
-
-    monkeypatch.setattr("iqp_cond.training.parameters_from_data", spy)
-    config = ciqp.TrainingConfig(
-        steps=1,
-        batch_size=8,
-        validation_interval=1,
-        sigmas=(1.0,),
-        n_ops=8,
-        mc_samples=16,
-        validation_n_ops=8,
-        validation_mc_samples=16,
+    default = ciqp.train(model, training, validation, seed=11, config=config)
+    explicit = ciqp.train(
+        model,
+        training,
+        validation,
+        seed=11,
+        config=config,
+        initial_params=parameters_from_data(
+            training.reshape(-1, N_QUBITS),
+            model.ansatz.generators,
+            n_visible=N_QUBITS,
+            seed=11,
+        ),
     )
-    ciqp.train(model, training, validation, seed=11, config=config)
-    pooled = seen["data"]
-    assert isinstance(pooled, np.ndarray)
-    assert pooled.shape == (training.shape[0] * training.shape[1], N_QUBITS)
-    kwargs = seen["kwargs"]
-    assert isinstance(kwargs, dict)
-    assert kwargs["n_visible"] == N_QUBITS
-    assert kwargs["seed"] == 11
+    assert np.array_equal(default.final_params, explicit.final_params)
+    assert np.array_equal(default.train_losses, explicit.train_losses)
+
+
+def test_train_validates_initial_params(
+    model: ciqp.ConditionalModel,
+    targets: tuple[np.ndarray, np.ndarray],
+    config: ciqp.TrainingConfig,
+) -> None:
+    training, validation = targets
+    with pytest.raises(ValueError, match="initial_params must have shape"):
+        ciqp.train(
+            model,
+            training,
+            validation,
+            seed=1,
+            config=config,
+            initial_params=np.zeros(2),
+        )
+    bad = np.zeros(model.ansatz.n_parameters)
+    bad[0] = np.nan
+    with pytest.raises(ValueError, match="initial_params must contain only finite"):
+        ciqp.train(
+            model,
+            training,
+            validation,
+            seed=1,
+            config=config,
+            initial_params=bad,
+        )
+
+
+def test_train_validates_target_shapes(
+    model: ciqp.ConditionalModel,
+    targets: tuple[np.ndarray, np.ndarray],
+    config: ciqp.TrainingConfig,
+) -> None:
+    training, validation = targets
+    with pytest.raises(ValueError, match="training_targets must be rank three"):
+        ciqp.train(model, training[0], validation, seed=1, config=config)
+    with pytest.raises(ValueError, match="validation_targets must be rank three"):
+        ciqp.train(model, training, validation[0], seed=1, config=config)
+    with pytest.raises(ValueError, match="conditions must align"):
+        ciqp.train(model, training, validation[:1], seed=1, config=config)
+    with pytest.raises(ValueError, match="validation targets"):
+        ciqp.train(model, training, validation[:, :, :1], seed=1, config=config)
 
 
 def test_train_rejects_non_binary_targets(
@@ -347,3 +383,156 @@ def test_angle_encoder_trains_end_to_end(
     assert np.all(np.isfinite(result.train_losses))
     assert np.all(np.isfinite(result.validation_losses))
     assert result.best_params.shape == (model.ansatz.n_parameters,)
+
+
+def test_training_is_deterministic_in_the_seed(
+    model: ciqp.ConditionalModel,
+    targets: tuple[np.ndarray, np.ndarray],
+    config: ciqp.TrainingConfig,
+) -> None:
+    training, validation = targets
+    first = ciqp.train(model, training, validation, seed=21, config=config)
+    repeat = ciqp.train(model, training, validation, seed=21, config=config)
+    other = ciqp.train(model, training, validation, seed=22, config=config)
+    assert np.array_equal(first.final_params, repeat.final_params)
+    assert np.array_equal(first.train_losses, repeat.train_losses)
+    assert not np.array_equal(first.final_params, other.final_params)
+
+
+def test_complex_ancilla_model_trains(
+    targets: tuple[np.ndarray, np.ndarray],
+) -> None:
+    """A complex layered encoder on an ancilla register trains end to end."""
+    training, validation = targets
+    angles = np.random.default_rng(27).uniform(
+        0.3,
+        1.2,
+        size=(N_CONDITIONS, 2, N_QUBITS + 2),
+    )
+    model = ciqp.ConditionalModel(
+        ciqp.Ansatz.complete(N_QUBITS + 2),
+        ciqp.AngleEncoder(angles, axes=("XYXYX", "ZYZYZ")),
+        n_visible=N_QUBITS,
+    )
+    config = ciqp.TrainingConfig(
+        steps=6,
+        batch_size=8,
+        learning_rate=0.015,
+        final_learning_rate=0.002,
+        validation_interval=3,
+        sigmas=(0.8, 1.3),
+        n_ops=8,
+        mc_samples=17,
+        validation_n_ops=8,
+        validation_mc_samples=19,
+    )
+    result = ciqp.train(model, training, validation, seed=31, config=config)
+    assert np.all(np.isfinite(result.train_losses))
+    assert np.all(np.isfinite(result.validation_losses))
+    assert result.best_params.shape == (model.ansatz.n_parameters,)
+
+
+def test_mixed_precision_and_chunked_training_run(
+    model: ciqp.ConditionalModel,
+    targets: tuple[np.ndarray, np.ndarray],
+) -> None:
+    training, validation = targets
+    config = ciqp.TrainingConfig(
+        steps=6,
+        batch_size=8,
+        learning_rate=0.015,
+        final_learning_rate=0.002,
+        validation_interval=3,
+        sigmas=(0.8, 1.3),
+        n_ops=8,
+        mc_samples=17,
+        validation_n_ops=8,
+        validation_mc_samples=19,
+        gemm_dtype=jnp.float32,
+        sample_chunk=8,
+    )
+    result = ciqp.train(model, training, validation, seed=31, config=config)
+    assert np.all(np.isfinite(result.train_losses))
+    assert np.all(np.isfinite(result.validation_losses))
+    assert result.best_params.shape == (model.ansatz.n_parameters,)
+
+
+def _exact_objective(
+    probabilities: np.ndarray,
+    targets: np.ndarray,
+    sigma: float,
+) -> float:
+    """Exact conditional MMD from model probabilities and target samples.
+
+    Independent of :mod:`iqp_cond.loss`: the Hamming-RBF character expansion
+    gives ``k(x, y) = sum_a P(a) chi_a(x) chi_a(y)`` with
+    ``P(a) = prod_i p^{a_i} (1-p)^{1-a_i}`` and
+    ``p = (1 - exp(-1/(2 sigma^2))) / 2``.
+    """
+    n_visible = targets.shape[-1]
+    indices = np.arange(2**n_visible)
+    masks = ((indices[:, None] >> np.arange(n_visible)) & 1).astype(np.float64)
+    p = 0.5 * (1.0 - np.exp(-1.0 / (2.0 * sigma**2)))
+    weights = np.prod(np.where(masks == 1.0, p, 1.0 - p), axis=1)
+    characters = 1.0 - 2.0 * np.bitwise_count(indices[:, None] & indices[None, :])
+
+    terms = []
+    for condition in range(targets.shape[0]):
+        target_mean = targets[condition].mean(axis=0)
+        mu_p = np.prod(
+            np.where(masks == 1.0, 1.0 - 2.0 * target_mean, 1.0),
+            axis=1,
+        )
+        mu_q = probabilities[condition] @ characters
+        terms.append(float(np.sum(weights * (mu_q - mu_p) ** 2)))
+    return float(np.mean(terms))
+
+
+@pytest.mark.slow
+def test_training_reduces_the_exact_objective() -> None:
+    """Training lowers the exact MMD, not only its sampled estimate."""
+    probabilities = np.array([[0.9, 0.1, 0.9], [0.1, 0.9, 0.1]])
+    rng = np.random.default_rng(23)
+    training = np.stack(
+        [
+            (rng.uniform(size=(128, N_QUBITS)) < probabilities[c]).astype(float)
+            for c in range(N_CONDITIONS)
+        ],
+    )
+    validation = np.stack(
+        [
+            (rng.uniform(size=(64, N_QUBITS)) < probabilities[c]).astype(float)
+            for c in range(N_CONDITIONS)
+        ],
+    )
+    angles = np.random.default_rng(24).uniform(0.4, 2.2, size=(N_CONDITIONS, N_QUBITS))
+    model = ciqp.ConditionalModel(ciqp.Ansatz.complete(N_QUBITS), y_layer(angles))
+    sigma = 2.0
+    initial = np.random.default_rng(25).normal(
+        0.0,
+        0.2,
+        size=model.ansatz.n_parameters,
+    )
+    config = ciqp.TrainingConfig(
+        steps=200,
+        batch_size=64,
+        learning_rate=0.05,
+        final_learning_rate=0.005,
+        validation_interval=200,
+        sigmas=(sigma,),
+        n_ops=64,
+        mc_samples=128,
+        validation_n_ops=64,
+        validation_mc_samples=128,
+    )
+    result = ciqp.train(
+        model,
+        training,
+        validation,
+        seed=26,
+        config=config,
+        initial_params=initial,
+    )
+    before = _exact_objective(model.probabilities(initial), training, sigma)
+    after = _exact_objective(model.probabilities(result.best_params), training, sigma)
+    assert after < before

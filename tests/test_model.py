@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import jax
 import numpy as np
 import pytest
 
 import iqp_cond as ciqp
+from iqp_cond.estimator import estimate_pauli_z
+from iqp_cond.loss import mmd
 from iqp_cond.model import ancilla_support, pad_visible_masks
 
 
@@ -119,6 +122,12 @@ def test_pad_visible_masks_pads_and_validates() -> None:
         pad_visible_masks(np.zeros((2, 2, 2)), 1)
 
 
+def test_ancilla_support_without_ancillas_is_empty() -> None:
+    ansatz = ciqp.Ansatz.complete(3)
+    support = ancilla_support(ansatz.generators, n_visible=3)
+    assert not support.any()
+
+
 def test_model_exposes_the_visible_ancilla_split() -> None:
     encoders = ciqp.AngleEncoder(
         np.zeros((2, 1, 3)),
@@ -131,3 +140,55 @@ def test_model_exposes_the_visible_ancilla_split() -> None:
     full = ciqp.ConditionalModel(ciqp.Ansatz.complete(3), encoders)
     assert full.visible == 3
     assert full.n_ancillas == 0
+
+
+def test_model_estimate_pauli_z_delegates_to_the_estimator() -> None:
+    angles = np.random.default_rng(5).uniform(0.4, 2.2, size=(2, 3))
+    encoder = ciqp.AngleEncoder(angles[:, None, :], axes=("YYY",))
+    model = ciqp.ConditionalModel(ciqp.Ansatz.complete(3), encoder, n_visible=2)
+    params = np.zeros(model.ansatz.n_parameters)
+    masks = np.array([[1.0, 0.0], [0.0, 1.0]])
+    key = jax.random.PRNGKey(6)
+
+    direct = estimate_pauli_z(
+        params,
+        model.generators,
+        encoder,
+        masks,
+        key=key,
+        n_samples=64,
+    )
+    via_model = model.estimate_pauli_z(params, masks, key=key, n_samples=64)
+    assert np.array_equal(np.asarray(via_model.values), np.asarray(direct.values))
+
+
+def test_model_mmd_delegates_and_validates_the_target_width() -> None:
+    angles = np.random.default_rng(7).uniform(0.4, 2.2, size=(2, 3))
+    encoder = ciqp.AngleEncoder(angles[:, None, :], axes=("YYY",))
+    model = ciqp.ConditionalModel(ciqp.Ansatz.complete(3), encoder, n_visible=2)
+    params = np.zeros(model.ansatz.n_parameters)
+    targets = np.random.default_rng(8).integers(0, 2, size=(2, 16, 2)).astype(float)
+    key = jax.random.PRNGKey(9)
+
+    direct = mmd(
+        params,
+        model.generators,
+        encoder,
+        targets,
+        key,
+        sigmas=(1.0,),
+        n_ops=8,
+        n_samples=16,
+    )
+    via_model = model.mmd(params, targets, key, sigmas=(1.0,), n_ops=8, n_samples=16)
+    assert float(via_model.loss) == float(direct.loss)
+
+    with pytest.raises(ValueError, match="targets have 3 visible qubits"):
+        model.mmd(
+            params,
+            np.zeros((2, 16, 3)),
+            key,
+            sigmas=(1.0,),
+            n_ops=8,
+            n_samples=16,
+        )

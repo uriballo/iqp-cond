@@ -115,8 +115,25 @@ def test_parameters_from_data_validates_the_split(
         parameters_from_data(data, generators, n_visible=3)
 
 
+def test_parameters_from_data_validates_its_inputs(
+    generators: np.ndarray,
+) -> None:
+    with pytest.raises(ValueError, match="non-empty rank-two"):
+        parameters_from_data(np.zeros((0, 4)), generators)
+    with pytest.raises(ValueError, match="data must contain only finite binary"):
+        parameters_from_data(np.full((4, 4), 0.5), generators)
+    with pytest.raises(ValueError, match="cover all visible data qubits"):
+        parameters_from_data(np.zeros((4, 5)), generators)
+    with pytest.raises(ValueError, match="generators must contain only finite"):
+        parameters_from_data(np.zeros((4, 4)), generators * np.nan)
+    with pytest.raises(ValueError, match="scale must be finite"):
+        parameters_from_data(np.zeros((4, 4)), generators, scale=-1.0)
+
+
 def test_random_parameters_are_normalized_gaussians() -> None:
     params = random_parameters(64, seed=2)
     assert params.shape == (64,)
     assert np.all(np.isfinite(params))
     assert np.std(params) == pytest.approx(0.1 / np.sqrt(64), rel=0.5)
+    with pytest.raises(ValueError, match="n_parameters must be positive"):
+        random_parameters(0, seed=2)

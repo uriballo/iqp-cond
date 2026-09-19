@@ -227,6 +227,70 @@ def test_standard_errors_need_per_sample_values(setup) -> None:
     assert with_samples.standard_errors.shape == (N_CONDITIONS, 1)
 
 
+def test_estimator_validates_shapes_and_supplied_sample_counts(setup) -> None:
+    ansatz, encoders, _targets = setup
+    params = np.zeros(ansatz.n_parameters)
+    masks = np.ones((1, N_VISIBLE))
+    key = jax.random.PRNGKey(0)
+
+    with pytest.raises(ValueError, match="generators must have shape"):
+        estimate_pauli_z(
+            params,
+            ansatz.generators[0],
+            encoders,
+            masks,
+            key=key,
+            n_samples=8,
+        )
+    with pytest.raises(ValueError, match="params must have shape"):
+        estimate_pauli_z(
+            np.zeros(3),
+            ansatz.generators,
+            encoders,
+            masks,
+            key=key,
+            n_samples=8,
+        )
+    with pytest.raises(ValueError, match="masks must have shape"):
+        estimate_pauli_z(
+            params,
+            ansatz.generators,
+            encoders,
+            np.ones((1, 2, 2)),
+            key=key,
+            n_samples=8,
+        )
+
+    flat = estimate_pauli_z(
+        params,
+        ansatz.generators,
+        encoders,
+        np.ones(N_VISIBLE),
+        key=key,
+        n_samples=16,
+    )
+    matrix = estimate_pauli_z(
+        params,
+        ansatz.generators,
+        encoders,
+        np.ones((1, N_VISIBLE)),
+        key=key,
+        n_samples=16,
+    )
+    assert np.array_equal(np.asarray(flat.values), np.asarray(matrix.values))
+
+    drawn = encoders.sample(key, 8)
+    with pytest.raises(ValueError, match="n_samples must match the drawn samples"):
+        estimate_pauli_z(
+            params,
+            ansatz.generators,
+            encoders,
+            masks,
+            samples=drawn,
+            n_samples=7,
+        )
+
+
 def test_masks_wider_than_the_register_are_rejected(setup) -> None:
     ansatz, encoders, _targets = setup
     with pytest.raises(ValueError, match="more qubits than the generators"):
@@ -296,36 +360,6 @@ def test_unchecked_kernel_is_jittable(setup) -> None:
         ).values
 
     assert jax.jit(estimate)(params).shape == (N_CONDITIONS, 1)
-
-
-def test_parameter_gradient_matches_finite_differences(setup) -> None:
-    """Autodiff through the estimator is exact for fixed reference draws."""
-    ansatz, encoders, _targets = setup
-    masks = np.array([[1.0, 0.0, 1.0], [0.0, 1.0, 1.0]])
-    params = jnp.asarray(np.linspace(-0.4, 0.4, ansatz.n_parameters))
-    key = jax.random.PRNGKey(19)
-
-    def value(current: jax.Array) -> jax.Array:
-        return jnp.sum(
-            estimate_pauli_z(
-                current,
-                ansatz.generators,
-                encoders,
-                masks,
-                key=key,
-                n_samples=256,
-            ).values,
-        )
-
-    gradient = np.asarray(jax.grad(value)(params))
-    epsilon = 1e-6
-    finite = np.array(
-        [
-            float(value(params + step) - value(params - step)) / (2.0 * epsilon)
-            for step in epsilon * np.eye(params.size)
-        ],
-    )
-    assert np.max(np.abs(gradient - finite)) < 1e-8
 
 
 def test_mixed_precision_gemm_stays_close_to_float64(setup) -> None:

@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 import iqp_cond as ciqp
-from iqp_cond.encoders import ExactEncoder
+from iqp_cond.encoders import ExactEncoder, layered_amplitudes
 from iqp_cond.estimator import estimate_pauli_z
 
 N_QUBITS = 4
@@ -286,6 +286,15 @@ def test_angle_encoder_composes_layers_in_order() -> None:
     )
 
 
+def test_layered_amplitudes_validates_its_inputs() -> None:
+    with pytest.raises(ValueError, match="angles must have shape"):
+        layered_amplitudes(np.zeros(3), axes=("Y",))
+    with pytest.raises(ValueError, match="at least one layer and one qubit"):
+        layered_amplitudes(np.zeros((1, 0, 3)), axes=())
+    with pytest.raises(ValueError, match="at least one layer and one qubit"):
+        layered_amplitudes(np.zeros((1, 1, 0)), axes=((),))
+
+
 def test_angle_encoder_validates_axes_and_shapes() -> None:
     angles = np.zeros((N_CONDITIONS, 2, N_QUBITS))
     with pytest.raises(ValueError, match="first rotation layer"):
@@ -309,6 +318,37 @@ def test_angle_encoder_validates_axes_and_shapes() -> None:
     bad[0, 0, 0] = np.inf
     with pytest.raises(ValueError, match="angles must be finite"):
         ciqp.AngleEncoder(bad, axes=("X" * N_QUBITS, "Y" * N_QUBITS))
+
+
+def test_angle_encoder_is_a_registered_pytree() -> None:
+    """The encoder passes through JAX transformations as dynamic arrays."""
+    angles = np.random.default_rng(16).uniform(
+        0.3,
+        2.4,
+        size=(N_CONDITIONS, 2, N_QUBITS),
+    )
+    encoders = ciqp.AngleEncoder(angles, axes=("X" * N_QUBITS, "Z" * N_QUBITS))
+    leaves, treedef = jax.tree_util.tree_flatten(encoders)
+    restored = jax.tree_util.tree_unflatten(treedef, leaves)
+    assert isinstance(restored, ciqp.AngleEncoder)
+    assert np.array_equal(np.asarray(restored.angles), np.asarray(encoders.angles))
+    assert restored.axes == encoders.axes
+    assert np.allclose(
+        np.asarray(restored.post_hadamard_amplitudes()),
+        np.asarray(encoders.post_hadamard_amplitudes()),
+    )
+
+    samples = jnp.asarray(encoders.sample(jax.random.PRNGKey(0), 8))
+    masks = jnp.ones((2, N_QUBITS))
+
+    def ratios(encoder: ciqp.AngleEncoder) -> jnp.ndarray:
+        return encoder.amplitude_ratios(samples, masks)
+
+    jitted = jax.jit(ratios)(encoders)
+    assert np.allclose(
+        np.asarray(jitted),
+        np.asarray(encoders.amplitude_ratios(samples, masks)),
+    )
 
 
 def test_angle_encoder_selects_conditions_as_a_pytree() -> None:
