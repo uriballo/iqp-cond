@@ -309,43 +309,6 @@ The shipped defaults are 512 masks and 1000 Monte Carlo samples per condition.
 Peak memory comes from the per-condition sample/mask reduction, so larger
 sample budgets and more distinct masks increase memory use.
 
-## Estimator performance
-
-Training compiles the loss gradient, Adam update and parameter update together.
-On an idle Strix Halo CPU, this reduced measured 200-update fit times from
-8.45 to 7.71 seconds at the default budget, and from 15.61 to 12.82 seconds
-with 2000 masks, 1024 reference samples, float32 contraction and chunks of 256.
-These are medians of three alternating runs on synthetic binary targets with
-12 visible qubits and five conditions, including compilation and validation.
-
-Across four runs on two Strix Halo CPU hosts, uniform bandwidth selection
-reduced a 2000-update Gaussian fit from about 111 seconds to 50 seconds. It
-changes the optimizer trajectory by adding unbiased bandwidth-sampling noise;
-exhaustive fixed-bank validation and the estimated multiscale objective remain
-unchanged. JAX may compile one training executable per distinct bandwidth
-shape. Custom encoders that are not JAX pytrees also compile one closure per
-condition, so very short cold-start runs can take longer despite the lower
-steady-state cost.
-
-The same selection applies to cached masks. Across two 1000-update runs on the
-same hosts, selecting from a retained bank reduced the mean runtime from 49.7
-seconds to 21.8 seconds, a 56% reduction. Cache mode still builds each
-bandwidth once; it no longer evaluates every cached bandwidth on every update.
-
-On the five-condition workload, selecting one condition further reduced the
-mean runtime of a 1000-update fit from 27.2 seconds to 12.6 seconds with step
-refresh and from 22.5 seconds to 11.4 seconds with cached masks. A full
-2000-update frozen Gaussian comparison measured the combined bandwidth and
-condition selection at 19.51 seconds, down from 50.85 seconds for bandwidth
-selection alone. Condition selection changes gradient variance but preserves
-the condition-balanced objective in expectation.
-
-Pytree-compatible encoders pass their selected array state into one shared
-compiled optimizer step. On two full frozen Gaussian runs this reduced mean
-wall time from 20.30 to 16.78 seconds, with identical paired result summaries
-and all 81 exhaustive validations. Custom encoders that are not registered as
-JAX pytrees still use condition-specific compiled closures.
-
 ## Precision
 
 Importing `iqp_cond` enables JAX float64
