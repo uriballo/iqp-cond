@@ -3,8 +3,13 @@
 The encoder here is the simplest useful one.  Its post-Hadamard state is
 ``|+>^n``, so sampling is uniform bits and every amplitude ratio is one.  It
 needs the three interface operations: sampling, amplitude ratios, and the
-circuit representation.  It also needs ``select``, because it is not a JAX
-pytree.  The estimator, loss, trainer, and simulation bridge use it unchanged.
+circuit representation.  It also needs ``select`` to expose one condition at
+a time.  Registering the dataclass as a JAX pytree is optional, but lets the
+trainer reuse one compiled optimizer step when every selected encoder has the
+same pytree structure and array shapes.  The array state is dynamic and the
+descriptive ``name`` is static.  Encoders that are not pytrees still work
+through the trainer's condition-specific closure fallback.  The estimator,
+loss, trainer, and simulation bridge use either form unchanged.
 
     uv run python examples/custom_encoder.py
 """
@@ -50,7 +55,17 @@ class HadamardEncoder:
         return ()
 
     def select(self, condition: int) -> HadamardEncoder:
-        return HadamardEncoder(self.angles[condition : condition + 1])
+        return HadamardEncoder(self.angles[condition : condition + 1], name=self.name)
+
+
+# ``angles`` is dynamic JAX state; ``name`` is static metadata.  This is an
+# optimization for the trainer, not a requirement of the public Encoder
+# protocol: opaque custom encoders continue to use the closure fallback.
+jax.tree_util.register_dataclass(
+    HadamardEncoder,
+    data_fields=["angles"],
+    meta_fields=["name"],
+)
 
 
 def main() -> None:
