@@ -31,7 +31,7 @@ environment.  The package requires Python 3.11+ and depends on `jax`, `numpy`,
 To install from Git:
 
 ```bash
-uv add "iqp-cond @ git+https://github.com/uriballo/iqp-cond@v0.5.0"
+uv add "iqp-cond @ git+https://github.com/uriballo/iqp-cond@v0.6.0"
 ```
 
 ### Migrating from 0.4
@@ -53,6 +53,16 @@ Custom encoder constructors now keep their own explicit signatures. They are
 instantiated directly and must implement `preparation_ops` and `select` in
 addition to sampling and amplitude ratios. Numerical helper functions remain
 available from their named submodules.
+
+### Version 0.6
+
+Version 0.6 reduces training cost without changing the multiscale objective.
+Each update samples one condition-bandwidth objective cell, while validation
+still evaluates every cell with fixed randomness. Pytree-compatible encoders
+reuse compiled optimizer steps across conditions; custom opaque encoders keep
+the condition-specific closure path. The release also adds a one-condition
+example in which a fixed, tractable GHZ reference imposes exact global
+bit-flip symmetry on the model distribution.
 
 ## Quickstart
 
@@ -313,8 +323,9 @@ reduced a 2000-update Gaussian fit from about 111 seconds to 50 seconds. It
 changes the optimizer trajectory by adding unbiased bandwidth-sampling noise;
 exhaustive fixed-bank validation and the estimated multiscale objective remain
 unchanged. JAX may compile one training executable per distinct bandwidth
-shape and condition, so very short cold-start runs can take longer despite the
-lower steady-state cost.
+shape. Custom encoders that are not JAX pytrees also compile one closure per
+condition, so very short cold-start runs can take longer despite the lower
+steady-state cost.
 
 The same selection applies to cached masks. Across two 1000-update runs on the
 same hosts, selecting from a retained bank reduced the mean runtime from 49.7
@@ -323,10 +334,17 @@ bandwidth once; it no longer evaluates every cached bandwidth on every update.
 
 On the five-condition workload, selecting one condition further reduced the
 mean runtime of a 1000-update fit from 27.2 seconds to 12.6 seconds with step
-refresh and from 22.5 seconds to 11.4 seconds with cached masks. These timings
-include cold compilation of condition-specific closures, which keep custom
-encoders outside JAX arguments. Condition selection changes gradient variance
-but preserves the condition-balanced objective in expectation.
+refresh and from 22.5 seconds to 11.4 seconds with cached masks. A full
+2000-update frozen Gaussian comparison measured the combined bandwidth and
+condition selection at 19.51 seconds, down from 50.85 seconds for bandwidth
+selection alone. Condition selection changes gradient variance but preserves
+the condition-balanced objective in expectation.
+
+Pytree-compatible encoders pass their selected array state into one shared
+compiled optimizer step. On two full frozen Gaussian runs this reduced mean
+wall time from 20.30 to 16.78 seconds, with identical paired result summaries
+and all 81 exhaustive validations. Custom encoders that are not registered as
+JAX pytrees still use condition-specific compiled closures.
 
 ## Precision
 
@@ -371,5 +389,5 @@ and the amplitude ratios against statevector results.
 
 ## Status
 
-Version 0.5.0, a private development release. Licence and citation metadata are
+Version 0.6.0, a private development release. Licence and citation metadata are
 pending author and institutional approval.
