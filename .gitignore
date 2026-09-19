@@ -18,3 +18,10 @@ dist/
 
 # OS files
 .DS_Store
+
+# Disposable scratch work
+prototypes/
+
+# Local benchmarks and documentation
+/benchmarks/
+/docs/

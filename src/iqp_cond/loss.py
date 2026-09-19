@@ -36,7 +36,7 @@ import jax.numpy as jnp
 
 from .core import pad_visible_masks
 from .encoders import Encoder, select_encoder
-from .estimator import estimate_pauli_z_unchecked
+from .estimator import _validate_phase_weighting, estimate_pauli_z_unchecked
 from .operators import OperatorBank, sample_nonidentity_masks_jax
 
 __all__ = [
@@ -145,6 +145,7 @@ def _condition_value(
     samples: jnp.ndarray,
     gemm_dtype: jnp.dtype | None,
     sample_chunk: int | None,
+    phase_weighting: str = "operators",
 ) -> jnp.ndarray:
     """Weighted sum of per-mask squared moment differences for one condition.
 
@@ -168,6 +169,7 @@ def _condition_value(
                 model_masks,
                 samples=samples[:, start : start + sample_chunk],
                 gemm_dtype=gemm_dtype,
+                phase_weighting=phase_weighting,
                 return_samples=True,
             ).sample_values
             assert chunk is not None
@@ -188,6 +190,7 @@ def _condition_value(
             model_masks,
             samples=samples,
             gemm_dtype=gemm_dtype,
+            phase_weighting=phase_weighting,
             return_samples=True,
         )
         assert model.sample_values is not None
@@ -214,6 +217,7 @@ def mmd(
     shared_samples: bool = False,
     gemm_dtype: jnp.dtype | None = None,
     sample_chunk: int | None = None,
+    phase_weighting: str = "operators",
 ) -> ConditionalMMDResult:
     """Estimate the condition-balanced multiscale squared MMD.
 
@@ -228,10 +232,16 @@ def mmd(
     and evaluates every bandwidth's masks on it, regardless of the mask source;
     this is the paper's estimator form and avoids resampling once per
     bandwidth.  The default resamples per (bandwidth, condition) entry.
+
+    ``phase_weighting`` selects the equivalent phase contractions described in
+    :func:`iqp_cond.estimate_pauli_z`. It changes neither the reference draws nor
+    the MMD estimator. The opt-in ``"samples"`` choice applies to every chunk;
+    it need not be faster with chunking or mixed precision.
     """
     params = jnp.asarray(params, dtype=jnp.float64)
     generators = jnp.asarray(generators, dtype=jnp.float64)
     targets = jnp.asarray(targets, dtype=jnp.float64)
+    _validate_phase_weighting(phase_weighting)
     if sample_chunk is not None and sample_chunk < 1:
         raise ValueError("sample_chunk must be positive")
     if bank is None:
@@ -275,6 +285,7 @@ def mmd(
             shared_samples,
             gemm_dtype,
             sample_chunk,
+            phase_weighting,
         )
 
     assert sigmas is not None and n_ops is not None
@@ -311,6 +322,7 @@ def mmd(
                         samples,
                         gemm_dtype,
                         sample_chunk,
+                        phase_weighting,
                     ),
                 )
             bandwidth_values.append(jnp.stack(condition_values))
@@ -345,6 +357,7 @@ def mmd(
                     samples,
                     gemm_dtype,
                     sample_chunk,
+                    phase_weighting,
                 ),
             )
         bandwidth_values.append(jnp.stack(condition_values))
@@ -362,6 +375,7 @@ def _mmd_from_bank(
     shared_samples: bool,
     gemm_dtype: jnp.dtype | None,
     sample_chunk: int | None,
+    phase_weighting: str = "operators",
 ) -> ConditionalMMDResult:
     n_data_qubits = targets.shape[2]
     n_conditions = targets.shape[0]
@@ -387,6 +401,7 @@ def _mmd_from_bank(
                     samples,
                     gemm_dtype,
                     sample_chunk,
+                    phase_weighting,
                 )
                 for bandwidth in range(bank.n_bandwidths)
             ]
@@ -415,6 +430,7 @@ def _mmd_from_bank(
                     samples,
                     gemm_dtype,
                     sample_chunk,
+                    phase_weighting,
                 ),
             )
         bandwidth_values.append(jnp.stack(condition_values))

@@ -25,6 +25,7 @@ import numpy as np
 import optax
 
 from .core import ConditionalModel
+from .estimator import _validate_phase_weighting
 from .initialization import parameters_from_data
 from .operators import OperatorBank, expected_bodyness_sigmas, operator_bank
 
@@ -77,6 +78,11 @@ class TrainingConfig:
     ``sample_chunk`` streams the Monte Carlo samples in slices, bounding the live
     ``(samples, masks, qubits)`` ratio tensor.  It is faster at large sample
     budgets and slightly slower for small ones, so it is off by default.
+
+    ``phase_weighting="samples"`` opts into sample-side parameter weighting
+    for training and validation. It can improve unchunked float64 fits, but
+    chunked and mixed-precision workloads may be slower. The default
+    ``"operators"`` retains the original estimator contraction.
     """
 
     steps: int = 2_000
@@ -92,6 +98,7 @@ class TrainingConfig:
     gemm_dtype: jnp.dtype | None = None
     sample_chunk: int | None = None
     mask_refresh: str = STEP
+    phase_weighting: str = "operators"
 
     def resolved_sigmas(self, n_visible: int) -> tuple[float, ...]:
         """Return the bandwidth schedule for ``n_visible`` visible qubits.
@@ -105,6 +112,7 @@ class TrainingConfig:
         return expected_bodyness_sigmas(n_visible)
 
     def __post_init__(self) -> None:
+        _validate_phase_weighting(self.phase_weighting)
         if self.steps < 1:
             raise ValueError("steps must be positive")
         if self.batch_size < 1:
@@ -324,6 +332,7 @@ def train(
                 n_samples=config.mc_samples,
                 shared_samples=True,
                 gemm_dtype=config.gemm_dtype,
+                phase_weighting=config.phase_weighting,
                 sample_chunk=config.sample_chunk,
             ).loss
         return model.mmd(
@@ -334,10 +343,33 @@ def train(
             n_samples=config.mc_samples,
             shared_samples=True,
             gemm_dtype=config.gemm_dtype,
+            phase_weighting=config.phase_weighting,
             sample_chunk=config.sample_chunk,
         ).loss
 
-    value_and_gradient = jax.jit(jax.value_and_grad(training_loss))
+    # Compile differentiation and the full optimizer update together to avoid
+    # dispatching the optimizer operations separately from the estimator.
+    @jax.jit
+    def training_step(
+        current_params: jnp.ndarray,
+        current_optimizer_state: optax.OptState,
+        target_batch: jnp.ndarray,
+        current_bank: OperatorBank | None,
+        step_key: jax.Array,
+    ) -> tuple[jnp.ndarray, jnp.ndarray, optax.OptState]:
+        loss, gradient = jax.value_and_grad(training_loss)(
+            current_params,
+            target_batch,
+            current_bank,
+            step_key,
+        )
+        updates, new_optimizer_state = optimizer.update(
+            gradient,
+            current_optimizer_state,
+            current_params,
+        )
+        new_params = optax.apply_updates(current_params, updates)
+        return loss, new_params, new_optimizer_state
 
     def validation_loss(current_params: jnp.ndarray) -> jnp.ndarray:
         return model.mmd(
@@ -347,6 +379,7 @@ def train(
             bank=validation_bank,
             n_samples=config.validation_mc_samples,
             gemm_dtype=config.gemm_dtype,
+            phase_weighting=config.phase_weighting,
         ).loss
 
     evaluate_validation = jax.jit(validation_loss)
@@ -379,18 +412,13 @@ def train(
             ],
         )
         step_key = jax.random.fold_in(random_key, step)
-        loss, gradient = value_and_gradient(
+        loss, params, optimizer_state = training_step(
             params,
+            optimizer_state,
             jnp.asarray(batch),
             training_bank,
             step_key,
         )
-        updates, optimizer_state = optimizer.update(
-            gradient,
-            optimizer_state,
-            params,
-        )
-        params = optax.apply_updates(params, updates)
         train_steps.append(step + 1)
         # Defer the device sync. There is no ``float(loss)`` here, so the host
         # bank build for the next step overlaps with the running device program.
