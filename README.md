@@ -84,9 +84,9 @@ result = ciqp.train(
     train_targets,
     valid_targets,
     seed=0,
-    # Defaults: 2000 updates, batch 256, 512 masks per condition and bandwidth,
-    # 1000 Monte Carlo samples, pooled data-based initialization, and the
-    # width-aware bodyness bandwidth schedule.  This quickstart shortens them.
+    # Defaults: 2000 updates, batch 256, 512 masks per condition for one
+    # uniformly selected bandwidth per update, 1000 Monte Carlo samples,
+    # pooled data-based initialization, and the width-aware bandwidth schedule.
     config=ciqp.TrainingConfig(steps=50, batch_size=64, n_ops=16, mc_samples=1024),
 )
 
@@ -286,12 +286,14 @@ resolves through that helper once the model width is known.
 Skipping the identity mask is exact.  It contributes zero to the kernel MMD, so
 spending draws on it only adds variance.  Both mask sources accept
 `shared_samples=True`, which draws one reference sample set per condition and
-evaluates every bandwidth on it; the default resamples per (bandwidth,
-condition) entry.  The trainer redraws masks at every optimization step
-(`TrainingConfig.mask_refresh="step"`, the default) so each update's
-expectation equals the true kernel MMD; `mask_refresh="cache"` draws one bank
-and retains it.  Validation always uses one fixed bank, so checkpoint selection
-stays comparable across steps.
+evaluates every selected bandwidth on it; the default resamples per (bandwidth,
+condition) entry. At every optimization step, the trainer selects one configured
+bandwidth uniformly. The selected-bandwidth loss and gradient are unbiased for
+the arithmetic-mean multiscale objective, avoiding an all-bandwidth evaluation
+on every update. With `TrainingConfig.mask_refresh="step"`, masks are redrawn
+for the selected bandwidth; `mask_refresh="cache"` selects its bandwidth from
+one retained full multiscale bank. Validation always evaluates every bandwidth
+with one fixed bank, so checkpoint selection stays comparable across steps.
 
 The shipped defaults are 512 masks and 1000 Monte Carlo samples per condition.
 Peak memory comes from the per-condition sample/mask reduction, so larger
@@ -305,6 +307,19 @@ On an idle Strix Halo CPU, this reduced measured 200-update fit times from
 with 2000 masks, 1024 reference samples, float32 contraction and chunks of 256.
 These are medians of three alternating runs on synthetic binary targets with
 12 visible qubits and five conditions, including compilation and validation.
+
+Across four runs on two Strix Halo CPU hosts, uniform bandwidth selection
+reduced a 2000-update Gaussian fit from about 111 seconds to 50 seconds. It
+changes the optimizer trajectory by adding unbiased bandwidth-sampling noise;
+exhaustive fixed-bank validation and the estimated multiscale objective remain
+unchanged. JAX may compile one training executable per distinct bandwidth
+shape, so very short cold-start runs can take longer despite the lower
+steady-state cost.
+
+The same selection applies to cached masks. Across two 1000-update runs on the
+same hosts, selecting from a retained bank reduced the mean runtime from 49.7
+seconds to 21.8 seconds, a 56% reduction. Cache mode still builds each
+bandwidth once; it no longer evaluates every cached bandwidth on every update.
 
 ## Precision
 

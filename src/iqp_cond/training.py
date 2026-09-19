@@ -5,12 +5,14 @@ changes with the condition.  Updates are condition-balanced, each condition
 contributing the same number of samples per step, and the trainer selects
 checkpoints on a held-out validation split by the same MMD objective.
 
-Unless ``mask_refresh="cache"`` is requested, every optimization step draws a
-fresh compressed, nonidentity mask bank and passes it to the compiled step as an
-argument.  The trainer builds the bank on the host rather than in JAX on
-purpose, because the in-JAX sampler cannot collapse duplicates cheaply and so
-evaluates more mask columns at equal draw budgets.  Validation always uses one
-fixed bank, so checkpoint scores stay comparable across steps.
+Every optimization step selects one bandwidth uniformly, giving an unbiased
+estimator of the configured arithmetic-mean multiscale objective without
+evaluating every bandwidth.  Step refresh draws a fresh compressed
+nonidentity bank for the selected bandwidth; cache refresh selects from one
+full bank retained for the fit.  The trainer builds banks on the host rather
+than in JAX because the in-JAX sampler cannot collapse duplicates cheaply.
+Validation always evaluates every bandwidth with one fixed bank, so checkpoint
+scores stay comparable across steps.
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ CACHE = "cache"
 #: every step still evaluates only the columns the law realistically reaches.
 _BANK_HEADROOM = 1.15
 _BANK_MARGIN = 2
+_BANDWIDTH_SEED_OFFSET = 83_001
 
 
 @dataclass(frozen=True)
@@ -60,12 +63,16 @@ class TrainingConfig:
     smallest calibrated budget passing the estimator gates.  Raise them toward
     2000 masks and 8192 reference draws for full-scale runs.
     ``mask_refresh="cache"`` retains one mask bank per fit instead of redrawing
-    every step; see :func:`train`.
+    every step; both refresh modes select one bandwidth per update.  See
+    :func:`train`.
 
     ``n_ops`` and ``validation_n_ops`` give the number of nonidentity operator
     draws per condition and bandwidth that feed the compressed operator banks.
-    Under the default per-step refresh the trainer builds a training bank
-    before every update and draws the validation bank once.
+    The trainer selects one bandwidth uniformly before every update.  Under the
+    default per-step refresh it then builds a fresh bank for that bandwidth;
+    cache refresh selects the matching slice from a retained bank.  In
+    expectation both estimate the same arithmetic-mean multiscale objective.
+    Validation draws one bank covering every bandwidth.
 
     ``gemm_dtype`` runs the phase contraction in a reduced dtype such as
     ``jnp.float32`` and casts the result back to float64, which is the mixed
@@ -162,6 +169,26 @@ def _batch_schedule(
     )
 
 
+def _bandwidth_schedule(n_bandwidths: int, steps: int, seed: int) -> np.ndarray:
+    """Return independent uniform bandwidth choices for training updates."""
+    rng = np.random.default_rng(seed + _BANDWIDTH_SEED_OFFSET)
+    return rng.integers(0, n_bandwidths, size=steps)
+
+
+def _select_bandwidth(bank: OperatorBank, bandwidth: int) -> OperatorBank:
+    """Return one exact bandwidth slice from a multiscale operator bank."""
+    width = bank.width(bandwidth)
+    return OperatorBank(
+        sigmas=(bank.sigmas[bandwidth],),
+        masks=bank.masks[bandwidth : bandwidth + 1, :, :width],
+        weights=bank.weights[bandwidth : bandwidth + 1, :, :width],
+        n_ops=bank.n_ops,
+        n_visible=bank.n_visible,
+        n_masks=width,
+        widths=(width,),
+    )
+
+
 def _validate_training_inputs(
     model: ConditionalModel,
     training_targets: np.ndarray,
@@ -230,11 +257,11 @@ def train(
     """Train one shared conditional model with fixed validation randomness.
 
     ``config.mask_refresh`` selects how the training masks are drawn:
-    ``"step"``, the default, draws a fresh bank inside every compiled step from
-    a per-step key, so each update's expectation equals the true kernel MMD;
-    ``"cache"`` draws one compressed NumPy bank and retains it for the fit.
-    Every update uses the same estimator form either way, with one reference
-    draw per condition shared by all masks and bandwidths.
+    Both modes select one bandwidth uniformly per update, which is unbiased for
+    the arithmetic-mean multiscale MMD.  ``"step"``, the default, draws a fresh
+    bank for the selected bandwidth before every compiled step.  ``"cache"``
+    draws one full compressed NumPy bank and selects the corresponding cached
+    slice for each update.
 
     Without ``initial_params`` the parameters start from the mean-covariance
     prescription applied to the pooled training conditions,
@@ -278,6 +305,7 @@ def train(
         config,
         seed,
     )
+    bandwidth_indices = _bandwidth_schedule(len(sigmas), config.steps, seed)
     random_key = jax.random.PRNGKey(seed)
 
     # One width per bandwidth for every refreshed bank, so the trainer compiles
@@ -286,15 +314,19 @@ def train(
     max_masks: tuple[int, ...] | None = None
     if config.mask_refresh == STEP:
         max_masks = _refreshed_widths(sigmas, config, model, seed)
-    training_bank: OperatorBank | None = None
+    cached_training_banks: tuple[OperatorBank, ...] | None = None
     if config.mask_refresh == CACHE:
-        # Retained for the whole run; the loop never rebuilds it.
-        training_bank = operator_bank(
+        # Retained for the whole run; the loop only selects exact slices.
+        cached_bank = operator_bank(
             sigmas,
             config.n_ops,
             encoders.n_conditions,
             model.visible,
             seed,
+        )
+        cached_training_banks = tuple(
+            _select_bandwidth(cached_bank, bandwidth)
+            for bandwidth in range(cached_bank.n_bandwidths)
         )
     validation_bank = operator_bank(
         sigmas,
@@ -307,21 +339,9 @@ def train(
     def training_loss(
         current_params: jnp.ndarray,
         target_batch: jnp.ndarray,
-        current_bank: OperatorBank | None,
+        current_bank: OperatorBank,
         step_key: jax.Array,
     ) -> jnp.ndarray:
-        if current_bank is None:
-            return model.mmd(
-                current_params,
-                target_batch,
-                step_key,
-                sigmas=sigmas,
-                n_ops=config.n_ops,
-                n_samples=config.mc_samples,
-                shared_samples=True,
-                gemm_dtype=config.gemm_dtype,
-                sample_chunk=config.sample_chunk,
-            ).loss
         return model.mmd(
             current_params,
             target_batch,
@@ -340,7 +360,7 @@ def train(
         current_params: jnp.ndarray,
         current_optimizer_state: optax.OptState,
         target_batch: jnp.ndarray,
-        current_bank: OperatorBank | None,
+        current_bank: OperatorBank,
         step_key: jax.Array,
     ) -> tuple[jnp.ndarray, jnp.ndarray, optax.OptState]:
         loss, gradient = jax.value_and_grad(training_loss)(
@@ -380,15 +400,20 @@ def train(
     validation_steps.append(0)
     validation_losses.append(best_validation)
     for step in range(config.steps):
-        if training_bank is None or config.mask_refresh == STEP:
+        bandwidth = int(bandwidth_indices[step])
+        if config.mask_refresh == STEP:
+            assert max_masks is not None
             training_bank = operator_bank(
-                sigmas,
+                (sigmas[bandwidth],),
                 config.n_ops,
                 encoders.n_conditions,
                 model.visible,
                 seed + 1_000_003 * (step + 1),
-                max_masks=max_masks,
+                max_masks=(max_masks[bandwidth],),
             )
+        else:
+            assert cached_training_banks is not None
+            training_bank = cached_training_banks[bandwidth]
         indices = batch_indices[step]
         batch = np.stack(
             [

@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import dataclasses
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
 import iqp_cond as ciqp
+from iqp_cond import training as training_module
 from iqp_cond.initialization import parameters_from_data
-from iqp_cond.operators import expected_bodyness_sigmas
+from iqp_cond.operators import expected_bodyness_sigmas, operator_bank
 from iqp_cond.training import CACHE, STEP
 
 
@@ -140,7 +142,7 @@ def test_visible_width_mismatch_is_rejected(
         ciqp.train(model, wide, validation, seed=1, config=config)
 
 
-def test_step_refresh_is_the_default_and_cache_changes_the_objective(
+def test_step_refresh_is_the_default_and_cache_changes_the_trajectory(
     model: ciqp.ConditionalModel,
     targets: tuple[np.ndarray, np.ndarray],
     config: ciqp.TrainingConfig,
@@ -168,6 +170,95 @@ def test_step_refresh_is_the_default_and_cache_changes_the_objective(
     )
     assert not np.array_equal(step_result.final_params, cache_result.final_params)
     assert np.all(np.isfinite(step_result.train_losses))
+
+
+def test_step_refresh_selects_one_uniform_bandwidth_per_update(
+    model: ciqp.ConditionalModel,
+    targets: tuple[np.ndarray, np.ndarray],
+    config: ciqp.TrainingConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Training samples one bandwidth while pilot and validation cover all."""
+    training, validation = targets
+    config = dataclasses.replace(config, steps=5, validation_interval=5)
+    calls: list[tuple[float, ...]] = []
+    original = training_module.operator_bank
+
+    def recording_bank(sigmas, *args, **kwargs):
+        calls.append(tuple(sigmas))
+        return original(sigmas, *args, **kwargs)
+
+    monkeypatch.setattr(training_module, "operator_bank", recording_bank)
+    ciqp.train(model, training, validation, seed=14, config=config)
+
+    expected = training_module._bandwidth_schedule(len(config.sigmas), config.steps, 14)
+    assert calls[:2] == [config.sigmas, config.sigmas]
+    assert calls[2:] == [(config.sigmas[index],) for index in expected]
+
+
+def test_cache_refresh_builds_one_full_multiscale_bank(
+    model: ciqp.ConditionalModel,
+    targets: tuple[np.ndarray, np.ndarray],
+    config: ciqp.TrainingConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cache mode builds one full training bank and one validation bank."""
+    training, validation = targets
+    config = dataclasses.replace(
+        config,
+        steps=5,
+        validation_interval=5,
+        mask_refresh=CACHE,
+    )
+    calls: list[tuple[float, ...]] = []
+    original = training_module.operator_bank
+
+    def recording_bank(sigmas, *args, **kwargs):
+        calls.append(tuple(sigmas))
+        return original(sigmas, *args, **kwargs)
+
+    monkeypatch.setattr(training_module, "operator_bank", recording_bank)
+    ciqp.train(model, training, validation, seed=14, config=config)
+
+    assert calls == [config.sigmas, config.sigmas]
+
+
+def test_selected_bandwidth_gradient_is_unbiased_for_multiscale_loss(
+    model: ciqp.ConditionalModel,
+    targets: tuple[np.ndarray, np.ndarray],
+) -> None:
+    """A uniform average of selected bands equals the full bank evaluation."""
+    training, _ = targets
+    sigmas = (0.8, 1.6, 2.4)
+    bank = operator_bank(sigmas, 16, N_CONDITIONS, N_QUBITS, seed=71)
+    params = jnp.linspace(-0.2, 0.2, model.ansatz.n_parameters)
+    target_batch = jnp.asarray(training[:, :16])
+    key = jax.random.PRNGKey(72)
+
+    def objective(current_params, current_bank):
+        return model.mmd(
+            current_params,
+            target_batch,
+            key,
+            bank=current_bank,
+            n_samples=32,
+            shared_samples=True,
+        ).loss
+
+    full_loss, full_gradient = jax.value_and_grad(objective)(params, bank)
+    selected = []
+    for bandwidth in range(bank.n_bandwidths):
+        selected_bank = training_module._select_bandwidth(bank, bandwidth)
+        selected.append(
+            jax.value_and_grad(objective)(params, selected_bank),
+        )
+
+    selected_loss = jnp.mean(jnp.stack([loss for loss, _ in selected]))
+    selected_gradient = jnp.mean(
+        jnp.stack([gradient for _, gradient in selected]), axis=0
+    )
+    assert jnp.allclose(selected_loss, full_loss, atol=1e-15, rtol=0.0)
+    assert jnp.allclose(selected_gradient, full_gradient, atol=1e-15, rtol=0.0)
 
 
 def test_condition_count_mismatch_is_rejected(
