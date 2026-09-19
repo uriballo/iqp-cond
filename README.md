@@ -299,51 +299,6 @@ with 2000 masks, 1024 reference samples, float32 contraction and chunks of 256.
 These are medians of three alternating runs on synthetic binary targets with
 12 visible qubits and five conditions, including compilation and validation.
 
-Sample-side phase weighting is a separate opt-in optimization:
-
-```python
-config = ciqp.TrainingConfig(phase_weighting="samples")
-```
-
-The same keyword is accepted by `mmd` and `estimate_pauli_z`, including the
-`ConditionalModel` methods. The default is `phase_weighting="operators"`.
-The trainer applies the selected mode to both training and validation. Keep
-this string static when using `jax.jit`, for example by closing over it.
-
-**Both choices compute the same scalable expectation-value estimator.**
-Here, "samples" means the reference bitstrings already drawn from the encoder,
-not samples from the IQP circuit's output. The option changes only which
-operand receives the circuit parameters in the phase matrix product:
-
-```text
-operators: phase = C @ (-2 * P * theta).T
-samples:   phase = (-2 * C * theta) @ P.T
-```
-
-`C` contains reference-sample characters, `P` contains operator-generator
-parities, and `theta` contains generator parameters. Each phase is the same
-sum over generators in either expression. Reference draws, masks, sample
-budgets, amplitude ratios, expectation values and parameter gradients are
-mathematically unchanged. Both paths retain the general encoder interface and
-polynomial scaling; neither constructs a statevector. Floating-point rounding
-can differ, especially with float32 contraction.
-
-The benefit depends on the workload. A fresh public-API comparison on Strix
-Halo measured these full-fit medians:
-
-| 200-update workload | `"operators"` | `"samples"` | Wall-time change |
-|---|---:|---:|---:|
-| Float64, 512 masks, 1000 reference samples, no chunking | 7.070 s | 6.375 s | 9.8% less |
-| Float32 contraction, 2000 masks, 1024 samples, chunks of 256 | 12.852 s | 13.202 s | 2.7% more |
-
-Both use the fused trainer, 12 visible qubits, five conditions, synthetic binary
-targets and JAX 0.11.0 on CPU. Three paired runs alternate mode order at seed 44;
-timings include compilation and validation. Checkpoint choices matched. Final
-parameter differences were below 6e-16 in float64 and 6.7e-8 in mixed precision.
-A separate warm full-MMD gradient comparison measured 30.46 versus 27.05 ms
-for the unchunked float64 case. Chunked and mixed-precision fits did not
-consistently improve, so benchmark the option for your workload.
-
 ## Precision
 
 Importing `iqp_cond` enables JAX float64

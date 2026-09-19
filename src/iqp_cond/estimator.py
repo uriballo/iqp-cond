@@ -86,21 +86,12 @@ def _validate_sources(
             raise ValueError("n_samples must match the drawn samples")
 
 
-def _validate_phase_weighting(phase_weighting: str) -> None:
-    if phase_weighting not in ("operators", "samples"):
-        raise ValueError(
-            f"unknown phase_weighting: {phase_weighting!r}; "
-            "expected 'operators' or 'samples'",
-        )
-
-
 def _phase_differences(
     params: jnp.ndarray,
     generators: jnp.ndarray,
     masks: jnp.ndarray,
     samples: jnp.ndarray,
     gemm_dtype: jnp.dtype | None = None,
-    phase_weighting: str = "operators",
 ) -> jnp.ndarray:
     """Return ``Delta_a f_theta(z)`` for every sample and mask.
 
@@ -114,13 +105,7 @@ def _phase_differences(
     sample_parities = jnp.einsum("bsn,mn->bsm", samples, generators)
     sample_characters = 1.0 - 2.0 * jnp.mod(sample_parities, 2.0)
     op_parities = jnp.mod(jnp.einsum("rn,mn->rm", masks, generators), 2.0)
-    # Weighting either operand gives the same phase, but changes the work in
-    # its parameter gradient. Keep this choice static when tracing the kernel.
-    if phase_weighting == "samples":
-        sample_characters = -2.0 * sample_characters * params[None, None, :]
-        weighted_flips = op_parities
-    else:
-        weighted_flips = -2.0 * op_parities * params[None, :]
+    weighted_flips = -2.0 * op_parities * params[None, :]
     if gemm_dtype is not None:
         phases = jnp.einsum(
             "bsm,rm->bsr",
@@ -139,12 +124,9 @@ def _estimate(
     samples: jnp.ndarray,
     gemm_dtype: jnp.dtype | None,
     return_samples: bool,
-    phase_weighting: str = "operators",
 ) -> ExpectationEstimate:
     ratios = encoders.amplitude_ratios(samples, masks)
-    phases = _phase_differences(
-        params, generators, masks, samples, gemm_dtype, phase_weighting
-    )
+    phases = _phase_differences(params, generators, masks, samples, gemm_dtype)
     sample_values = jnp.real(ratios * jnp.exp(1j * phases))
     values = jnp.mean(sample_values, axis=1)
     return ExpectationEstimate(
@@ -207,7 +189,6 @@ def estimate_pauli_z(
     n_samples: int | None = None,
     gemm_dtype: jnp.dtype | None = None,
     return_samples: bool = False,
-    phase_weighting: str = "operators",
 ) -> ExpectationEstimate:
     """Estimate Pauli-Z expectations for one or more conditions.
 
@@ -221,20 +202,10 @@ def estimate_pauli_z(
     ``(n_masks, n_qubits)``; visible-width masks are accepted and padded with
     identity on the ancilla positions, following the visible-first convention
     of :mod:`iqp_cond.core`.
-
-    ``phase_weighting="samples"`` multiplies parameters into sample characters
-    instead of operator parities. This can accelerate unchunked float64
-    gradients, but is workload-dependent and can change rounding. Both choices
-    use the same reference draws and compute the same mathematical expectation
-    estimates and parameter gradients. Neither constructs a statevector or
-    samples the IQP output distribution. The default
-    ``"operators"`` retains the original contraction. Under ``jax.jit``, keep
-    this string static, for example by closing over it.
     """
     params = jnp.asarray(params, dtype=jnp.float64)
     generators = jnp.asarray(generators, dtype=jnp.float64)
     masks = jnp.asarray(masks, dtype=jnp.float64)
-    _validate_phase_weighting(phase_weighting)
     _validate_sources(key, samples, n_samples)
     if generators.ndim != 2:
         raise ValueError("generators must have shape (n_generators, n_qubits)")
@@ -267,7 +238,6 @@ def estimate_pauli_z(
         drawn,
         gemm_dtype,
         return_samples,
-        phase_weighting,
     )
 
 
@@ -282,7 +252,6 @@ def estimate_pauli_z_unchecked(
     n_samples: int | None = None,
     gemm_dtype: jnp.dtype | None = None,
     return_samples: bool = False,
-    phase_weighting: str = "operators",
 ) -> ExpectationEstimate:
     """Traceable estimator kernel with no validation and model-width masks.
 
@@ -297,5 +266,4 @@ def estimate_pauli_z_unchecked(
         drawn,
         gemm_dtype,
         return_samples,
-        phase_weighting,
     )

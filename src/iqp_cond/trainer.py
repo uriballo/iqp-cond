@@ -25,7 +25,6 @@ import numpy as np
 import optax
 
 from .core import ConditionalModel
-from .estimator import _validate_phase_weighting
 from .initialization import parameters_from_data
 from .operators import OperatorBank, expected_bodyness_sigmas, operator_bank
 
@@ -78,11 +77,6 @@ class TrainingConfig:
     ``sample_chunk`` streams the Monte Carlo samples in slices, bounding the live
     ``(samples, masks, qubits)`` ratio tensor.  It is faster at large sample
     budgets and slightly slower for small ones, so it is off by default.
-
-    ``phase_weighting="samples"`` opts into sample-side parameter weighting
-    for training and validation. It can improve unchunked float64 fits, but
-    chunked and mixed-precision workloads may be slower. The default
-    ``"operators"`` retains the original estimator contraction.
     """
 
     steps: int = 2_000
@@ -98,7 +92,6 @@ class TrainingConfig:
     gemm_dtype: jnp.dtype | None = None
     sample_chunk: int | None = None
     mask_refresh: str = STEP
-    phase_weighting: str = "operators"
 
     def resolved_sigmas(self, n_visible: int) -> tuple[float, ...]:
         """Return the bandwidth schedule for ``n_visible`` visible qubits.
@@ -112,7 +105,6 @@ class TrainingConfig:
         return expected_bodyness_sigmas(n_visible)
 
     def __post_init__(self) -> None:
-        _validate_phase_weighting(self.phase_weighting)
         if self.steps < 1:
             raise ValueError("steps must be positive")
         if self.batch_size < 1:
@@ -332,7 +324,6 @@ def train(
                 n_samples=config.mc_samples,
                 shared_samples=True,
                 gemm_dtype=config.gemm_dtype,
-                phase_weighting=config.phase_weighting,
                 sample_chunk=config.sample_chunk,
             ).loss
         return model.mmd(
@@ -343,7 +334,6 @@ def train(
             n_samples=config.mc_samples,
             shared_samples=True,
             gemm_dtype=config.gemm_dtype,
-            phase_weighting=config.phase_weighting,
             sample_chunk=config.sample_chunk,
         ).loss
 
@@ -379,7 +369,6 @@ def train(
             bank=validation_bank,
             n_samples=config.validation_mc_samples,
             gemm_dtype=config.gemm_dtype,
-            phase_weighting=config.phase_weighting,
         ).loss
 
     evaluate_validation = jax.jit(validation_loss)

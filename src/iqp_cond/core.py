@@ -206,7 +206,6 @@ class ConditionalModel:
         n_samples: int | None = None,
         gemm_dtype: jnp.dtype | None = None,
         return_samples: bool = False,
-        phase_weighting: str = "operators",
     ) -> ExpectationEstimate:
         """Estimate visible Pauli-Z moments for every condition and mask."""
         from .estimator import estimate_pauli_z
@@ -220,7 +219,6 @@ class ConditionalModel:
             samples=samples,
             n_samples=n_samples,
             gemm_dtype=gemm_dtype,
-            phase_weighting=phase_weighting,
             return_samples=return_samples,
         )
 
@@ -237,7 +235,6 @@ class ConditionalModel:
         shared_samples: bool = False,
         gemm_dtype: jnp.dtype | None = None,
         sample_chunk: int | None = None,
-        phase_weighting: str = "operators",
     ) -> ConditionalMMDResult:
         """Condition-balanced multiscale MMD against visible-width targets."""
         from .loss import mmd
@@ -259,6 +256,5 @@ class ConditionalModel:
             n_samples=n_samples,
             shared_samples=shared_samples,
             gemm_dtype=gemm_dtype,
-            phase_weighting=phase_weighting,
             sample_chunk=sample_chunk,
         )
