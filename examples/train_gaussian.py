@@ -56,8 +56,8 @@ def main() -> None:
     # broadcast to every qubit.
     angles = np.repeat((np.pi * (0.35 - 0.70 * conditions))[:, None], N_QUBITS, axis=1)
     model = ciqp.ConditionalModel(
-        ciqp.complete_ansatz(N_QUBITS),
-        ciqp.angle_encoder(angles[:, None, :], axes=("Y" * N_QUBITS,)),
+        ciqp.Ansatz.complete(N_QUBITS),
+        ciqp.AngleEncoder(angles[:, None, :], axes=("Y" * N_QUBITS,)),
     )
 
     result = ciqp.train(
@@ -78,13 +78,12 @@ def main() -> None:
     # The simulation bridge compiles the trained model into a PennyLane
     # circuit: exact probabilities when the device supports analytic
     # execution, and shots otherwise (including hardware backends).
-    draws = ciqp.simulation.sample_model(
-        model,
+    draws = model.sample(
         result.best_params,
         2000,
         seed=1,
     )
-    probabilities = ciqp.simulation.probabilities(model, result.best_params)
+    probabilities = model.probabilities(result.best_params)
     state_weights = np.bitwise_count(np.arange(2**N_QUBITS)).astype(int)
     profile_tvds = [
         0.5

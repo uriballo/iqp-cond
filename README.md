@@ -12,12 +12,10 @@ computable whenever the encoder supports two operations:
 - evaluate reference-amplitude ratios `psi_c(z xor a) / psi_c(z)` for Fourier
   masks `a`.
 
-Training needs only those two operations, and they are what keeps training
-classical; the model itself is still hard to sample from in general.  Sampled
-evaluation of the trained model goes through PennyLane.  Registered encoders
-also describe their preparation as single-qubit rotations, so the same model
-runs on a classical simulator or a quantum backend without changes to the
-training code.
+Those operations keep training classical; the model itself is still hard to
+sample from in general. Every encoder also describes its circuit preparation
+and condition selection, so the same object trains classically and runs on a
+PennyLane simulator or quantum backend.
 
 The library is consumed by the private
 [`conditional-generation-iqp`](https://github.com/uriballo/conditional-generation-iqp)
@@ -38,8 +36,28 @@ environment.  The package requires Python 3.11+ and depends on `jax`, `numpy`,
 To use it from another project (private repository, access required):
 
 ```bash
-uv add "iqp-cond @ git+https://github.com/uriballo/iqp-cond@v0.4.0"
+uv add "iqp-cond @ git+https://github.com/uriballo/iqp-cond@v0.5.0"
 ```
+
+### Migrating from 0.4
+
+Version 0.5 removes the encoder registry and narrows the package root:
+
+| 0.4 | 0.5 |
+|---|---|
+| `complete_ansatz(n)` | `Ansatz.complete(n)` |
+| `ansatz_from_generators(rows)` | `Ansatz(rows)` |
+| `angle_encoder(values, axes=...)` | `AngleEncoder(values, axes=...)` |
+| `model.encoders` | `model.encoder` |
+| `simulation.sample_model(model, ...)` | `model.sample(...)` |
+| `simulation.probabilities(model, ...)` | `model.probabilities(...)` |
+| `CircuitEncoder` | `Encoder` |
+| `ciqp.STEP` / `ciqp.CACHE` | `"step"` / `"cache"` |
+
+Custom encoder constructors now keep their own explicit signatures. They are
+instantiated directly and must implement `preparation_ops` and `select` in
+addition to sampling and amplitude ratios. Numerical helper functions remain
+available from their named submodules.
 
 ## Quickstart
 
@@ -50,7 +68,7 @@ import iqp_cond as ciqp
 n_qubits, n_conditions = 8, 3
 
 # A conditional model is a shared generator bank plus an encoder.
-ansatz = ciqp.complete_ansatz(n_qubits)
+ansatz = ciqp.Ansatz.complete(n_qubits)
 
 # One RY layer per condition and qubit; see "Encoders" for stacked layers.
 angles = np.broadcast_to(
@@ -58,7 +76,7 @@ angles = np.broadcast_to(
 )
 model = ciqp.ConditionalModel(
     ansatz,
-    ciqp.angle_encoder(angles[:, None, :], axes=("Y" * n_qubits,)),
+    ciqp.AngleEncoder(angles[:, None, :], axes=("Y" * n_qubits,)),
 )
 
 # Bitstring samples from the target family: (conditions, samples, visible qubits).
@@ -105,8 +123,8 @@ estimate.values  # (conditions, masks)
 
 Pass `samples=` instead of `key=` to evaluate a pre-drawn reference draw, and
 `return_samples=True` to produce the per-sample values that
-`estimate.standard_errors` needs.  Inside `jax.jit`, use the free function
-`ciqp.estimate_pauli_z_unchecked`, which skips validation; the loss uses it.
+`estimate.standard_errors` needs. Expert estimator functions, including the
+unchecked JIT kernel, live in `iqp_cond.estimator`.
 
 ## Sampling and backends
 
@@ -117,18 +135,19 @@ you choose:
 
 ```python
 import pennylane as qml
+from iqp_cond.simulation import build_qnode
 
-probabilities = ciqp.simulation.probabilities(model, params)
-draws = ciqp.simulation.sample_model(model, params, 1024, seed=0)
+probabilities = model.probabilities(params)
+draws = model.sample(params, 1024, seed=0)
 
 device = qml.device("default.qubit", wires=model.n_qubits)  # any plugin device
-qnode = ciqp.simulation.build_qnode(model, params, 0, device=device, shots=1000)
+qnode = build_qnode(model, params, 0, device=device, shots=1000)
 ```
 
-- `probabilities(model, params, *, device="lightning.qubit")` returns the exact
+- `model.probabilities(params, *, device="lightning.qubit")` returns the exact
   visible distribution `(conditions, 2**n_visible)`; it needs an analytic device
   (a statevector simulator) and is a small-system path.
-- `sample_model(model, params, n_samples, *, seed=None, device="lightning.qubit")`
+- `model.sample(params, n_samples, *, seed=None, device="lightning.qubit")`
   draws shot samples `(conditions, n_samples, n_visible)` and works on any
   PennyLane device, including hardware backends.  `seed` applies when the device
   is built from a name.
@@ -142,8 +161,8 @@ same circuit.
 
 ## Encoders
 
-`ciqp.encoder(family, angles, **params)` returns an object implementing the
-three operations of the `CircuitEncoder` interface:
+`Encoder` is a structural protocol. A class implements it by providing
+`n_conditions`, `n_qubits`, and four explicit operations:
 
 - `sample(key, n_samples)`: `(conditions, samples, qubits)` bitstrings from the
   post-Hadamard reference Born law `|psi_c(z)|^2`, where
@@ -155,17 +174,16 @@ three operations of the `CircuitEncoder` interface:
   `ciqp.simulation`.  The bridge maps `RX`, `RY`, and `RZ` (one wire, one
   angle) and `CNOT` (two wires, no parameter), which covers product states and
   entangling preparations.
+- `select(condition)`: the same encoder restricted to a one-condition batch.
 
-Training needs only the first two operations.  `ciqp.encoder` validates the
-built object against the full `CircuitEncoder` protocol, so any encoder it
-returns supports both training and sampling.  The interface also exposes
-`n_conditions` and `n_qubits`.
+`ConditionalModel` validates the complete protocol when it is constructed.
+Custom encoders require no base class, registration, family name, or shared
+constructor signature.
 
 The built-in family is `angle`.  It is a product state with a stack of
-fixed-axis rotations per qubit.  `ciqp.encoder("angle", angles, axes=...)` takes
+fixed-axis rotations per qubit. `ciqp.AngleEncoder(angles, axes=...)` takes
 angles of shape `(conditions, layers, qubits)` and one axis label (`"X"`, `"Y"`,
-or
-`"Z"`) per layer and qubit, with layer 0 applied first.  A layer can be any
+or `"Z"`) per layer and qubit, with layer 0 applied first. A layer can be any
 sequence of labels, so `axes=("YXXY", "ZXYZ")` is valid for four qubits; a
 single all-`Y` layer is the plain `RY` product state.
 
@@ -175,19 +193,15 @@ ignore its angle.  Local amplitudes stay real for all-`Y` sequences and become
 complex as soon as `X` or `Z` appears; sampling and ratio queries behave the
 same either way.
 
-To save memory, the library evaluates one condition at a time through
-`ciqp.encoders.select_encoder`.  That function slices every condition-batched
-leaf of a JAX pytree, or uses the optional `select(condition)` method when the
-encoder is not a pytree.  The built-in family is a pytree, so a custom family
-needs `select` only if it is plain Python.  The built-in family also implements
-`post_hadamard_amplitudes`, the optional `ExactEncoder` capability used by the
-statevector checks in the test suite.
+To save memory, the loss evaluates one condition at a time through the required
+`select(condition)` method. The built-in encoder is also a JAX pytree, but
+custom encoders do not need JAX registration. `AngleEncoder` additionally
+implements the optional `ExactEncoder` capability used by exact checks.
 
 ### Adding your own
 
-An encoder is any object with the interface above; registering it makes
-`ciqp.encoder` return it.  See `examples/custom_encoder.py` for a runnable
-version:
+An encoder is any object with the interface above. Instantiate it and pass it
+directly to the model. See `examples/custom_encoder.py` for a runnable version:
 
 ```python
 @dataclass(frozen=True)
@@ -218,12 +232,9 @@ class HadamardEncoder:
         return HadamardEncoder(self.angles[condition : condition + 1])
 
 
-ciqp.register_encoder(
-    "hadamard", lambda angles, **_: HadamardEncoder(jnp.asarray(angles))
-)
+encoder = HadamardEncoder(jnp.zeros((3, 6)))
+model = ciqp.ConditionalModel(ciqp.Ansatz.complete(6), encoder)
 ```
-
-Registering a name that already exists raises unless `replace=True`.
 
 ## Ancillas
 
@@ -237,34 +248,32 @@ model.n_ancillas  # 2
 
 The encoder and the generator bank cover the full register, targets keep the
 visible width only, and the estimator and the loss pad visible masks with
-identity on the ancilla positions automatically.  Call
-`ciqp.pad_visible_masks` to pad them yourself.  `ciqp.ancilla_support(generators,
-n_visible)` returns the parameter mask whose generators act on an ancilla, which
-`ciqp.parameters_from_data` uses to leave ancilla parameters near zero.
+identity on the ancilla positions automatically. Advanced mask padding,
+ancilla support, and data initialization are available from `iqp_cond.model`
+and `iqp_cond.initialization`.
 
 ## API
 
 | Module | Contents |
 |---|---|
-| `iqp_cond.core` | `Ansatz`, `ConditionalModel`, `complete_ansatz`, `ansatz_from_generators`, `pad_visible_masks`, `ancilla_support` |
-| `iqp_cond.encoders` | `Encoder`, `ExactEncoder`, `CircuitEncoder`, `Operation`, `AngleEncoder`, `angle_encoder`, `encoder`, `register_encoder`, `available_encoders`, `select_encoder` |
-| `iqp_cond.simulation` | `probabilities`, `sample_model`, `build_qnode` |
+| `iqp_cond` | `Ansatz`, `ConditionalModel`, `Encoder`, `AngleEncoder`, `Operation`, `TrainingConfig`, `train` |
+| `iqp_cond.model` | `Ansatz`, `ConditionalModel`, `pad_visible_masks`, `ancilla_support` |
+| `iqp_cond.encoders` | `Encoder`, `ExactEncoder`, `Operation`, `AngleEncoder`, `layered_amplitudes` |
+| `iqp_cond.simulation` | `build_qnode` |
 | `iqp_cond.estimator` | `estimate_pauli_z`, `estimate_pauli_z_unchecked`, `ExpectationEstimate` |
 | `iqp_cond.loss` | `mmd`, `target_moments`, `hamming_rbf`, `ConditionalMMDResult` |
-| `iqp_cond.trainer` | `TrainingConfig`, `TrainingResult`, `train`, `STEP`, `CACHE` |
+| `iqp_cond.training` | `TrainingConfig`, `TrainingResult`, `train`, `STEP`, `CACHE` |
 | `iqp_cond.initialization` | `random_parameters`, `parameters_from_data` |
 
 The advanced building blocks are in `iqp_cond.operators` (mask law,
 `OperatorBank`, `operator_bank`, `bank_from_ragged`,
 `sample_nonidentity_masks`, `sample_nonidentity_masks_jax`,
-`mmd_operator_probability`).  The package re-exports only
-`expected_bodyness_sigmas`, because `TrainingConfig` resolves its default
-bandwidths through it.
+`mmd_operator_probability`, `expected_bodyness_sigmas`).
 
 ## Masks and the MMD estimator
 
 Training minimizes the stochastic operator estimator of the squared multiscale
-Hamming–RBF MMD through `ciqp.mmd`.  The reference-state randomness always
+Hamming–RBF MMD implemented by `iqp_cond.loss.mmd`. The reference-state randomness always
 comes from the call's `key`; the mask source is exactly one of:
 
 - `sigmas` + `n_ops`: draw nonidentity masks afresh inside the call, one draw
@@ -274,9 +283,9 @@ comes from the call's `key`; the mask source is exactly one of:
 
 A bandwidth `sigma` induces the mask law `a_i ~ Bernoulli(p_sigma)` with
 `p_sigma = (1 - e^{-1/(2 sigma^2)})/2`, so `E[|a|] = n p_sigma` is the expected
-bodyness.  `ciqp.expected_bodyness_sigmas(n, targets)` inverts a bodyness
+bodyness. `iqp_cond.operators.expected_bodyness_sigmas(n, targets)` inverts a bodyness
 target into its bandwidth; the default targets are `(2, n/4, 0.49n)`, capped at
-`0.49n` because `p_sigma < 1/2` strictly.  `TrainingConfig.sigmas=None`
+`0.49n` because `p_sigma < 1/2` strictly. `TrainingConfig.sigmas=None`
 resolves through that helper once the model width is known.
 
 Skipping the identity mask is exact.  It contributes zero to the kernel MMD, so
@@ -312,8 +321,8 @@ package.
 
 Two opt-in settings cover large-budget regimes.
 
-- `TrainingConfig(gemm_dtype=jnp.float32)` (or `gemm_dtype` on `mmd` /
-  `estimate_pauli_z`) runs only the phase contraction in float32 and casts the
+- `TrainingConfig(gemm_dtype=jnp.float32)` (or `gemm_dtype` on the expert loss
+  and estimator functions) runs only the phase contraction in float32 and casts the
   phase result back to float64 before subsequent operations. Outputs remain
   float64, with measured gradient error of about 1e-7. It gives the largest
   speedup on GPUs, and on CPU it saves 6–16% of a full fit.
@@ -326,7 +335,7 @@ Two opt-in settings cover large-budget regimes.
 
 `examples/train_gaussian.py` trains a conditional model on a synthetic Gaussian
 family, then samples it through the PennyLane bridge and scores the Hamming
-profiles; `examples/custom_encoder.py` registers a custom encoder and trains
+profiles; `examples/custom_encoder.py` instantiates a custom encoder and trains
 through the public interface.  Both run from a checkout with
 `uv run python examples/<name>.py`.
 
@@ -344,5 +353,5 @@ and the amplitude ratios against statevector results.
 
 ## Status
 
-Version 0.4.0, a private development release.  Licence and citation metadata are
+Version 0.5.0, a private development release. Licence and citation metadata are
 pending author and institutional approval.

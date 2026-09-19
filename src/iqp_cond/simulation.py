@@ -7,17 +7,16 @@ a PennyLane circuit and runs it on a device chosen by the caller::
 
     import pennylane as qml
 
-    import iqp_cond as ciqp
+    from iqp_cond.simulation import build_qnode
 
-    draws = ciqp.simulation.sample_model(model, params, 1024, seed=0)
+    draws = model.sample(params, 1024, seed=0)
     device = qml.device("default.qubit", wires=model.n_qubits)
-    qnode = ciqp.simulation.build_qnode(model, params, 0, device=device, shots=1024)
+    qnode = build_qnode(model, params, 0, device=device, shots=1024)
 
 The circuit is the encoder preparation, a Hadamard layer, the shared diagonal
 as ``MultiRZ(-2 theta_j)`` per nonzero generator, a second Hadamard layer, and
 measurement of the visible wires.  Encoders describe their preparation as
-named gates
-(:meth:`~iqp_cond.encoders.CircuitEncoder.preparation_ops`), so the same
+named gates (:meth:`~iqp_cond.encoders.Encoder.preparation_ops`), so the same
 description runs on a classical simulator or on hardware.
 """
 
@@ -26,10 +25,10 @@ from __future__ import annotations
 import numpy as np
 import pennylane as qml
 
-from .core import ConditionalModel
-from .encoders import CircuitEncoder, Operation
+from .encoders import Encoder, Operation
+from .model import ConditionalModel
 
-__all__ = ["build_qnode", "probabilities", "sample_model"]
+__all__ = ["build_qnode"]
 
 #: Allowed preparation gates as ``(gate, wires, parameters)``.  Single-qubit
 #: rotations cover the product-state families; ``CNOT`` covers entangling
@@ -52,15 +51,6 @@ def _validate_params(model: ConditionalModel, params: np.ndarray) -> np.ndarray:
     return values
 
 
-def _require_circuit_encoder(model: ConditionalModel) -> CircuitEncoder:
-    if not isinstance(model.encoders, CircuitEncoder):
-        raise TypeError(
-            "sampling needs an encoder with a circuit representation; "
-            f"{type(model.encoders).__name__} does not implement preparation_ops",
-        )
-    return model.encoders
-
-
 def _resolve_device(
     device: str | qml.devices.Device,
     n_qubits: int,
@@ -79,8 +69,8 @@ def _resolve_device(
     return device
 
 
-def _prepare(encoders: CircuitEncoder, condition: int) -> None:
-    for operation in encoders.preparation_ops(condition):
+def _prepare(encoder: Encoder, condition: int) -> None:
+    for operation in encoder.preparation_ops(condition):
         if not isinstance(operation, Operation):
             raise TypeError(
                 "preparation_ops must yield Operation instances, got "
@@ -131,8 +121,8 @@ def build_qnode(
     name.  The QNode measures the visible wires and needs finite shots; pass
     ``shots`` here or wrap the result with ``qml.set_shots``.
     """
-    encoders = _require_circuit_encoder(model)
-    if not 0 <= condition < encoders.n_conditions:
+    encoder = model.encoder
+    if not 0 <= condition < encoder.n_conditions:
         raise IndexError(f"condition {condition} outside the batch")
     values = _validate_params(model, params)
     resolved = _resolve_device(device or "lightning.qubit", model.n_qubits, seed)
@@ -141,7 +131,7 @@ def build_qnode(
     visible = model.visible
 
     def circuit() -> object:
-        _prepare(encoders, condition)
+        _prepare(encoder, condition)
         _hadamard_layer(n_qubits)
         _diagonal_layer(values, generators)
         _hadamard_layer(n_qubits)
@@ -153,7 +143,7 @@ def build_qnode(
     return qnode
 
 
-def sample_model(
+def _sample_model(
     model: ConditionalModel,
     params: np.ndarray,
     n_samples: int,
@@ -169,12 +159,12 @@ def sample_model(
     function adds the condition index to it so each condition has its own
     stream.
     """
-    encoders = _require_circuit_encoder(model)
+    encoder = model.encoder
     _validate_params(model, params)
     if n_samples < 1:
         raise ValueError("n_samples must be positive")
     draws = []
-    for condition in range(encoders.n_conditions):
+    for condition in range(encoder.n_conditions):
         condition_seed = None if seed is None else int(seed) + condition
         qnode = build_qnode(
             model,
@@ -196,7 +186,7 @@ def _reverse_bits(indices: np.ndarray, n_bits: int) -> np.ndarray:
     return out
 
 
-def probabilities(
+def _probabilities(
     model: ConditionalModel,
     params: np.ndarray,
     *,
@@ -207,10 +197,11 @@ def probabilities(
 
     Analytic evaluation, so this is a small-system path.  The device must
     support analytic execution, which means a statevector simulator.  Use
-    :func:`sample_model` for hardware or shot-based evaluation.  Indices are
+    :meth:`iqp_cond.model.ConditionalModel.sample` for hardware or shot-based
+    evaluation.  Indices are
     little-endian, matching the rest of the package.
     """
-    encoders = _require_circuit_encoder(model)
+    encoder = model.encoder
     values = _validate_params(model, params)
     generators = np.asarray(model.generators, dtype=np.float64)
     n_qubits = model.n_qubits
@@ -218,18 +209,18 @@ def probabilities(
     index = np.arange(2**visible)
 
     distributions = []
-    for condition in range(encoders.n_conditions):
+    for condition in range(encoder.n_conditions):
         resolved = _resolve_device(device, n_qubits, seed)
 
         def circuit(
-            encoders: CircuitEncoder = encoders,
+            encoder: Encoder = encoder,
             condition: int = condition,
             values: np.ndarray = values,
             generators: np.ndarray = generators,
             n_qubits: int = n_qubits,
             visible: int = visible,
         ) -> object:
-            _prepare(encoders, condition)
+            _prepare(encoder, condition)
             _hadamard_layer(n_qubits)
             _diagonal_layer(values, generators)
             _hadamard_layer(n_qubits)

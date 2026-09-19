@@ -8,12 +8,14 @@ import numpy as np
 import pytest
 
 import iqp_cond as ciqp
+from iqp_cond.estimator import estimate_pauli_z, estimate_pauli_z_unchecked
+from iqp_cond.model import pad_visible_masks
 
 
 def y_layer(angles: np.ndarray) -> ciqp.AngleEncoder:
     """One ``RY`` layer per qubit: the plain product-state encoding."""
     angles = np.asarray(angles)
-    return ciqp.angle_encoder(angles[:, None, :], axes=("Y" * angles.shape[1],))
+    return ciqp.AngleEncoder(angles[:, None, :], axes=("Y" * angles.shape[1],))
 
 
 N_VISIBLE = 3
@@ -23,7 +25,7 @@ N_CONDITIONS = 2
 
 @pytest.fixture
 def setup() -> tuple[ciqp.Ansatz, ciqp.Encoder, np.ndarray]:
-    ansatz = ciqp.complete_ansatz(N_VISIBLE + N_ANCILLAS)
+    ansatz = ciqp.Ansatz.complete(N_VISIBLE + N_ANCILLAS)
     rng = np.random.default_rng(31)
     angles = rng.uniform(0.4, 2.2, size=(N_CONDITIONS, N_VISIBLE + N_ANCILLAS))
     encoders = y_layer(angles)
@@ -42,7 +44,7 @@ def test_visible_masks_are_padded_with_identity_on_ancillas(
     params = np.zeros(ansatz.n_parameters)
     key = jax.random.PRNGKey(0)
 
-    padded = ciqp.estimate_pauli_z(
+    padded = estimate_pauli_z(
         params,
         ansatz.generators,
         encoders,
@@ -50,8 +52,8 @@ def test_visible_masks_are_padded_with_identity_on_ancillas(
         key=key,
         n_samples=64,
     )
-    model_masks = np.asarray(ciqp.pad_visible_masks(visible_masks, N_ANCILLAS))
-    direct = ciqp.estimate_pauli_z(
+    model_masks = np.asarray(pad_visible_masks(visible_masks, N_ANCILLAS))
+    direct = estimate_pauli_z(
         params,
         ansatz.generators,
         encoders,
@@ -71,18 +73,18 @@ def test_pre_drawn_samples_match_the_key_source(setup) -> None:
     key = jax.random.PRNGKey(7)
 
     drawn = encoders.sample(key, 32)
-    from_samples = ciqp.estimate_pauli_z(
+    from_samples = estimate_pauli_z(
         params,
         ansatz.generators,
         encoders,
         masks,
         samples=drawn,
     )
-    unchecked = ciqp.estimate_pauli_z_unchecked(
+    unchecked = estimate_pauli_z_unchecked(
         params,
         ansatz.generators,
         encoders,
-        ciqp.pad_visible_masks(masks, N_ANCILLAS),
+        pad_visible_masks(masks, N_ANCILLAS),
         samples=drawn,
     )
     assert np.array_equal(
@@ -93,7 +95,7 @@ def test_pre_drawn_samples_match_the_key_source(setup) -> None:
 
 def test_rank_two_samples_require_a_single_condition() -> None:
     """One shared draw across different reference states would be biased."""
-    ansatz = ciqp.complete_ansatz(N_VISIBLE)
+    ansatz = ciqp.Ansatz.complete(N_VISIBLE)
     generators = ansatz.generators
     masks = np.ones((1, N_VISIBLE))
     params = np.zeros(ansatz.n_parameters)
@@ -101,7 +103,7 @@ def test_rank_two_samples_require_a_single_condition() -> None:
     draw = rng.integers(0, 2, size=(16, N_VISIBLE)).astype(np.float64)
 
     single = y_layer(rng.uniform(0.4, 2.4, size=(1, N_VISIBLE)))
-    estimate = ciqp.estimate_pauli_z(
+    estimate = estimate_pauli_z(
         params,
         generators,
         single,
@@ -113,9 +115,9 @@ def test_rank_two_samples_require_a_single_condition() -> None:
 
     paired = y_layer(rng.uniform(0.4, 2.4, size=(2, N_VISIBLE)))
     with pytest.raises(ValueError, match="single condition"):
-        ciqp.estimate_pauli_z(params, generators, paired, masks, samples=draw)
+        estimate_pauli_z(params, generators, paired, masks, samples=draw)
     with pytest.raises(ValueError, match="shape \\(conditions, samples, qubits\\)"):
-        ciqp.estimate_pauli_z(
+        estimate_pauli_z(
             params,
             generators,
             single,
@@ -126,7 +128,7 @@ def test_rank_two_samples_require_a_single_condition() -> None:
 
 def test_sample_condition_axis_must_match_the_encoder() -> None:
     """A mismatched condition axis must fail instead of broadcasting."""
-    ansatz = ciqp.complete_ansatz(N_VISIBLE)
+    ansatz = ciqp.Ansatz.complete(N_VISIBLE)
     params = np.zeros(ansatz.n_parameters)
     masks = np.ones((1, N_VISIBLE))
     rng = np.random.default_rng(34)
@@ -134,7 +136,7 @@ def test_sample_condition_axis_must_match_the_encoder() -> None:
 
     single = y_layer(rng.uniform(0.4, 2.4, size=(1, N_VISIBLE)))
     with pytest.raises(ValueError, match="condition axis has 5 entries"):
-        ciqp.estimate_pauli_z(
+        estimate_pauli_z(
             params,
             ansatz.generators,
             single,
@@ -143,7 +145,7 @@ def test_sample_condition_axis_must_match_the_encoder() -> None:
         )
     paired = y_layer(rng.uniform(0.4, 2.4, size=(2, N_VISIBLE)))
     with pytest.raises(ValueError, match="condition axis has 5 entries"):
-        ciqp.estimate_pauli_z(
+        estimate_pauli_z(
             params,
             ansatz.generators,
             paired,
@@ -154,14 +156,14 @@ def test_sample_condition_axis_must_match_the_encoder() -> None:
 
 def test_sample_qubit_axis_must_match_the_encoder() -> None:
     """A size-1 qubit axis broadcasts in einsum, so it must be rejected."""
-    ansatz = ciqp.complete_ansatz(N_VISIBLE)
+    ansatz = ciqp.Ansatz.complete(N_VISIBLE)
     params = np.zeros(ansatz.n_parameters)
     masks = np.ones((1, N_VISIBLE))
     rng = np.random.default_rng(35)
     narrow = rng.integers(0, 2, size=(1, 8, 1)).astype(np.float64)
     encoders = y_layer(rng.uniform(0.4, 2.4, size=(1, N_VISIBLE)))
     with pytest.raises(ValueError, match="qubit axis has 1 entries"):
-        ciqp.estimate_pauli_z(
+        estimate_pauli_z(
             params,
             ansatz.generators,
             encoders,
@@ -175,9 +177,9 @@ def test_exactly_one_sample_source_is_required(setup) -> None:
     params = np.zeros(ansatz.n_parameters)
     masks = np.ones((1, N_VISIBLE))
     with pytest.raises(ValueError, match="exactly one of key or samples"):
-        ciqp.estimate_pauli_z(params, ansatz.generators, encoders, masks)
+        estimate_pauli_z(params, ansatz.generators, encoders, masks)
     with pytest.raises(ValueError, match="exactly one of key or samples"):
-        ciqp.estimate_pauli_z(
+        estimate_pauli_z(
             params,
             ansatz.generators,
             encoders,
@@ -191,7 +193,7 @@ def test_exactly_one_sample_source_is_required(setup) -> None:
 def test_n_samples_is_required_with_a_key(setup) -> None:
     ansatz, encoders, _targets = setup
     with pytest.raises(ValueError, match="n_samples is required"):
-        ciqp.estimate_pauli_z(
+        estimate_pauli_z(
             np.zeros(ansatz.n_parameters),
             ansatz.generators,
             encoders,
@@ -202,7 +204,7 @@ def test_n_samples_is_required_with_a_key(setup) -> None:
 
 def test_standard_errors_need_per_sample_values(setup) -> None:
     ansatz, encoders, _targets = setup
-    estimate = ciqp.estimate_pauli_z(
+    estimate = estimate_pauli_z(
         np.zeros(ansatz.n_parameters),
         ansatz.generators,
         encoders,
@@ -213,7 +215,7 @@ def test_standard_errors_need_per_sample_values(setup) -> None:
     assert estimate.sample_values is None
     with pytest.raises(ValueError, match="return_samples=True"):
         _ = estimate.standard_errors
-    with_samples = ciqp.estimate_pauli_z(
+    with_samples = estimate_pauli_z(
         np.zeros(ansatz.n_parameters),
         ansatz.generators,
         encoders,
@@ -228,7 +230,7 @@ def test_standard_errors_need_per_sample_values(setup) -> None:
 def test_masks_wider_than_the_register_are_rejected(setup) -> None:
     ansatz, encoders, _targets = setup
     with pytest.raises(ValueError, match="more qubits than the generators"):
-        ciqp.estimate_pauli_z(
+        estimate_pauli_z(
             np.zeros(ansatz.n_parameters),
             ansatz.generators,
             encoders,
@@ -241,7 +243,7 @@ def test_masks_wider_than_the_register_are_rejected(setup) -> None:
 def test_non_binary_masks_are_rejected(setup) -> None:
     ansatz, encoders, _targets = setup
     with pytest.raises(ValueError, match="only zeros and ones"):
-        ciqp.estimate_pauli_z(
+        estimate_pauli_z(
             np.zeros(ansatz.n_parameters),
             ansatz.generators,
             encoders,
@@ -254,7 +256,7 @@ def test_non_binary_masks_are_rejected(setup) -> None:
 def test_too_few_samples_are_rejected(setup) -> None:
     ansatz, encoders, _targets = setup
     with pytest.raises(ValueError, match="at least two"):
-        ciqp.estimate_pauli_z(
+        estimate_pauli_z(
             np.zeros(ansatz.n_parameters),
             ansatz.generators,
             encoders,
@@ -268,7 +270,7 @@ def test_encoder_width_mismatch_is_rejected(setup) -> None:
     ansatz, _encoders, _targets = setup
     smaller = y_layer(np.zeros((N_CONDITIONS, N_VISIBLE)))
     with pytest.raises(ValueError, match="encoder acts on"):
-        ciqp.estimate_pauli_z(
+        estimate_pauli_z(
             np.zeros(ansatz.n_parameters),
             ansatz.generators,
             smaller,
@@ -284,7 +286,7 @@ def test_unchecked_kernel_is_jittable(setup) -> None:
     params = np.zeros(ansatz.n_parameters)
 
     def estimate(current_params: jax.Array) -> jax.Array:
-        return ciqp.estimate_pauli_z_unchecked(
+        return estimate_pauli_z_unchecked(
             current_params,
             ansatz.generators,
             encoders,
@@ -305,7 +307,7 @@ def test_parameter_gradient_matches_finite_differences(setup) -> None:
 
     def value(current: jax.Array) -> jax.Array:
         return jnp.sum(
-            ciqp.estimate_pauli_z(
+            estimate_pauli_z(
                 current,
                 ansatz.generators,
                 encoders,
@@ -333,7 +335,7 @@ def test_mixed_precision_gemm_stays_close_to_float64(setup) -> None:
     params = np.linspace(-0.4, 0.4, ansatz.n_parameters)
     key = jax.random.PRNGKey(3)
 
-    reference = ciqp.estimate_pauli_z(
+    reference = estimate_pauli_z(
         params,
         ansatz.generators,
         encoders,
@@ -341,7 +343,7 @@ def test_mixed_precision_gemm_stays_close_to_float64(setup) -> None:
         key=key,
         n_samples=4096,
     )
-    mixed = ciqp.estimate_pauli_z(
+    mixed = estimate_pauli_z(
         params,
         ansatz.generators,
         encoders,
@@ -365,7 +367,7 @@ def test_checked_estimator_rejects_non_binary_samples(setup) -> None:
         0.5,
     )
     with pytest.raises(ValueError, match="samples must contain only zeros and ones"):
-        ciqp.estimate_pauli_z(
+        estimate_pauli_z(
             np.zeros(ansatz.n_parameters),
             ansatz.generators,
             encoders,

@@ -1,8 +1,8 @@
-"""The encoder interface and the product-state angle family.
+"""The encoder interface and the product-state angle encoder.
 
 A conditional IQP model applies one shared diagonal unitary ``U_theta`` to a
-condition-dependent input state ``|phi(c)>``.  A registered encoder provides
-three capabilities:
+condition-dependent input state ``|phi(c)>``.  An encoder provides four
+capabilities:
 
 ``sample``
     Draw bitstrings from ``|psi_c(z)|^2`` in polynomial time, where
@@ -12,17 +12,19 @@ three capabilities:
 ``preparation_ops``
     Describe how ``|phi(c)>`` is prepared as named gates, so the model can be
     compiled to a circuit and sampled on a simulator or backend.
+``select``
+    Restrict the condition batch to one condition for memory-bounded loss
+    evaluation.
 
 The first two operations make training classically tractable and keep the
-trainer independent of any circuit simulator.  The third is required at
-registration time and used only by :mod:`iqp_cond.simulation`.  The registry
-looks up encoders by name, so you can add a family without editing this
-module::
+trainer independent of any circuit simulator.  The third is used only by
+:mod:`iqp_cond.simulation`.  Encoder families are ordinary Python objects;
+custom implementations are instantiated directly and need no registration::
 
     import iqp_cond as ciqp
 
-    ciqp.register_encoder("my_family", my_encoder_factory)
-    states = ciqp.encoder("my_family", angles)
+    states = MyEncoder(angles)
+    model = ciqp.ConditionalModel(ciqp.Ansatz.complete(states.n_qubits), states)
 
 The built-in family is :class:`AngleEncoder`, a product state built from any
 number of fixed-axis single-qubit rotation layers.  Implementations are batched
@@ -34,9 +36,8 @@ single random key.  Exact small-system work needs a further capability,
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
-from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 
 import jax
@@ -44,22 +45,12 @@ import jax.numpy as jnp
 import numpy as np
 
 __all__ = [
-    "ANGLE",
-    "ENCODERS",
     "AngleEncoder",
-    "CircuitEncoder",
     "Encoder",
     "ExactEncoder",
     "Operation",
-    "angle_encoder",
-    "available_encoders",
-    "encoder",
     "layered_amplitudes",
-    "register_encoder",
-    "select_encoder",
 ]
-
-ANGLE = "angle"
 
 _ROTATION_AXES = ("X", "Y", "Z")
 
@@ -84,10 +75,8 @@ class Encoder(Protocol):
 
     Shapes are ``C`` conditions, ``S`` samples, ``R`` masks, ``n`` qubits.
     To save memory, the library evaluates one condition at a time through
-    :func:`select_encoder`, which slices every condition-batched leaf of a JAX
-    pytree or uses an optional ``select`` method.  Families therefore either
-    register as pytrees or implement ``select``; nothing else about them is
-    required.
+    :meth:`select`.  Implementations may also register as JAX pytrees when
+    useful, but that is not part of the public extension contract.
     """
 
     @property
@@ -104,6 +93,12 @@ class Encoder(Protocol):
     def amplitude_ratios(self, samples: jnp.ndarray, masks: jnp.ndarray) -> jnp.ndarray:
         """Return ``(C, S, R)`` ratios ``psi_c(z xor a) / psi_c(z)``."""
 
+    def preparation_ops(self, condition: int) -> tuple[Operation, ...]:
+        """Return operations preparing ``|phi(condition)>`` before ``H^n``."""
+
+    def select(self, condition: int) -> Encoder:
+        """Return an encoder containing only ``condition``."""
+
 
 @runtime_checkable
 class ExactEncoder(Encoder, Protocol):
@@ -115,104 +110,6 @@ class ExactEncoder(Encoder, Protocol):
 
     def post_hadamard_amplitudes(self) -> jnp.ndarray:
         """Return normalised ``(C, 2**n)`` amplitudes ``<z|H^n|phi(c)>``."""
-
-
-@runtime_checkable
-class CircuitEncoder(Encoder, Protocol):
-    """The registered encoder interface: training plus a circuit representation.
-
-    ``preparation_ops`` describes ``|phi(c)>`` as named gates, without
-    reference to any simulator.  :mod:`iqp_cond.simulation` compiles those
-    operations plus the shared diagonal into a PennyLane circuit, so any
-    registered family can be sampled on a classical simulator or a backend.
-    The :func:`encoder` factory validates every result against this protocol.
-    """
-
-    def preparation_ops(self, condition: int) -> tuple[Operation, ...]:
-        """Return the operations preparing ``|phi(condition)>`` before ``H^n``."""
-
-
-def select_encoder(states: Encoder, condition: int) -> Encoder:
-    """Restrict a batched encoder to a single condition.
-
-    Every condition-batched leaf of a pytree is sliced to a one-condition
-    batch, which is what keeps the estimator's sample/mask buffer at one
-    condition.  An encoder that is not a pytree may implement ``select``
-    instead; the library then uses it.
-    """
-    if not 0 <= condition < states.n_conditions:
-        raise IndexError(f"condition {condition} outside the batch")
-    own = getattr(states, "select", None)
-    if callable(own):
-        return own(condition)
-    try:
-        return jax.tree_util.tree_map(
-            lambda value: value[condition : condition + 1],
-            states,
-        )
-    except (TypeError, AttributeError, IndexError) as error:
-        raise TypeError(
-            "encoder must be a JAX pytree of condition-batched arrays or "
-            "implement select()",
-        ) from error
-
-
-_REGISTRY: dict[str, object] = {}
-#: Read-only view of the registered families.  Mutate it only through
-#: :func:`register_encoder`, so a typo or a plugin cannot silently shadow a
-#: built-in.
-ENCODERS: Mapping[str, object] = MappingProxyType(_REGISTRY)
-
-
-def register_encoder(
-    family: str,
-    factory: object,
-    *,
-    replace: bool = False,
-) -> None:
-    """Register an encoder factory under ``family``.
-
-    The factory is called as ``factory(angles, **params)`` with family-specific
-    angles.  Registering an existing name raises unless ``replace=True``, so a
-    typo or a plugin cannot silently shadow a built-in family.
-    """
-    if not family or not isinstance(family, str):
-        raise ValueError("family must be a non-empty string")
-    if not callable(factory):
-        raise TypeError("factory must be callable")
-    if family in _REGISTRY and not replace:
-        raise ValueError(
-            f"encoder family {family!r} is already registered; pass "
-            "replace=True to overwrite it",
-        )
-    _REGISTRY[family] = factory
-
-
-def available_encoders() -> tuple[str, ...]:
-    """Return the registered family names, sorted."""
-    return tuple(sorted(_REGISTRY))
-
-
-def encoder(family: str, angles: jnp.ndarray, **params: object) -> Encoder:
-    """Build the encoder of ``family`` for every supplied condition.
-
-    The function checks the factory's result against the :class:`CircuitEncoder`
-    protocol, so a mistyped plugin fails here instead of silently returning
-    something the estimator cannot use.
-    """
-    if family not in _REGISTRY:
-        raise ValueError(
-            f"unknown encoder family: {family!r}; "
-            f"available: {', '.join(available_encoders())}",
-        )
-    states = _REGISTRY[family](angles, **params)  # type: ignore[operator]
-    if not isinstance(states, CircuitEncoder):
-        raise TypeError(
-            f"encoder family {family!r} returned {type(states).__name__}, which "
-            "does not implement the CircuitEncoder protocol: register families "
-            "that provide sampling, amplitude ratios, and preparation_ops",
-        )
-    return states
 
 
 def _safe_ratio(numerator: jnp.ndarray, denominator: jnp.ndarray) -> jnp.ndarray:
@@ -353,16 +250,12 @@ def layered_amplitudes(
 
 
 @dataclass(frozen=True)
-class ProductEncoder:
+class _ProductEncoder:
     """Batched product-state encoder with per-qubit local amplitudes.
 
-    This is the one-layer ``RY`` base of :class:`AngleEncoder`.  Subclasses
-    store the condition-batched local amplitudes and inherit sampling, ratio
-    queries, and the exact state expansion.  The class registers as a JAX
-    pytree so :func:`select_encoder` can slice it to one condition.
+    Internal implementation shared by the public angle encoder methods.
     """
 
-    name: str
     angles: jnp.ndarray
     amp_zero: jnp.ndarray
     amp_one: jnp.ndarray
@@ -419,14 +312,15 @@ class ProductEncoder:
 
 
 jax.tree_util.register_dataclass(
-    ProductEncoder,
+    _ProductEncoder,
     data_fields=["angles", "amp_zero", "amp_one"],
-    meta_fields=["name"],
+    meta_fields=[],
 )
 
 
-@dataclass(frozen=True)
-class AngleEncoder(ProductEncoder):
+@jax.tree_util.register_pytree_node_class
+@dataclass(frozen=True, init=False)
+class AngleEncoder(_ProductEncoder):
     """Product-state encoder with stacked single-qubit rotation layers.
 
     ``angles`` is ``(n_conditions, n_layers, n_qubits)`` and ``axes`` the
@@ -434,29 +328,88 @@ class AngleEncoder(ProductEncoder):
     first.  A single all-``Y`` layer is the plain ``RY`` product state;
     anything else composes rotations, which makes the local amplitudes complex
     as soon as ``X`` or ``Z`` appears, since only ``Y`` keeps the single-qubit
-    matrices real.  The class inherits sampling and ratio queries unchanged.
+    matrices real.  Construction validates the axes and caches the local
+    post-Hadamard amplitudes used by sampling and ratio queries.
     """
 
-    axes: tuple[tuple[str, ...], ...] = ()
+    axes: tuple[tuple[str, ...], ...]
 
-    def __post_init__(self) -> None:
-        # Check only static properties. JAX rebuilds this dataclass while
-        # tracing.
-        if self.angles.ndim != 3:
+    def __init__(
+        self,
+        angles: jnp.ndarray,
+        *,
+        axes: Sequence[Sequence[str]],
+    ) -> None:
+        if np.iscomplexobj(angles):
+            raise ValueError("angles must be real")
+        values = jnp.asarray(angles, dtype=jnp.float64)
+        if values.ndim != 3:
             raise ValueError(
                 "angles must have shape (n_conditions, n_layers, n_qubits)",
             )
+        if not bool(jnp.all(jnp.isfinite(values))):
+            raise ValueError("angles must be finite")
         normalized = _normalize_axes(
-            self.axes,
-            int(self.angles.shape[1]),
-            int(self.angles.shape[2]),
+            axes,
+            int(values.shape[1]),
+            int(values.shape[2]),
         )
+        amp_zero, amp_one = layered_amplitudes(values, normalized)
+        object.__setattr__(self, "angles", values)
+        object.__setattr__(self, "amp_zero", jnp.asarray(amp_zero))
+        object.__setattr__(self, "amp_one", jnp.asarray(amp_one))
         object.__setattr__(self, "axes", normalized)
+
+    @classmethod
+    def _from_components(
+        cls,
+        angles: jnp.ndarray,
+        amp_zero: jnp.ndarray,
+        amp_one: jnp.ndarray,
+        axes: tuple[tuple[str, ...], ...],
+    ) -> AngleEncoder:
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "angles", angles)
+        object.__setattr__(instance, "amp_zero", amp_zero)
+        object.__setattr__(instance, "amp_one", amp_one)
+        object.__setattr__(instance, "axes", axes)
+        return instance
+
+    def tree_flatten(
+        self,
+    ) -> tuple[
+        tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray],
+        tuple[tuple[str, ...], ...],
+    ]:
+        """Return dynamic arrays and static axes for JAX transformations."""
+        return (self.angles, self.amp_zero, self.amp_one), self.axes
+
+    @classmethod
+    def tree_unflatten(
+        cls,
+        axes: tuple[tuple[str, ...], ...],
+        values: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray],
+    ) -> AngleEncoder:
+        """Rebuild a traced encoder without recomputing its amplitudes."""
+        angles, amp_zero, amp_one = values
+        return cls._from_components(angles, amp_zero, amp_one, axes)
 
     @property
     def n_qubits(self) -> int:
         """Number of qubits the encoder state lives on."""
         return int(self.angles.shape[-1])
+
+    def select(self, condition: int) -> AngleEncoder:
+        """Return this encoder restricted to one condition."""
+        if not 0 <= condition < self.n_conditions:
+            raise IndexError(f"condition {condition} outside the batch")
+        selection = slice(condition, condition + 1)
+        return self._from_components(
+            self.angles[selection],
+            self.amp_zero[selection],
+            self.amp_one[selection],
+            self.axes,
+        )
 
     def preparation_ops(self, condition: int) -> tuple[Operation, ...]:
         """Return this condition's rotation layers, layer 0 first."""
@@ -471,53 +424,3 @@ class AngleEncoder(ProductEncoder):
             for layer, labels in enumerate(self.axes)
             for qubit, label in enumerate(labels)
         )
-
-
-jax.tree_util.register_dataclass(
-    AngleEncoder,
-    data_fields=["angles", "amp_zero", "amp_one"],
-    meta_fields=["name", "axes"],
-)
-
-
-def angle_encoder(
-    angles: jnp.ndarray,
-    axes: Sequence[Sequence[str]],
-) -> AngleEncoder:
-    """Build a layered product-state encoder.
-
-    ``angles`` has shape ``(n_conditions, n_layers, n_qubits)``; ``axes`` gives
-    one rotation label (``"X"``, ``"Y"``, or ``"Z"``) per layer and qubit, with
-    layer 0 applied first.  A layer may be any sequence of labels, so
-    ``("Y" * n, ("X", "Z") * (n // 2))`` is valid.
-
-    The first layer must not contain ``Z``, because ``R_Z`` on ``|0>`` is a
-    global phase, which cancels from probabilities and ratios, so accepting it
-    would silently ignore its angle.  Later ``Z`` layers are allowed; all-``Y``
-    sequences keep the real-amplitude path.
-    """
-    if np.iscomplexobj(angles):
-        raise ValueError("angles must be real")
-    values = jnp.asarray(angles, dtype=jnp.float64)
-    if values.ndim != 3:
-        raise ValueError(
-            "angles must have shape (n_conditions, n_layers, n_qubits)",
-        )
-    if not bool(jnp.all(jnp.isfinite(values))):
-        raise ValueError("angles must be finite")
-    normalized = _normalize_axes(
-        axes,
-        int(values.shape[1]),
-        int(values.shape[2]),
-    )
-    amp_zero, amp_one = layered_amplitudes(values, normalized)
-    return AngleEncoder(
-        name=ANGLE,
-        angles=values,
-        amp_zero=jnp.asarray(amp_zero),
-        amp_one=jnp.asarray(amp_one),
-        axes=normalized,
-    )
-
-
-register_encoder(ANGLE, angle_encoder)

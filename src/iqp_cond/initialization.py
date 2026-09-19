@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .core import ancilla_support
+from .model import ancilla_support
 
 __all__ = [
     "parameters_from_data",

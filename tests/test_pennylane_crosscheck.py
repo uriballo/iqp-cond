@@ -20,13 +20,15 @@ import numpy as np
 import pennylane as qml
 
 import iqp_cond as ciqp
+from iqp_cond.estimator import estimate_pauli_z
+from iqp_cond.loss import mmd
 from iqp_cond.operators import mmd_operator_probability
 
 
 def y_layer(angles: np.ndarray) -> ciqp.AngleEncoder:
     """One ``RY`` layer per qubit: the plain product-state encoding."""
     angles = np.asarray(angles)
-    return ciqp.angle_encoder(angles[:, None, :], axes=("Y" * angles.shape[1],))
+    return ciqp.AngleEncoder(angles[:, None, :], axes=("Y" * angles.shape[1],))
 
 
 N_VISIBLE = 3
@@ -171,14 +173,14 @@ def test_pauli_moments_match_pennylane() -> None:
     on the same visible wires and identity elsewhere.
     """
     angles = angles_for(seed=7)
-    ansatz = ciqp.complete_ansatz(N_QUBITS)
+    ansatz = ciqp.Ansatz.complete(N_QUBITS)
     rng = np.random.default_rng(8)
     params = rng.normal(0.0, 0.4, size=ansatz.n_parameters)
     masks = rng.integers(0, 2, size=(6, N_VISIBLE)).astype(np.float64)
     masks[0] = [1.0, 0.0, 0.0]
     encoders = y_layer(angles)
 
-    estimate = ciqp.estimate_pauli_z(
+    estimate = estimate_pauli_z(
         params,
         ansatz.generators,
         encoders,
@@ -216,8 +218,8 @@ def test_estimator_gradient_matches_independent_pennylane_gradient() -> None:
     angles = np.asarray(
         np.random.default_rng(41).uniform(0.3, 2.1, size=(1, len(axes), N_QUBITS))
     )
-    encoders = ciqp.angle_encoder(angles, axes)
-    ansatz = ciqp.complete_ansatz(N_QUBITS)
+    encoders = ciqp.AngleEncoder(angles, axes=axes)
+    ansatz = ciqp.Ansatz.complete(N_QUBITS)
     generators = np.asarray(ansatz.generators)
     params = jax.numpy.asarray(
         np.random.default_rng(42).normal(0.0, 0.25, ansatz.n_parameters),
@@ -226,7 +228,7 @@ def test_estimator_gradient_matches_independent_pennylane_gradient() -> None:
     samples = encoders.sample(jax.random.PRNGKey(43), 200_000)
 
     def sample_values(theta: jax.Array) -> jax.Array:
-        estimate = ciqp.estimate_pauli_z(
+        estimate = estimate_pauli_z(
             theta,
             ansatz.generators,
             encoders,
@@ -292,7 +294,7 @@ def test_layered_angle_encoder_state_matches_pennylane() -> None:
         2.2,
         size=(N_CONDITIONS, len(axes), N_QUBITS),
     )
-    encoders = ciqp.angle_encoder(angles, axes)
+    encoders = ciqp.AngleEncoder(angles, axes=axes)
     state = np.asarray(encoders.post_hadamard_amplitudes())
 
     for condition in range(N_CONDITIONS):
@@ -312,7 +314,7 @@ def test_mmd_expectation_matches_exact_pennylane_value() -> None:
     sigma = 2.0
     n_ops, n_samples, n_keys = 32, 64, 240
     angles = angles_for(seed=17)
-    ansatz = ciqp.complete_ansatz(N_QUBITS)
+    ansatz = ciqp.Ansatz.complete(N_QUBITS)
     rng = np.random.default_rng(18)
     params = rng.normal(0.0, 0.4, size=ansatz.n_parameters)
     generators = np.asarray(ansatz.generators)
@@ -357,7 +359,7 @@ def test_mmd_expectation_matches_exact_pennylane_value() -> None:
     encoders = y_layer(angles)
 
     def one_loss(key: jax.Array) -> jax.Array:
-        return ciqp.mmd(
+        return mmd(
             params,
             ansatz.generators,
             encoders,
@@ -397,11 +399,11 @@ def pl_visible_probabilities(
 def test_simulation_probabilities_match_pennylane() -> None:
     """The bridge distribution, including ancilla marginalization."""
     angles = angles_for(seed=29)
-    ansatz = ciqp.complete_ansatz(N_QUBITS)
+    ansatz = ciqp.Ansatz.complete(N_QUBITS)
     rng = np.random.default_rng(30)
     params = rng.normal(0.0, 0.4, size=ansatz.n_parameters)
     model = ciqp.ConditionalModel(ansatz, y_layer(angles), n_visible=N_VISIBLE)
-    probabilities = ciqp.simulation.probabilities(model, params)
+    probabilities = model.probabilities(params)
 
     for condition in range(N_CONDITIONS):
         expected = pl_visible_probabilities(

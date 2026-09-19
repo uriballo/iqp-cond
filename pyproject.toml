@@ -1,6 +1,6 @@
 [project]
 name = "iqp-cond"
-version = "0.4.0"
+version = "0.5.0"
 description = "Conditional IQP generation with classically tractable encoders."
 readme = "README.md"
 requires-python = ">=3.11"

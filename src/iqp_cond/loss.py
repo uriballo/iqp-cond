@@ -34,9 +34,9 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 
-from .core import pad_visible_masks
-from .encoders import Encoder, select_encoder
+from .encoders import Encoder
 from .estimator import estimate_pauli_z_unchecked
+from .model import pad_visible_masks
 from .operators import OperatorBank, sample_nonidentity_masks_jax
 
 __all__ = [
@@ -288,7 +288,7 @@ def mmd(
         bandwidth_values = []
         cursor = 0
         for condition in range(n_conditions):
-            encoder = select_encoder(encoders, condition)
+            encoder = encoders.select(condition)
             samples = encoder.sample(sample_keys[condition], n_samples)
             condition_values = []
             for sigma in sigmas:
@@ -330,7 +330,7 @@ def mmd(
                 float(sigma),
             )
             cursor += 1
-            encoder = select_encoder(encoders, condition)
+            encoder = encoders.select(condition)
             samples = encoder.sample(keys[cursor], n_samples)
             cursor += 1
             condition_values.append(
@@ -370,7 +370,7 @@ def _mmd_from_bank(
     if shared_samples:
         bandwidth_values = []
         for condition in range(n_conditions):
-            encoder = select_encoder(encoders, condition)
+            encoder = encoders.select(condition)
             samples = encoder.sample(
                 jax.random.fold_in(key, condition),
                 n_samples,
@@ -399,7 +399,7 @@ def _mmd_from_bank(
     for bandwidth in range(bank.n_bandwidths):
         condition_values = []
         for condition in range(n_conditions):
-            encoder = select_encoder(encoders, condition)
+            encoder = encoders.select(condition)
             samples = encoder.sample(keys[cursor], n_samples)
             cursor += 1
             visible_masks, weights = bank.entry(bandwidth, condition)

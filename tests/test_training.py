@@ -8,12 +8,14 @@ import numpy as np
 import pytest
 
 import iqp_cond as ciqp
+from iqp_cond.operators import expected_bodyness_sigmas
+from iqp_cond.training import CACHE, STEP
 
 
 def y_layer(angles: np.ndarray) -> ciqp.AngleEncoder:
     """One ``RY`` layer per qubit: the plain product-state encoding."""
     angles = np.asarray(angles)
-    return ciqp.angle_encoder(angles[:, None, :], axes=("Y" * angles.shape[1],))
+    return ciqp.AngleEncoder(angles[:, None, :], axes=("Y" * angles.shape[1],))
 
 
 N_QUBITS = 3
@@ -38,7 +40,7 @@ def angles() -> np.ndarray:
 @pytest.fixture
 def model(angles: np.ndarray) -> ciqp.ConditionalModel:
     return ciqp.ConditionalModel(
-        ciqp.complete_ansatz(N_QUBITS),
+        ciqp.Ansatz.complete(N_QUBITS),
         y_layer(angles),
     )
 
@@ -77,7 +79,7 @@ def test_ancilla_model_trains_against_visible_targets(
     training, validation = targets
     angles = np.random.default_rng(7).uniform(0.4, 2.2, size=(N_CONDITIONS, 5))
     model = ciqp.ConditionalModel(
-        ciqp.complete_ansatz(5),
+        ciqp.Ansatz.complete(5),
         y_layer(angles),
         n_visible=N_QUBITS,
     )
@@ -101,12 +103,12 @@ def test_ancilla_model_trains_against_visible_targets(
 def test_model_rejects_mismatched_widths() -> None:
     with pytest.raises(ValueError, match="ansatz acts on 4 qubits"):
         ciqp.ConditionalModel(
-            ciqp.complete_ansatz(4),
+            ciqp.Ansatz.complete(4),
             y_layer(np.zeros((2, 3))),
         )
     with pytest.raises(ValueError, match="n_visible must be between"):
         ciqp.ConditionalModel(
-            ciqp.complete_ansatz(3),
+            ciqp.Ansatz.complete(3),
             y_layer(np.zeros((2, 3))),
             n_visible=4,
         )
@@ -116,9 +118,9 @@ def test_model_requires_an_integer_visible_width() -> None:
     """A float would be truncated silently, so it is rejected."""
     encoders = y_layer(np.zeros((2, 3)))
     with pytest.raises(ValueError, match="n_visible must be an integer"):
-        ciqp.ConditionalModel(ciqp.complete_ansatz(3), encoders, n_visible=2.5)
+        ciqp.ConditionalModel(ciqp.Ansatz.complete(3), encoders, n_visible=2.5)
     integral = ciqp.ConditionalModel(
-        ciqp.complete_ansatz(3),
+        ciqp.Ansatz.complete(3),
         encoders,
         n_visible=np.int64(2),
     )
@@ -143,7 +145,7 @@ def test_step_refresh_is_the_default_and_cache_changes_the_objective(
 ) -> None:
     """The default redraws masks every step; 'cache' retains one bank."""
     training, validation = targets
-    assert config.mask_refresh == ciqp.STEP
+    assert config.mask_refresh == STEP
 
     step_result = ciqp.train(model, training, validation, seed=4, config=config)
     explicit = ciqp.train(
@@ -151,7 +153,7 @@ def test_step_refresh_is_the_default_and_cache_changes_the_objective(
         training,
         validation,
         seed=4,
-        config=dataclasses.replace(config, mask_refresh=ciqp.STEP),
+        config=dataclasses.replace(config, mask_refresh=STEP),
     )
     assert np.array_equal(step_result.train_losses, explicit.train_losses)
 
@@ -160,7 +162,7 @@ def test_step_refresh_is_the_default_and_cache_changes_the_objective(
         training,
         validation,
         seed=4,
-        config=dataclasses.replace(config, mask_refresh=ciqp.CACHE),
+        config=dataclasses.replace(config, mask_refresh=CACHE),
     )
     assert not np.array_equal(step_result.final_params, cache_result.final_params)
     assert np.all(np.isfinite(step_result.train_losses))
@@ -172,7 +174,7 @@ def test_condition_count_mismatch_is_rejected(
 ) -> None:
     training, validation = targets
     model = ciqp.ConditionalModel(
-        ciqp.complete_ansatz(N_QUBITS),
+        ciqp.Ansatz.complete(N_QUBITS),
         y_layer(np.zeros((N_CONDITIONS + 1, N_QUBITS))),
     )
     with pytest.raises(ValueError, match="conditions but targets"):
@@ -231,10 +233,10 @@ def test_training_config_defaults_follow_the_library_protocol() -> None:
     assert config.validation_n_ops == 512
     assert config.mc_samples == 1000
     assert config.validation_mc_samples == 1000
-    assert config.mask_refresh == ciqp.STEP
+    assert config.mask_refresh == STEP
     assert config.sigmas is None
     n_visible = 12
-    assert config.resolved_sigmas(n_visible) == ciqp.expected_bodyness_sigmas(n_visible)
+    assert config.resolved_sigmas(n_visible) == expected_bodyness_sigmas(n_visible)
     explicit = ciqp.TrainingConfig(sigmas=(1.0, 2.0, 4.0))
     assert explicit.resolved_sigmas(n_visible) == (1.0, 2.0, 4.0)
 
@@ -275,7 +277,7 @@ def test_train_initializes_from_the_pooled_training_data(
         seen["kwargs"] = kwargs
         return original(data, generators, **kwargs)
 
-    monkeypatch.setattr("iqp_cond.trainer.parameters_from_data", spy)
+    monkeypatch.setattr("iqp_cond.training.parameters_from_data", spy)
     config = ciqp.TrainingConfig(
         steps=1,
         batch_size=8,
@@ -329,8 +331,8 @@ def test_angle_encoder_trains_end_to_end(
         size=(N_CONDITIONS, 2, N_QUBITS),
     )
     model = ciqp.ConditionalModel(
-        ciqp.complete_ansatz(N_QUBITS),
-        ciqp.angle_encoder(angles, axes=("XYX", "ZYZ")),
+        ciqp.Ansatz.complete(N_QUBITS),
+        ciqp.AngleEncoder(angles, axes=("XYX", "ZYZ")),
     )
     config = ciqp.TrainingConfig(
         steps=5,

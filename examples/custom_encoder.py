@@ -1,4 +1,4 @@
-"""Register a custom encoder and train through the public interface.
+"""Instantiate a custom encoder and train through the public interface.
 
 The encoder here is the simplest useful one.  Its post-Hadamard state is
 ``|+>^n``, so sampling is uniform bits and every amplitude ratio is one.  It
@@ -54,11 +54,9 @@ class HadamardEncoder:
 
 
 def main() -> None:
-    ciqp.register_encoder("hadamard", lambda angles, **_: HadamardEncoder(angles))
-
     n_qubits, n_conditions = 6, 3
-    encoders = ciqp.encoder("hadamard", np.zeros((n_conditions, n_qubits)))
-    model = ciqp.ConditionalModel(ciqp.complete_ansatz(n_qubits), encoders)
+    encoder = HadamardEncoder(jnp.zeros((n_conditions, n_qubits)))
+    model = ciqp.ConditionalModel(ciqp.Ansatz.complete(n_qubits), encoder)
 
     # Training must map the uniform reference to a biased product law whose
     # bias depends on the condition.

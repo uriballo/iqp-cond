@@ -24,8 +24,8 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from .core import ConditionalModel
 from .initialization import parameters_from_data
+from .model import ConditionalModel
 from .operators import OperatorBank, expected_bodyness_sigmas, operator_bank
 
 __all__ = [
@@ -185,9 +185,9 @@ def _validate_training_inputs(
             )
         if values.shape[1] < 2:
             raise ValueError("each condition needs at least two target samples")
-    if model.encoders.n_conditions != training_targets.shape[0]:
+    if model.encoder.n_conditions != training_targets.shape[0]:
         raise ValueError(
-            f"model covers {model.encoders.n_conditions} conditions but targets "
+            f"model covers {model.encoder.n_conditions} conditions but targets "
             f"have {training_targets.shape[0]}",
         )
     if training_targets.shape[2] != model.visible:
@@ -214,7 +214,7 @@ def _refreshed_widths(
     pilot = operator_bank(
         sigmas,
         config.n_ops,
-        model.encoders.n_conditions,
+        model.encoder.n_conditions,
         model.visible,
         seed,
     )
@@ -249,7 +249,7 @@ def train(
     validation_targets = np.asarray(validation_targets, dtype=np.float64)
     _validate_training_inputs(model, training_targets, validation_targets)
 
-    encoders = model.encoders
+    encoders = model.encoder
     sigmas = config.resolved_sigmas(model.visible)
     if initial_params is None:
         params = jnp.asarray(

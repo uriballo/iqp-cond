@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 
 import iqp_cond as ciqp
+from iqp_cond.training import CACHE, STEP
 
 CASES = (
     "real_step",
@@ -42,6 +43,9 @@ class UniformEncoder:
     def amplitude_ratios(self, samples, masks):
         return jnp.ones((self.n_conditions, samples.shape[1], masks.shape[0]))
 
+    def preparation_ops(self, condition):
+        return ()
+
     def select(self, condition):
         return UniformEncoder(1, self.n_qubits)
 
@@ -55,11 +59,11 @@ def training_case(name):
         encoder = UniformEncoder(conditions, n)
     elif name == "complex_ancilla":
         angles = rng.uniform(0.3, 1.2, (conditions, 2, n))
-        encoder = ciqp.angle_encoder(angles, axes=("XYXYX", "ZYZYZ"))
+        encoder = ciqp.AngleEncoder(angles, axes=("XYXYX", "ZYZYZ"))
     else:
         angles = rng.uniform(0.3, 1.2, (conditions, 1, n))
-        encoder = ciqp.angle_encoder(angles, axes=("Y" * n,))
-    model = ciqp.ConditionalModel(ciqp.complete_ansatz(n), encoder, n_visible=visible)
+        encoder = ciqp.AngleEncoder(angles, axes=("Y" * n,))
+    model = ciqp.ConditionalModel(ciqp.Ansatz.complete(n), encoder, n_visible=visible)
     train = rng.integers(0, 2, (conditions, 24, visible)).astype(float)
     valid = rng.integers(0, 2, (conditions, 12, visible)).astype(float)
     initial = rng.normal(0, 0.2, model.ansatz.n_parameters)
@@ -74,7 +78,7 @@ def training_case(name):
         mc_samples=17,
         validation_n_ops=8,
         validation_mc_samples=19,
-        mask_refresh=ciqp.CACHE if name == "real_cache" else ciqp.STEP,
+        mask_refresh=CACHE if name == "real_cache" else STEP,
         gemm_dtype=jnp.float32 if name == "mixed_precision_chunked" else None,
         sample_chunk=8 if name == "mixed_precision_chunked" else None,
     )

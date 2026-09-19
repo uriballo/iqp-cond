@@ -1,9 +1,8 @@
 """Generator banks and the conditional model.
 
 A generator row is a binary mask over the register; the diagonal unitary is
-``exp(i sum_j theta_j (-1)^{g_j . z})``.  The complete two-local bank built by
-:func:`complete_ansatz` is the production choice, and any binary bank can be
-used through :func:`ansatz_from_generators`.
+``exp(i sum_j theta_j (-1)^{g_j . z})``.  :meth:`Ansatz.complete` builds the
+production two-local bank, while the constructor accepts any binary bank.
 
 The model applies that shared diagonal to a condition-dependent encoder state,
 ``q_theta(x | c) = |<x| U_theta |phi(c)>|^2``.  Training uses the classically
@@ -13,7 +12,7 @@ circuit for sampling on a simulator or backend.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import jax
@@ -23,6 +22,8 @@ import numpy as np
 from .encoders import Encoder
 
 if TYPE_CHECKING:
+    import pennylane as qml
+
     from .estimator import ExpectationEstimate
     from .loss import ConditionalMMDResult
     from .operators import OperatorBank
@@ -31,8 +32,6 @@ __all__ = [
     "Ansatz",
     "ConditionalModel",
     "ancilla_support",
-    "ansatz_from_generators",
-    "complete_ansatz",
     "pad_visible_masks",
 ]
 
@@ -77,29 +76,17 @@ class Ansatz:
         """Number of independently parameterized generators."""
         return int(self.generators.shape[0])
 
-
-def ansatz_from_generators(
-    generators: jnp.ndarray | np.ndarray,
-    name: str = "custom",
-) -> Ansatz:
-    """Build an ansatz directly from a binary generator bank."""
-    return Ansatz(generators=generators, name=name)
-
-
-def complete_ansatz(n_qubits: int) -> Ansatz:
-    """Return the complete two-local ansatz on ``n_qubits`` qubits.
-
-    The bank holds every one-body row followed by one row per unordered pair,
-    so it has ``n + n(n-1)/2`` parameters.
-    """
-    if n_qubits < 1:
-        raise ValueError("n_qubits must be positive")
-    left, right = np.triu_indices(n_qubits, k=1)
-    two_body = np.zeros((left.size, n_qubits), dtype=np.float64)
-    two_body[np.arange(left.size), left] = 1.0
-    two_body[np.arange(left.size), right] = 1.0
-    generators = np.concatenate([np.eye(n_qubits, dtype=np.float64), two_body])
-    return Ansatz(generators=generators, name="complete")
+    @classmethod
+    def complete(cls, n_qubits: int) -> Ansatz:
+        """Return the complete one- and two-body ansatz on ``n_qubits``."""
+        if n_qubits < 1:
+            raise ValueError("n_qubits must be positive")
+        left, right = np.triu_indices(n_qubits, k=1)
+        two_body = np.zeros((left.size, n_qubits), dtype=np.float64)
+        two_body[np.arange(left.size), left] = 1.0
+        two_body[np.arange(left.size), right] = 1.0
+        generators = np.concatenate([np.eye(n_qubits, dtype=np.float64), two_body])
+        return cls(generators=generators, name="complete")
 
 
 def ancilla_support(
@@ -152,14 +139,19 @@ class ConditionalModel:
     """
 
     ansatz: Ansatz
-    encoders: Encoder
-    n_visible: int | None = None
+    encoder: Encoder
+    n_visible: int | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
-        if self.ansatz.n_qubits != self.encoders.n_qubits:
+        if not isinstance(self.encoder, Encoder):
+            raise TypeError(
+                f"{type(self.encoder).__name__} does not implement the Encoder "
+                "protocol",
+            )
+        if self.ansatz.n_qubits != self.encoder.n_qubits:
             raise ValueError(
                 f"ansatz acts on {self.ansatz.n_qubits} qubits but the encoder "
-                f"acts on {self.encoders.n_qubits}",
+                f"acts on {self.encoder.n_qubits}",
             )
         if self.n_visible is not None and not isinstance(
             self.n_visible,
@@ -213,7 +205,7 @@ class ConditionalModel:
         return estimate_pauli_z(
             params,
             self.generators,
-            self.encoders,
+            self.encoder,
             masks,
             key=key,
             samples=samples,
@@ -247,7 +239,7 @@ class ConditionalModel:
         return mmd(
             params,
             self.generators,
-            self.encoders,
+            self.encoder,
             targets,
             key,
             bank=bank,
@@ -258,3 +250,34 @@ class ConditionalModel:
             gemm_dtype=gemm_dtype,
             sample_chunk=sample_chunk,
         )
+
+    def sample(
+        self,
+        params: np.ndarray,
+        n_samples: int,
+        *,
+        seed: int | None = None,
+        device: str | qml.devices.Device = "lightning.qubit",
+    ) -> np.ndarray:
+        """Draw bitstrings from every condition through a PennyLane device."""
+        from .simulation import _sample_model
+
+        return _sample_model(
+            self,
+            params,
+            n_samples,
+            seed=seed,
+            device=device,
+        )
+
+    def probabilities(
+        self,
+        params: np.ndarray,
+        *,
+        device: str | qml.devices.Device = "lightning.qubit",
+        seed: int | None = None,
+    ) -> np.ndarray:
+        """Return every condition's exact visible probability distribution."""
+        from .simulation import _probabilities
+
+        return _probabilities(self, params, device=device, seed=seed)
