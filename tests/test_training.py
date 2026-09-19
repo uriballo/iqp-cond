@@ -12,6 +12,7 @@ import pytest
 import iqp_cond as ciqp
 from iqp_cond import training as training_module
 from iqp_cond.initialization import parameters_from_data
+from iqp_cond.loss import _condition_value
 from iqp_cond.operators import expected_bodyness_sigmas, operator_bank
 from iqp_cond.training import CACHE, STEP
 
@@ -24,6 +25,37 @@ def y_layer(angles: np.ndarray) -> ciqp.AngleEncoder:
 
 N_QUBITS = 3
 N_CONDITIONS = 2
+
+
+@dataclasses.dataclass(frozen=True)
+class WrappedEncoder:
+    """Custom encoder deliberately left unregistered as a JAX pytree."""
+
+    inner: ciqp.AngleEncoder
+
+    @property
+    def n_conditions(self) -> int:
+        return self.inner.n_conditions
+
+    @property
+    def n_qubits(self) -> int:
+        return self.inner.n_qubits
+
+    def sample(self, key: jax.Array, n_samples: int) -> jnp.ndarray:
+        return self.inner.sample(key, n_samples)
+
+    def amplitude_ratios(
+        self,
+        samples: jnp.ndarray,
+        masks: jnp.ndarray,
+    ) -> jnp.ndarray:
+        return self.inner.amplitude_ratios(samples, masks)
+
+    def preparation_ops(self, condition: int) -> tuple[ciqp.Operation, ...]:
+        return self.inner.preparation_ops(condition)
+
+    def select(self, condition: int) -> WrappedEncoder:
+        return WrappedEncoder(self.inner.select(condition))
 
 
 @pytest.fixture
@@ -181,19 +213,19 @@ def test_step_refresh_selects_one_uniform_bandwidth_per_update(
     """Training samples one bandwidth while pilot and validation cover all."""
     training, validation = targets
     config = dataclasses.replace(config, steps=5, validation_interval=5)
-    calls: list[tuple[float, ...]] = []
+    calls: list[tuple[tuple[float, ...], int]] = []
     original = training_module.operator_bank
 
-    def recording_bank(sigmas, *args, **kwargs):
-        calls.append(tuple(sigmas))
-        return original(sigmas, *args, **kwargs)
+    def recording_bank(sigmas, n_ops, n_conditions, *args, **kwargs):
+        calls.append((tuple(sigmas), n_conditions))
+        return original(sigmas, n_ops, n_conditions, *args, **kwargs)
 
     monkeypatch.setattr(training_module, "operator_bank", recording_bank)
     ciqp.train(model, training, validation, seed=14, config=config)
 
     expected = training_module._bandwidth_schedule(len(config.sigmas), config.steps, 14)
-    assert calls[:2] == [config.sigmas, config.sigmas]
-    assert calls[2:] == [(config.sigmas[index],) for index in expected]
+    assert calls[:2] == [(config.sigmas, N_CONDITIONS)] * 2
+    assert calls[2:] == [((config.sigmas[index],), 1) for index in expected]
 
 
 def test_cache_refresh_builds_one_full_multiscale_bank(
@@ -221,6 +253,25 @@ def test_cache_refresh_builds_one_full_multiscale_bank(
     ciqp.train(model, training, validation, seed=14, config=config)
 
     assert calls == [config.sigmas, config.sigmas]
+
+
+def test_condition_schedule_is_uniform_and_reproducible() -> None:
+    first = training_module._condition_schedule(5, 10_000, seed=17)
+    second = training_module._condition_schedule(5, 10_000, seed=17)
+
+    assert np.array_equal(first, second)
+    assert set(first) == set(range(5))
+
+
+def test_cached_condition_slice_preserves_exact_bank_entry() -> None:
+    bank = operator_bank((0.8, 1.6), 16, N_CONDITIONS, N_QUBITS, seed=70)
+    selected = training_module._select_condition(bank, 1)
+
+    assert selected.n_conditions == 1
+    assert selected.sigmas == bank.sigmas
+    assert selected.widths == bank.widths
+    assert jnp.array_equal(selected.masks[:, 0], bank.masks[:, 1])
+    assert jnp.array_equal(selected.weights[:, 0], bank.weights[:, 1])
 
 
 def test_selected_bandwidth_gradient_is_unbiased_for_multiscale_loss(
@@ -259,6 +310,82 @@ def test_selected_bandwidth_gradient_is_unbiased_for_multiscale_loss(
     )
     assert jnp.allclose(selected_loss, full_loss, atol=1e-15, rtol=0.0)
     assert jnp.allclose(selected_gradient, full_gradient, atol=1e-15, rtol=0.0)
+
+
+def test_selected_condition_gradient_is_unbiased_for_balanced_loss(
+    model: ciqp.ConditionalModel,
+    targets: tuple[np.ndarray, np.ndarray],
+) -> None:
+    """A uniform average of condition cells equals the balanced objective."""
+    training, _ = targets
+    bank = operator_bank((1.2,), 16, N_CONDITIONS, N_QUBITS, seed=73)
+    params = jnp.linspace(-0.2, 0.2, model.ansatz.n_parameters)
+    target_batch = jnp.asarray(training[:, :16])
+    key = jax.random.PRNGKey(74)
+
+    def full_objective(current_params):
+        return model.mmd(
+            current_params,
+            target_batch,
+            key,
+            bank=bank,
+            n_samples=32,
+            shared_samples=True,
+        ).loss
+
+    def selected_objective(current_params):
+        values = []
+        for condition in range(N_CONDITIONS):
+            encoder = model.encoder.select(condition)
+            samples = encoder.sample(jax.random.fold_in(key, condition), 32)
+            masks, weights = bank.entry(0, condition)
+            values.append(
+                _condition_value(
+                    current_params,
+                    model.generators,
+                    encoder,
+                    target_batch[condition : condition + 1],
+                    masks,
+                    weights,
+                    model.n_ancillas,
+                    samples,
+                    None,
+                    None,
+                )
+            )
+        return jnp.mean(jnp.stack(values))
+
+    full_loss, full_gradient = jax.value_and_grad(full_objective)(params)
+    selected_loss, selected_gradient = jax.value_and_grad(selected_objective)(params)
+    assert jnp.allclose(selected_loss, full_loss, atol=1e-15, rtol=0.0)
+    assert jnp.allclose(selected_gradient, full_gradient, atol=1e-15, rtol=0.0)
+
+
+def test_training_supports_non_pytree_custom_encoder(
+    angles: np.ndarray,
+    targets: tuple[np.ndarray, np.ndarray],
+) -> None:
+    """Condition-specific closures keep custom encoders outside JIT arguments."""
+    training, validation = targets
+    model = ciqp.ConditionalModel(
+        ciqp.Ansatz.complete(N_QUBITS),
+        WrappedEncoder(y_layer(angles)),
+    )
+    config = ciqp.TrainingConfig(
+        steps=4,
+        batch_size=8,
+        validation_interval=2,
+        sigmas=(1.0,),
+        n_ops=4,
+        mc_samples=16,
+        validation_n_ops=4,
+        validation_mc_samples=16,
+    )
+
+    result = ciqp.train(model, training, validation, seed=75, config=config)
+
+    assert np.all(np.isfinite(result.train_losses))
+    assert np.all(np.isfinite(result.validation_losses))
 
 
 def test_condition_count_mismatch_is_rejected(

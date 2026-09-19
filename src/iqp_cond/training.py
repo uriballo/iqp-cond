@@ -1,17 +1,16 @@
 """Training loop for shared conditional IQP models.
 
 The model uses one parameter vector for every condition; only the encoder state
-changes with the condition.  Updates are condition-balanced, each condition
-contributing the same number of samples per step, and the trainer selects
-checkpoints on a held-out validation split by the same MMD objective.
+changes with the condition.  Every update selects one condition and one
+bandwidth uniformly, so its expected loss and gradient equal the
+condition-balanced multiscale objective.  The trainer selects checkpoints on a
+held-out validation split by the full objective.
 
-Every optimization step selects one bandwidth uniformly, giving an unbiased
-estimator of the configured arithmetic-mean multiscale objective without
-evaluating every bandwidth.  Step refresh draws a fresh compressed
-nonidentity bank for the selected bandwidth; cache refresh selects from one
-full bank retained for the fit.  The trainer builds banks on the host rather
-than in JAX because the in-JAX sampler cannot collapse duplicates cheaply.
-Validation always evaluates every bandwidth with one fixed bank, so checkpoint
+Step refresh draws a fresh compressed nonidentity bank for the selected
+objective cell; cache refresh selects that cell from one full bank retained for
+the fit.  The trainer builds banks on the host rather than in JAX because the
+in-JAX sampler cannot collapse duplicates cheaply.  Validation always
+evaluates every condition and bandwidth with one fixed bank, so checkpoint
 scores stay comparable across steps.
 """
 
@@ -47,6 +46,7 @@ CACHE = "cache"
 _BANK_HEADROOM = 1.15
 _BANK_MARGIN = 2
 _BANDWIDTH_SEED_OFFSET = 83_001
+_CONDITION_SEED_OFFSET = 191_003
 
 
 @dataclass(frozen=True)
@@ -63,16 +63,17 @@ class TrainingConfig:
     smallest calibrated budget passing the estimator gates.  Raise them toward
     2000 masks and 8192 reference draws for full-scale runs.
     ``mask_refresh="cache"`` retains one mask bank per fit instead of redrawing
-    every step; both refresh modes select one bandwidth per update.  See
-    :func:`train`.
+    every step; both refresh modes select one condition-bandwidth objective
+    cell per update.  See :func:`train`.
 
     ``n_ops`` and ``validation_n_ops`` give the number of nonidentity operator
     draws per condition and bandwidth that feed the compressed operator banks.
-    The trainer selects one bandwidth uniformly before every update.  Under the
-    default per-step refresh it then builds a fresh bank for that bandwidth;
-    cache refresh selects the matching slice from a retained bank.  In
-    expectation both estimate the same arithmetic-mean multiscale objective.
-    Validation draws one bank covering every bandwidth.
+    The trainer selects one condition and one bandwidth uniformly before every
+    update.  Under the default per-step refresh it then builds a fresh bank for
+    that objective cell; cache refresh selects the matching slice from a
+    retained bank.  In expectation both estimate the same condition-balanced
+    arithmetic-mean multiscale objective.  Validation draws one bank covering
+    every condition and bandwidth.
 
     ``gemm_dtype`` runs the phase contraction in a reduced dtype such as
     ``jnp.float32`` and casts the result back to float64, which is the mixed
@@ -175,6 +176,12 @@ def _bandwidth_schedule(n_bandwidths: int, steps: int, seed: int) -> np.ndarray:
     return rng.integers(0, n_bandwidths, size=steps)
 
 
+def _condition_schedule(n_conditions: int, steps: int, seed: int) -> np.ndarray:
+    """Return independent uniform condition choices for training updates."""
+    rng = np.random.default_rng(seed + _CONDITION_SEED_OFFSET)
+    return rng.integers(0, n_conditions, size=steps)
+
+
 def _select_bandwidth(bank: OperatorBank, bandwidth: int) -> OperatorBank:
     """Return one exact bandwidth slice from a multiscale operator bank."""
     width = bank.width(bandwidth)
@@ -186,6 +193,19 @@ def _select_bandwidth(bank: OperatorBank, bandwidth: int) -> OperatorBank:
         n_visible=bank.n_visible,
         n_masks=width,
         widths=(width,),
+    )
+
+
+def _select_condition(bank: OperatorBank, condition: int) -> OperatorBank:
+    """Return one exact condition slice from an operator bank."""
+    return OperatorBank(
+        sigmas=bank.sigmas,
+        masks=bank.masks[:, condition : condition + 1],
+        weights=bank.weights[:, condition : condition + 1],
+        n_ops=bank.n_ops,
+        n_visible=bank.n_visible,
+        n_masks=bank.n_masks,
+        widths=bank.widths,
     )
 
 
@@ -257,11 +277,11 @@ def train(
     """Train one shared conditional model with fixed validation randomness.
 
     ``config.mask_refresh`` selects how the training masks are drawn:
-    Both modes select one bandwidth uniformly per update, which is unbiased for
-    the arithmetic-mean multiscale MMD.  ``"step"``, the default, draws a fresh
-    bank for the selected bandwidth before every compiled step.  ``"cache"``
-    draws one full compressed NumPy bank and selects the corresponding cached
-    slice for each update.
+    Both modes select one condition and one bandwidth uniformly per update,
+    which is unbiased for the condition-balanced arithmetic-mean multiscale
+    MMD.  ``"step"``, the default, draws a fresh bank for the selected objective
+    cell before every compiled step.  ``"cache"`` draws one full compressed
+    NumPy bank and selects the corresponding cached cell for each update.
 
     Without ``initial_params`` the parameters start from the mean-covariance
     prescription applied to the pooled training conditions,
@@ -306,15 +326,21 @@ def train(
         seed,
     )
     bandwidth_indices = _bandwidth_schedule(len(sigmas), config.steps, seed)
+    condition_indices = _condition_schedule(
+        encoders.n_conditions,
+        config.steps,
+        seed,
+    )
     random_key = jax.random.PRNGKey(seed)
 
-    # One width per bandwidth for every refreshed bank, so the trainer compiles
-    # the step once.  The pilot draw sizes each width.  The margin keeps a
-    # redraw rare; a redraw conditions the entry on ``distinct <= width``.
+    # One width per bandwidth for every refreshed bank, so each
+    # condition-specific step reuses its compiled bandwidth shapes.  The pilot
+    # draw sizes each width.  The margin keeps a redraw rare; a redraw
+    # conditions the entry on ``distinct <= width``.
     max_masks: tuple[int, ...] | None = None
     if config.mask_refresh == STEP:
         max_masks = _refreshed_widths(sigmas, config, model, seed)
-    cached_training_banks: tuple[OperatorBank, ...] | None = None
+    cached_training_banks: tuple[tuple[OperatorBank, ...], ...] | None = None
     if config.mask_refresh == CACHE:
         # Retained for the whole run; the loop only selects exact slices.
         cached_bank = operator_bank(
@@ -324,9 +350,16 @@ def train(
             model.visible,
             seed,
         )
-        cached_training_banks = tuple(
+        selected_bands = tuple(
             _select_bandwidth(cached_bank, bandwidth)
             for bandwidth in range(cached_bank.n_bandwidths)
+        )
+        cached_training_banks = tuple(
+            tuple(
+                _select_condition(selected_band, condition)
+                for condition in range(encoders.n_conditions)
+            )
+            for selected_band in selected_bands
         )
     validation_bank = operator_bank(
         sigmas,
@@ -336,46 +369,60 @@ def train(
         seed + 1,
     )
 
-    def training_loss(
-        current_params: jnp.ndarray,
-        target_batch: jnp.ndarray,
-        current_bank: OperatorBank,
-        step_key: jax.Array,
-    ) -> jnp.ndarray:
-        return model.mmd(
-            current_params,
-            target_batch,
-            step_key,
-            bank=current_bank,
-            n_samples=config.mc_samples,
-            shared_samples=True,
-            gemm_dtype=config.gemm_dtype,
-            sample_chunk=config.sample_chunk,
-        ).loss
+    def compile_training_step(condition: int):
+        """Compile one closure without requiring the encoder to be a pytree."""
+        selected_model = ConditionalModel(
+            model.ansatz,
+            encoders.select(condition),
+            n_visible=model.n_visible,
+        )
 
-    # Compile differentiation and the full optimizer update together to avoid
-    # dispatching the optimizer operations separately from the estimator.
-    @jax.jit
-    def training_step(
-        current_params: jnp.ndarray,
-        current_optimizer_state: optax.OptState,
-        target_batch: jnp.ndarray,
-        current_bank: OperatorBank,
-        step_key: jax.Array,
-    ) -> tuple[jnp.ndarray, jnp.ndarray, optax.OptState]:
-        loss, gradient = jax.value_and_grad(training_loss)(
-            current_params,
-            target_batch,
-            current_bank,
-            step_key,
-        )
-        updates, new_optimizer_state = optimizer.update(
-            gradient,
-            current_optimizer_state,
-            current_params,
-        )
-        new_params = optax.apply_updates(current_params, updates)
-        return loss, new_params, new_optimizer_state
+        def training_loss(
+            current_params: jnp.ndarray,
+            target_batch: jnp.ndarray,
+            current_bank: OperatorBank,
+            step_key: jax.Array,
+        ) -> jnp.ndarray:
+            return selected_model.mmd(
+                current_params,
+                target_batch,
+                step_key,
+                bank=current_bank,
+                n_samples=config.mc_samples,
+                shared_samples=True,
+                gemm_dtype=config.gemm_dtype,
+                sample_chunk=config.sample_chunk,
+            ).loss
+
+        # Compile differentiation and the full optimizer update together to
+        # avoid dispatching optimizer operations separately from the estimator.
+        @jax.jit
+        def training_step(
+            current_params: jnp.ndarray,
+            current_optimizer_state: optax.OptState,
+            target_batch: jnp.ndarray,
+            current_bank: OperatorBank,
+            step_key: jax.Array,
+        ) -> tuple[jnp.ndarray, jnp.ndarray, optax.OptState]:
+            loss, gradient = jax.value_and_grad(training_loss)(
+                current_params,
+                target_batch,
+                current_bank,
+                step_key,
+            )
+            updates, new_optimizer_state = optimizer.update(
+                gradient,
+                current_optimizer_state,
+                current_params,
+            )
+            new_params = optax.apply_updates(current_params, updates)
+            return loss, new_params, new_optimizer_state
+
+        return training_step
+
+    training_steps = tuple(
+        compile_training_step(condition) for condition in range(encoders.n_conditions)
+    )
 
     def validation_loss(current_params: jnp.ndarray) -> jnp.ndarray:
         return model.mmd(
@@ -401,28 +448,24 @@ def train(
     validation_losses.append(best_validation)
     for step in range(config.steps):
         bandwidth = int(bandwidth_indices[step])
+        condition = int(condition_indices[step])
         if config.mask_refresh == STEP:
             assert max_masks is not None
             training_bank = operator_bank(
                 (sigmas[bandwidth],),
                 config.n_ops,
-                encoders.n_conditions,
+                1,
                 model.visible,
                 seed + 1_000_003 * (step + 1),
                 max_masks=(max_masks[bandwidth],),
             )
         else:
             assert cached_training_banks is not None
-            training_bank = cached_training_banks[bandwidth]
-        indices = batch_indices[step]
-        batch = np.stack(
-            [
-                training_targets[condition, indices[condition]]
-                for condition in range(training_targets.shape[0])
-            ],
-        )
+            training_bank = cached_training_banks[bandwidth][condition]
+        indices = batch_indices[step, condition]
+        batch = training_targets[condition : condition + 1, indices]
         step_key = jax.random.fold_in(random_key, step)
-        loss, params, optimizer_state = training_step(
+        loss, params, optimizer_state = training_steps[condition](
             params,
             optimizer_state,
             jnp.asarray(batch),

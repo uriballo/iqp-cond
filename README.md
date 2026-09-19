@@ -84,9 +84,9 @@ result = ciqp.train(
     train_targets,
     valid_targets,
     seed=0,
-    # Defaults: 2000 updates, batch 256, 512 masks per condition for one
-    # uniformly selected bandwidth per update, 1000 Monte Carlo samples,
-    # pooled data-based initialization, and the width-aware bandwidth schedule.
+    # Defaults: 2000 updates, batch 256, 512 masks for one uniformly selected
+    # condition-bandwidth cell per update, 1000 Monte Carlo samples, pooled
+    # data-based initialization, and the width-aware bandwidth schedule.
     config=ciqp.TrainingConfig(steps=50, batch_size=64, n_ops=16, mc_samples=1024),
 )
 
@@ -287,13 +287,13 @@ Skipping the identity mask is exact.  It contributes zero to the kernel MMD, so
 spending draws on it only adds variance.  Both mask sources accept
 `shared_samples=True`, which draws one reference sample set per condition and
 evaluates every selected bandwidth on it; the default resamples per (bandwidth,
-condition) entry. At every optimization step, the trainer selects one configured
-bandwidth uniformly. The selected-bandwidth loss and gradient are unbiased for
-the arithmetic-mean multiscale objective, avoiding an all-bandwidth evaluation
-on every update. With `TrainingConfig.mask_refresh="step"`, masks are redrawn
-for the selected bandwidth; `mask_refresh="cache"` selects its bandwidth from
-one retained full multiscale bank. Validation always evaluates every bandwidth
-with one fixed bank, so checkpoint selection stays comparable across steps.
+condition) entry. At every optimization step, the trainer selects one condition
+and one configured bandwidth uniformly. The selected-cell loss and gradient
+are unbiased for the condition-balanced arithmetic-mean multiscale objective.
+With `TrainingConfig.mask_refresh="step"`, masks are redrawn for the selected
+cell; `mask_refresh="cache"` selects the cell from one retained full multiscale
+bank. Validation always evaluates every condition and bandwidth with one fixed
+bank, so checkpoint selection stays comparable across steps.
 
 The shipped defaults are 512 masks and 1000 Monte Carlo samples per condition.
 Peak memory comes from the per-condition sample/mask reduction, so larger
@@ -313,13 +313,20 @@ reduced a 2000-update Gaussian fit from about 111 seconds to 50 seconds. It
 changes the optimizer trajectory by adding unbiased bandwidth-sampling noise;
 exhaustive fixed-bank validation and the estimated multiscale objective remain
 unchanged. JAX may compile one training executable per distinct bandwidth
-shape, so very short cold-start runs can take longer despite the lower
-steady-state cost.
+shape and condition, so very short cold-start runs can take longer despite the
+lower steady-state cost.
 
 The same selection applies to cached masks. Across two 1000-update runs on the
 same hosts, selecting from a retained bank reduced the mean runtime from 49.7
 seconds to 21.8 seconds, a 56% reduction. Cache mode still builds each
 bandwidth once; it no longer evaluates every cached bandwidth on every update.
+
+On the five-condition workload, selecting one condition further reduced the
+mean runtime of a 1000-update fit from 27.2 seconds to 12.6 seconds with step
+refresh and from 22.5 seconds to 11.4 seconds with cached masks. These timings
+include cold compilation of condition-specific closures, which keep custom
+encoders outside JAX arguments. Condition selection changes gradient variance
+but preserves the condition-balanced objective in expectation.
 
 ## Precision
 
