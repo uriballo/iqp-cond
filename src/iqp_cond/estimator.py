@@ -1,6 +1,6 @@
 """Monte Carlo Pauli-Z estimation for conditional IQP circuits.
 
-The estimator is the paper's conditional Pauli estimator: for a Fourier mask
+The estimator is a conditional Pauli estimator: for a Fourier mask
 ``a`` it averages ``Re[R_c(z, a) exp(i Delta_a f_theta(z))]`` over basis samples
 ``z`` drawn from the post-Hadamard reference state.  The encoder supplies
 ``R_c(z, a) = psi_c(z xor a)/psi_c(z)``, where

@@ -17,11 +17,6 @@ sample from in general. Every encoder also describes its circuit preparation
 and condition selection, so the same object trains classically and runs on a
 PennyLane simulator or quantum backend.
 
-The library is consumed by the private
-[`conditional-generation-iqp`](https://github.com/uriballo/conditional-generation-iqp)
-experiments repository, which mounts it as a git submodule tracking `main` and
-installs it editable.
-
 ## Install
 
 ```bash
@@ -33,7 +28,7 @@ the package in editable mode, and `uv run <command>` runs commands inside the
 environment.  The package requires Python 3.11+ and depends on `jax`, `numpy`,
 `optax`, and `pennylane` (which installs `pennylane-lightning`).
 
-To use it from another project (private repository, access required):
+To install from Git:
 
 ```bash
 uv add "iqp-cond @ git+https://github.com/uriballo/iqp-cond@v0.5.0"

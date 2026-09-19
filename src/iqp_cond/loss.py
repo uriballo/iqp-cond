@@ -12,15 +12,13 @@ computable: sampled masks, sampled bitstrings, and amplitude ratios.
 sources, which differ in cost and statistics, not in target:
 
 ``key``
-    Draw nonidentity masks afresh, one draw per condition and bandwidth, exactly
-    as ``iqpopt`` redraws its observables every call.  This path has no host
-    loop, but it does not compress duplicates either, so at equal draw budgets
-    it evaluates more mask columns.
+    Draw nonidentity masks afresh, one draw per condition and bandwidth.  This
+    path has no host loop, but it does not compress duplicates either, so at
+    equal draw budgets it evaluates more mask columns.
 ``bank``
     Evaluate a prebuilt compressed
     :class:`~iqp_cond.operators.OperatorBank` with duplicates collapsed to
-    multiplicities.  This is the evaluation and paper-reproduction path, and the
-    one the golden fixtures pin.
+    multiplicities.  This is the evaluation path the regression fixtures pin.
 
 Both sources skip the identity mask exactly.  It contributes zero to the kernel
 MMD, so spending draws on it only adds variance.  Mask law, samplers, and banks
@@ -150,8 +148,7 @@ def _condition_value(
 
     ``target_condition`` has shape ``(1, n_targets, n_visible)`` and
     ``visible_masks`` ``(n_masks, n_visible)``; the U-statistic corrections for
-    both the model and target terms come from the paper's finite-sample
-    estimator.
+    both the model and target terms use the unbiased finite-sample estimator.
     ``sample_chunk`` streams the sample axis and accumulates the per-mask
     moments, bounding the live ``(samples, masks, qubits)`` ratio tensor.
     """
@@ -225,9 +222,9 @@ def mmd(
     batch.
 
     With ``shared_samples=True`` each condition draws one reference sample set
-    and evaluates every bandwidth's masks on it, regardless of the mask source;
-    this is the paper's estimator form and avoids resampling once per
-    bandwidth.  The default resamples per (bandwidth, condition) entry.
+    and evaluates every bandwidth's masks on it, regardless of the mask source,
+    which avoids resampling once per bandwidth.  The default resamples per
+    (bandwidth, condition) entry.
     """
     params = jnp.asarray(params, dtype=jnp.float64)
     generators = jnp.asarray(generators, dtype=jnp.float64)
@@ -280,8 +277,8 @@ def mmd(
     assert sigmas is not None and n_ops is not None
     n_bandwidths = len(sigmas)
     if shared_samples:
-        # The paper's estimator form. One reference draw per condition covers
-        # every bandwidth's masks.
+        # Shared-draw form: one reference draw per condition covers every
+        # bandwidth's masks.
         keys = jax.random.split(key, n_bandwidths * n_conditions + n_conditions)
         mask_keys = keys[: n_bandwidths * n_conditions]
         sample_keys = keys[n_bandwidths * n_conditions :]

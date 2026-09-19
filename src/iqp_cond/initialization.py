@@ -1,4 +1,4 @@
-"""Parameter initialization in the IQPopt convention.
+"""Parameter initialization from observed data statistics.
 
 The one-body phases come from the observed marginals and the two-body phases
 from the observed covariance; both are classical statistics of the training
@@ -36,8 +36,7 @@ def _data_parameters(
 
     The prescription normalizes by the largest observed pair covariance.  If
     every visible pair is exactly uncorrelated, no pair covariance is nonzero
-    to normalize by, so the two-body phases stay zero; the IQPopt reference
-    divides by that zero and returns NaN instead.
+    to normalize by, so the two-body phases stay zero.
     """
     n_features = data.shape[1]
     signed = 2.0 * data - 1.0
@@ -85,12 +84,11 @@ def parameters_from_data(
     One-body rows use ``arcsin(sqrt(mean))``.  For two-body rows, the function
     scales the population covariance, with ``bias=True``, of the ``{-1,+1}``
     representation by ``pi`` and by ``scale / max_abs_cov``.  With
-    ``scale=None`` it uses the IQPopt heuristic
+    ``scale=None`` it uses the default heuristic
     ``sqrt(2*n_features/sum(cov**2))*max_abs_cov/pi``.  Rows of other weights
     are deterministically initialized to zero, and so are two-body rows when
     every visible pair covariance is exactly zero, because the prescription has
-    no observed covariance to scale by.  That is the limit the IQPopt reference
-    leaves undefined.
+    no observed covariance to scale by.
     """
     values = np.asarray(data)
     rows = np.asarray(generators)

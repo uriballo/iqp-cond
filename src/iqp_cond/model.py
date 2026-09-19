@@ -2,7 +2,7 @@
 
 A generator row is a binary mask over the register; the diagonal unitary is
 ``exp(i sum_j theta_j (-1)^{g_j . z})``.  :meth:`Ansatz.complete` builds the
-production two-local bank, while the constructor accepts any binary bank.
+default two-local bank, while the constructor accepts any binary bank.
 
 The model applies that shared diagonal to a condition-dependent encoder state,
 ``q_theta(x | c) = |<x| U_theta |phi(c)>|^2``.  Training uses the classically

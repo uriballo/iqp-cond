@@ -5,9 +5,8 @@ changes with the condition.  Updates are condition-balanced, each condition
 contributing the same number of samples per step, and the trainer selects
 checkpoints on a held-out validation split by the same MMD objective.
 
-The trainer refreshes masks as in ``iqpopt``.  Unless
-``mask_refresh="cache"`` is requested, every optimization step draws a fresh
-compressed, nonidentity mask bank and passes it to the compiled step as an
+Unless ``mask_refresh="cache"`` is requested, every optimization step draws a
+fresh compressed, nonidentity mask bank and passes it to the compiled step as an
 argument.  The trainer builds the bank on the host rather than in JAX on
 purpose, because the in-JAX sampler cannot collapse duplicates cheaply and so
 evaluates more mask columns at equal draw budgets.  Validation always uses one
@@ -51,19 +50,17 @@ _BANK_MARGIN = 2
 class TrainingConfig:
     """Optimization and Monte Carlo settings.
 
-    The defaults follow the paper's protocol where the library can: 2000
-    updates, batches of 256 per condition, initialization from the pooled
-    training data by the mean-covariance prescription, checkpoints every 25
-    steps by validation MMD, and a width-aware bandwidth schedule, with
+    Defaults: 2000 updates, batches of 256 per condition, initialization from
+    the pooled training data by the mean-covariance prescription, checkpoints
+    every 25 steps by validation MMD, and a width-aware bandwidth schedule, with
     ``sigmas=None`` resolving through :meth:`resolved_sigmas` to the bodyness
-    targets ``(2, n/4, 0.49 n)``.  The mask and Monte Carlo budgets are
-    lighter than the paper's so that default runs finish quickly:
-    ``n_ops``/``validation_n_ops`` default to 512 where the paper used 2000
-    masks, and ``mc_samples``/``validation_mc_samples`` to 1000 where the paper
-    used 8192 reference draws, the smallest calibrated budget passing the
-    estimator gates.  Raise them for production fidelity.  The paper also
-    retained one mask bank per fit, the ``mask_refresh="cache"`` setting,
-    instead of redrawing every step.
+    targets ``(2, n/4, 0.49 n)``.  The mask and Monte Carlo budgets are kept
+    light so that default runs finish quickly: ``n_ops``/``validation_n_ops``
+    default to 512 and ``mc_samples``/``validation_mc_samples`` to 1000, the
+    smallest calibrated budget passing the estimator gates.  Raise them toward
+    2000 masks and 8192 reference draws for full-scale runs.
+    ``mask_refresh="cache"`` retains one mask bank per fit instead of redrawing
+    every step; see :func:`train`.
 
     ``n_ops`` and ``validation_n_ops`` give the number of nonidentity operator
     draws per condition and bandwidth that feed the compressed operator banks.
@@ -235,13 +232,12 @@ def train(
     ``config.mask_refresh`` selects how the training masks are drawn:
     ``"step"``, the default, draws a fresh bank inside every compiled step from
     a per-step key, so each update's expectation equals the true kernel MMD;
-    ``"cache"`` draws one compressed NumPy bank and retains it, which
-    reproduces the mask protocol of the paper.  Every update uses the
-    paper's estimator form either way, with one reference draw per condition
-    shared by all masks and bandwidths.
+    ``"cache"`` draws one compressed NumPy bank and retains it for the fit.
+    Every update uses the same estimator form either way, with one reference
+    draw per condition shared by all masks and bandwidths.
 
-    Without ``initial_params`` the parameters start from the paper's
-    mean-covariance prescription applied to the pooled training conditions,
+    Without ``initial_params`` the parameters start from the mean-covariance
+    prescription applied to the pooled training conditions,
     with seeded noise on ancilla-supported rows.  The bandwidth schedule comes
     from ``config.resolved_sigmas(model.visible)``.
     """
