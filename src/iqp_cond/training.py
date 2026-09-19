@@ -209,6 +209,38 @@ def _select_condition(bank: OperatorBank, condition: int) -> OperatorBank:
     )
 
 
+def _pytree_encoder_signature(
+    encoder: object,
+) -> tuple[object, tuple[tuple[tuple[int, ...], str], ...]] | None:
+    """Return a stable JAX signature, or ``None`` for opaque encoders.
+
+    Only array leaves are accepted: passing an arbitrary Python object through
+    ``jit`` would make the dynamic path fail during tracing.  The fallback
+    remains important for user-defined encoders that intentionally are not
+    registered as pytrees.
+    """
+    leaves, structure = jax.tree_util.tree_flatten(encoder)
+    if not leaves:
+        return None
+    signatures = []
+    for leaf in leaves:
+        if not isinstance(leaf, (jax.Array, np.ndarray)):
+            return None
+        signatures.append((tuple(leaf.shape), np.dtype(leaf.dtype).str))
+    return structure, tuple(signatures)
+
+
+def _dynamic_encoder_support(encoders: object) -> bool:
+    """Whether all selected encoders can share one JIT-compiled step."""
+    signatures = [
+        _pytree_encoder_signature(encoders.select(i))
+        for i in range(encoders.n_conditions)
+    ]
+    return signatures[0] is not None and all(
+        signature == signatures[0] for signature in signatures[1:]
+    )
+
+
 def _validate_training_inputs(
     model: ConditionalModel,
     training_targets: np.ndarray,
@@ -369,20 +401,26 @@ def train(
         seed + 1,
     )
 
-    def compile_training_step(condition: int):
-        """Compile one closure without requiring the encoder to be a pytree."""
-        selected_model = ConditionalModel(
-            model.ansatz,
-            encoders.select(condition),
-            n_visible=model.n_visible,
-        )
+    dynamic_encoder = _dynamic_encoder_support(encoders)
+
+    def compile_training_step(closed_encoder: object | None):
+        """Compile a shared dynamic step or an opaque-encoder closure."""
 
         def training_loss(
             current_params: jnp.ndarray,
             target_batch: jnp.ndarray,
             current_bank: OperatorBank,
             step_key: jax.Array,
+            selected_encoder: object,
         ) -> jnp.ndarray:
+            active_encoder = (
+                selected_encoder if closed_encoder is None else closed_encoder
+            )
+            selected_model = ConditionalModel(
+                model.ansatz,
+                active_encoder,
+                n_visible=model.n_visible,
+            )
             return selected_model.mmd(
                 current_params,
                 target_batch,
@@ -403,12 +441,14 @@ def train(
             target_batch: jnp.ndarray,
             current_bank: OperatorBank,
             step_key: jax.Array,
+            selected_encoder: object,
         ) -> tuple[jnp.ndarray, jnp.ndarray, optax.OptState]:
             loss, gradient = jax.value_and_grad(training_loss)(
                 current_params,
                 target_batch,
                 current_bank,
                 step_key,
+                selected_encoder,
             )
             updates, new_optimizer_state = optimizer.update(
                 gradient,
@@ -420,9 +460,15 @@ def train(
 
         return training_step
 
-    training_steps = tuple(
-        compile_training_step(condition) for condition in range(encoders.n_conditions)
-    )
+    if dynamic_encoder:
+        shared_training_step = compile_training_step(None)
+        training_steps = None
+    else:
+        shared_training_step = None
+        training_steps = tuple(
+            compile_training_step(encoders.select(condition))
+            for condition in range(encoders.n_conditions)
+        )
 
     def validation_loss(current_params: jnp.ndarray) -> jnp.ndarray:
         return model.mmd(
@@ -465,12 +511,21 @@ def train(
         indices = batch_indices[step, condition]
         batch = training_targets[condition : condition + 1, indices]
         step_key = jax.random.fold_in(random_key, step)
-        loss, params, optimizer_state = training_steps[condition](
+        if dynamic_encoder:
+            assert shared_training_step is not None
+            training_step = shared_training_step
+            step_encoder = encoders.select(condition)
+        else:
+            assert training_steps is not None
+            training_step = training_steps[condition]
+            step_encoder = ()
+        loss, params, optimizer_state = training_step(
             params,
             optimizer_state,
             jnp.asarray(batch),
             training_bank,
             step_key,
+            step_encoder,
         )
         train_steps.append(step + 1)
         # Defer the device sync. There is no ``float(loss)`` here, so the host

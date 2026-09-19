@@ -388,6 +388,52 @@ def test_training_supports_non_pytree_custom_encoder(
     assert np.all(np.isfinite(result.validation_losses))
 
 
+def test_encoder_path_uses_shared_pytree_step_for_angle_encoder(
+    angles: np.ndarray,
+) -> None:
+    encoder = y_layer(angles)
+    assert training_module._dynamic_encoder_support(encoder)
+    assert not training_module._dynamic_encoder_support(WrappedEncoder(encoder))
+
+
+def test_dynamic_encoder_step_preserves_training_trajectory(
+    angles: np.ndarray,
+    targets: tuple[np.ndarray, np.ndarray],
+) -> None:
+    """The shared pytree step has the same deterministic result as the fallback."""
+    training, validation = targets
+    config = ciqp.TrainingConfig(
+        steps=3,
+        batch_size=8,
+        validation_interval=3,
+        sigmas=(1.0,),
+        n_ops=4,
+        mc_samples=16,
+        validation_n_ops=4,
+        validation_mc_samples=16,
+    )
+    dynamic = ciqp.train(
+        ciqp.ConditionalModel(ciqp.Ansatz.complete(N_QUBITS), y_layer(angles)),
+        training,
+        validation,
+        seed=76,
+        config=config,
+    )
+    fallback = ciqp.train(
+        ciqp.ConditionalModel(
+            ciqp.Ansatz.complete(N_QUBITS), WrappedEncoder(y_layer(angles))
+        ),
+        training,
+        validation,
+        seed=76,
+        config=config,
+    )
+    np.testing.assert_array_equal(dynamic.train_losses, fallback.train_losses)
+    np.testing.assert_array_equal(dynamic.validation_losses, fallback.validation_losses)
+    np.testing.assert_array_equal(dynamic.best_params, fallback.best_params)
+    np.testing.assert_array_equal(dynamic.final_params, fallback.final_params)
+
+
 def test_condition_count_mismatch_is_rejected(
     targets: tuple[np.ndarray, np.ndarray],
     config: ciqp.TrainingConfig,
