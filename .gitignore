@@ -11,6 +11,9 @@ venv/
 .ruff_cache/
 .hypothesis/
 
+# Notebooks
+.ipynb_checkpoints/
+
 # Build artifacts
 build/
 dist/
@@ -25,3 +28,4 @@ prototypes/
 # Local benchmarks and documentation
 /benchmarks/
 /docs/
+CONTEXT.md

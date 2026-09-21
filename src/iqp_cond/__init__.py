@@ -22,7 +22,7 @@ import jax
 
 jax.config.update("jax_enable_x64", True)
 
-from .encoders import AngleEncoder, Encoder, Operation
+from .encoders import AngleEncoder, Encoder
 from .model import Ansatz, ConditionalModel
 from .training import TrainingConfig, train
 
@@ -31,7 +31,6 @@ __all__ = [
     "Ansatz",
     "ConditionalModel",
     "Encoder",
-    "Operation",
     "TrainingConfig",
     "train",
 ]

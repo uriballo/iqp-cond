@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
 
 import jax
 import jax.numpy as jnp
@@ -51,8 +52,8 @@ class WrappedEncoder:
     ) -> jnp.ndarray:
         return self.inner.amplitude_ratios(samples, masks)
 
-    def preparation_ops(self, condition: int) -> tuple[ciqp.Operation, ...]:
-        return self.inner.preparation_ops(condition)
+    def preparation(self, condition: int) -> Callable[[], None]:
+        return self.inner.preparation(condition)
 
     def select(self, condition: int) -> WrappedEncoder:
         return WrappedEncoder(self.inner.select(condition))

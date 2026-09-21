@@ -50,8 +50,8 @@ Version 0.5 removes the encoder registry and narrows the package root:
 | `ciqp.STEP` / `ciqp.CACHE` | `"step"` / `"cache"` |
 
 Custom encoder constructors now keep their own explicit signatures. They are
-instantiated directly and must implement `preparation_ops` and `select` in
-addition to sampling and amplitude ratios. Numerical helper functions remain
+instantiated directly and must implement the preparation and selection methods
+in addition to sampling and amplitude ratios. Numerical helper functions remain
 available from their named submodules.
 
 ### Version 0.6
@@ -63,6 +63,19 @@ reuse compiled optimizer steps across conditions; custom opaque encoders keep
 the condition-specific closure path. The release also adds a one-condition
 example in which a fixed, tractable GHZ reference imposes exact global
 bit-flip symmetry on the model distribution.
+
+### Version 0.7
+
+Version 0.7 replaces the backend-agnostic preparation description with a
+PennyLane circuit definition. `preparation_ops` becomes `preparation` and
+returns a callable that queues the preparation, so a custom encoder can use any
+PennyLane gate or template instead of the four gates the bridge used to map.
+
+| 0.6 | 0.7 |
+|---|---|
+| `preparation_ops(condition) -> tuple[Operation, ...]` | `preparation(condition) -> Callable[[], None]` |
+| `ciqp.Operation("RY", (0,), (a,))` | `qml.RY(a, wires=0)` |
+| `ciqp.Operation` | removed |
 
 ## Quickstart
 
@@ -174,11 +187,12 @@ and the same circuit.
   `psi_c(z) = <z|H^n|phi(c)>`;
 - `amplitude_ratios(samples, masks)`: `(conditions, samples, masks)` ratios
   `psi_c(z xor a) / psi_c(z)`;
-- `preparation_ops(condition)`: `(gate, wires, parameters)` operations that
-  prepare `|phi(c)>` before the first Hadamard, used only by
-  `ciqp.simulation`.  The bridge maps `RX`, `RY`, and `RZ` (one wire, one
-  angle) and `CNOT` (two wires, no parameter), which covers product states and
-  entangling preparations.
+- `preparation(condition)`: a callable that queues `|phi(c)>` as PennyLane
+  operations before the first Hadamard, used only by `ciqp.simulation`.  It runs
+  inside the QNode's queuing context, so any PennyLane gate, template, or state
+  preparation is allowed, and
+  `qml.tape.make_qscript(encoder.preparation(c))()` inspects it without a
+  device.
 - `select(condition)`: the same encoder restricted to a one-condition batch.
 
 `ConditionalModel` validates the complete protocol when it is constructed.
@@ -206,7 +220,8 @@ implements the optional `ExactEncoder` capability used by exact checks.
 ### Adding your own
 
 An encoder is any object with the interface above. Instantiate it and pass it
-directly to the model. See `examples/custom_encoder.py` for a runnable version:
+directly to the model. See `examples/custom_encoder.ipynb` for a runnable
+version:
 
 ```python
 @dataclass(frozen=True)
@@ -229,9 +244,10 @@ class HadamardEncoder:
     def amplitude_ratios(self, samples, masks):
         return jnp.ones((self.n_conditions, samples.shape[1], masks.shape[0]))
 
-    def preparation_ops(self, condition):
-        # |+>^n is the image of |0>^n under the first Hadamard layer.
-        return ()
+    def preparation(self, condition):
+        # |+>^n is the image of |0>^n under the first Hadamard layer, so
+        # nothing is queued before it.
+        return lambda: None
 
     def select(self, condition):
         return HadamardEncoder(self.angles[condition : condition + 1])
@@ -261,9 +277,9 @@ and `iqp_cond.initialization`.
 
 | Module | Contents |
 |---|---|
-| `iqp_cond` | `Ansatz`, `ConditionalModel`, `Encoder`, `AngleEncoder`, `Operation`, `TrainingConfig`, `train` |
+| `iqp_cond` | `Ansatz`, `ConditionalModel`, `Encoder`, `AngleEncoder`, `TrainingConfig`, `train` |
 | `iqp_cond.model` | `Ansatz`, `ConditionalModel`, `pad_visible_masks`, `ancilla_support` |
-| `iqp_cond.encoders` | `Encoder`, `ExactEncoder`, `Operation`, `AngleEncoder`, `layered_amplitudes` |
+| `iqp_cond.encoders` | `Encoder`, `ExactEncoder`, `AngleEncoder`, `layered_amplitudes` |
 | `iqp_cond.simulation` | `build_qnode` |
 | `iqp_cond.estimator` | `estimate_pauli_z`, `estimate_pauli_z_unchecked`, `ExpectationEstimate` |
 | `iqp_cond.loss` | `mmd`, `target_moments`, `hamming_rbf`, `ConditionalMMDResult` |
@@ -332,12 +348,24 @@ Two opt-in settings cover large-budget regimes.
 
 ## Examples
 
-`examples/train_gaussian.py` trains a conditional model on a synthetic Gaussian
-family, then samples it through the PennyLane bridge and scores the Hamming
-profiles; `examples/custom_encoder.py` instantiates a custom encoder and trains
-through the public interface; `examples/unconditional_fixed_encoder.py` shows
-an unconditional, fixed-reference encoder.  All run from a checkout with
-`uv run python examples/<name>.py`.
+The examples are notebooks whose outputs are committed, and `uv sync` installs
+the notebook tooling that runs them:
+
+- `examples/train_gaussian.ipynb` trains a conditional model on a synthetic
+  Gaussian family, samples it through the PennyLane bridge, and scores the
+  Hamming profiles;
+- `examples/custom_encoder.ipynb` defines an encoder from scratch, registers it
+  as a JAX pytree, trains with it, and queries expectations;
+- `examples/unconditional_fixed_encoder.ipynb` uses a fixed reference encoder
+  with no trainable encoder state and checks the exact complement symmetry it
+  induces.
+
+Open them with `uv run jupyter lab examples`, or re-execute one in place:
+
+```bash
+uv run jupyter nbconvert --to notebook --execute --inplace \
+  examples/train_gaussian.ipynb
+```
 
 ## Tests
 
@@ -353,5 +381,5 @@ and the amplitude ratios against statevector results.
 
 ## Status
 
-Version 0.6.0, a private development release. Licence and citation metadata are
+Version 0.7.0, a private development release. Licence and citation metadata are
 pending author and institutional approval.

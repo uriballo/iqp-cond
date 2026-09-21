@@ -9,9 +9,10 @@ capabilities:
     ``psi_c(z) = <z|H^n|phi(c)>`` is the post-Hadamard reference amplitude.
 ``amplitude_ratios``
     Evaluate ``psi_c(z xor a) / psi_c(z)`` for sampled ``z`` and Fourier masks ``a``.
-``preparation_ops``
-    Describe how ``|phi(c)>`` is prepared as named gates, so the model can be
-    compiled to a circuit and sampled on a simulator or backend.
+``preparation``
+    Return a callable that queues ``|phi(c)>`` in the active PennyLane queuing
+    context, so the model can be compiled to a circuit and sampled on a
+    simulator or backend.
 ``select``
     Restrict the condition batch to one condition for memory-bounded loss
     evaluation.
@@ -36,7 +37,7 @@ single random key.  Exact small-system work needs a further capability,
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -48,25 +49,10 @@ __all__ = [
     "AngleEncoder",
     "Encoder",
     "ExactEncoder",
-    "Operation",
     "layered_amplitudes",
 ]
 
 _ROTATION_AXES = ("X", "Y", "Z")
-
-
-@dataclass(frozen=True)
-class Operation:
-    """One backend-agnostic gate in an encoder's state preparation.
-
-    The simulation bridge maps the name to a PennyLane gate; the whitelist is
-    ``RX``, ``RY``, and ``RZ``, each acting on one wire with one angle, and
-    ``CNOT``, acting on two wires with no parameters.
-    """
-
-    name: str
-    wires: tuple[int, ...]
-    parameters: tuple[float, ...] = ()
 
 
 @runtime_checkable
@@ -76,7 +62,10 @@ class Encoder(Protocol):
     Shapes are ``C`` conditions, ``S`` samples, ``R`` masks, ``n`` qubits.
     To save memory, the library evaluates one condition at a time by calling
     :meth:`select`.  Implementations may also register as JAX pytrees when
-    useful, but that is not part of the public extension contract.
+    useful, but that is not part of the public extension contract.  The
+    preparation callable runs inside a PennyLane queuing context while a
+    circuit is built and may queue any PennyLane operation; training never
+    calls it.
     """
 
     @property
@@ -93,8 +82,8 @@ class Encoder(Protocol):
     def amplitude_ratios(self, samples: jnp.ndarray, masks: jnp.ndarray) -> jnp.ndarray:
         """Return ``(C, S, R)`` ratios ``psi_c(z xor a) / psi_c(z)``."""
 
-    def preparation_ops(self, condition: int) -> tuple[Operation, ...]:
-        """Return operations preparing ``|phi(condition)>`` before ``H^n``."""
+    def preparation(self, condition: int) -> Callable[[], None]:
+        """Return a callable queuing ``|phi(condition)>`` before ``H^n``."""
 
     def select(self, condition: int) -> Encoder:
         """Return an encoder containing only ``condition``."""
@@ -411,16 +400,25 @@ class AngleEncoder(_ProductEncoder):
             self.axes,
         )
 
-    def preparation_ops(self, condition: int) -> tuple[Operation, ...]:
-        """Return this condition's rotation layers, layer 0 first."""
+    def preparation(self, condition: int) -> Callable[[], None]:
+        """Return a callable queuing this condition's rotation layers.
+
+        Layer 0 is queued first.  PennyLane is imported here so that importing
+        the package does not import it.
+        """
         if not 0 <= condition < self.n_conditions:
             raise IndexError(f"condition {condition} outside the batch")
-        return tuple(
-            Operation(
-                name=f"R{label}",
-                wires=(qubit,),
-                parameters=(float(self.angles[condition, layer, qubit]),),
-            )
+        import pennylane as qml
+
+        rotations = {"X": qml.RX, "Y": qml.RY, "Z": qml.RZ}
+        operations = tuple(
+            (rotations[label], qubit, float(self.angles[condition, layer, qubit]))
             for layer, labels in enumerate(self.axes)
             for qubit, label in enumerate(labels)
         )
+
+        def queue() -> None:
+            for rotation, qubit, angle in operations:
+                rotation(angle, wires=qubit)
+
+        return queue

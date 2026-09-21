@@ -7,11 +7,13 @@ works without registration or inheritance.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pennylane as qml
 import pytest
 
 import iqp_cond as ciqp
@@ -170,9 +172,9 @@ class UniformBits:
             dtype=jnp.complex128,
         )
 
-    def preparation_ops(self, condition: int) -> tuple[ciqp.Operation, ...]:
+    def preparation(self, condition: int) -> Callable[[], None]:
         # |+>^n is the image of |0>^n under the first Hadamard layer.
-        return ()
+        return lambda: None
 
     def select(self, condition: int) -> UniformBits:
         if not 0 <= condition < self.n_conditions:
@@ -365,18 +367,23 @@ def test_angle_encoder_selects_conditions_as_a_pytree() -> None:
     assert np.array_equal(np.asarray(selected.angles)[0], angles[1])
 
 
-def test_preparation_ops_follow_axes_and_layers() -> None:
-    """The encoder lists rotations in layer order, then qubit order."""
+def test_preparation_queues_axes_and_layers_in_order() -> None:
+    """The encoder queues rotations in layer order, then qubit order."""
     angles = np.array([[[0.1, 0.2], [0.3, 0.4]]])
     states = ciqp.AngleEncoder(angles, axes=("XY", "ZY"))
-    ops = states.preparation_ops(0)
-    assert [op.name for op in ops] == ["RX", "RY", "RZ", "RY"]
-    assert [op.wires for op in ops] == [(0,), (1,), (0,), (1,)]
-    assert [op.parameters[0] for op in ops] == pytest.approx(
+    script = qml.tape.make_qscript(states.preparation(0))()
+    assert [op.name for op in script.operations] == ["RX", "RY", "RZ", "RY"]
+    assert [tuple(int(wire) for wire in op.wires) for op in script.operations] == [
+        (0,),
+        (1,),
+        (0,),
+        (1,),
+    ]
+    assert [float(op.parameters[0]) for op in script.operations] == pytest.approx(
         [0.1, 0.2, 0.3, 0.4],
     )
     with pytest.raises(IndexError, match="condition"):
-        states.preparation_ops(4)
+        states.preparation(4)
 
 
 def test_model_requires_the_complete_encoder_contract() -> None:

@@ -18,12 +18,12 @@ def test_package_root_is_the_compact_workflow_api() -> None:
         "Ansatz",
         "ConditionalModel",
         "Encoder",
-        "Operation",
         "TrainingConfig",
         "train",
     ]
     for removed in (
         "CircuitEncoder",
+        "Operation",
         "angle_encoder",
         "complete_ansatz",
         "encoder",

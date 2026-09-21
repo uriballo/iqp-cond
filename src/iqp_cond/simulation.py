@@ -15,9 +15,9 @@ PennyLane circuit and runs it on a device chosen by the caller::
 
 The circuit is the encoder preparation, a Hadamard layer, the shared diagonal
 as ``MultiRZ(-2 theta_j)`` per nonzero generator, a second Hadamard layer, and
-measurement of the visible wires.  Encoders describe their preparation as
-named gates (:meth:`~iqp_cond.encoders.Encoder.preparation_ops`), so the same
-description runs on a classical simulator or on hardware.
+measurement of the visible wires.  Encoders declare their preparation as a
+PennyLane circuit callable (:meth:`~iqp_cond.encoders.Encoder.preparation`), so
+the same definition runs on a classical simulator or on hardware.
 """
 
 from __future__ import annotations
@@ -25,20 +25,10 @@ from __future__ import annotations
 import numpy as np
 import pennylane as qml
 
-from .encoders import Encoder, Operation
+from .encoders import Encoder
 from .model import ConditionalModel
 
 __all__ = ["build_qnode"]
-
-#: Allowed preparation gates as ``(gate, wires, parameters)``.  Single-qubit
-#: rotations cover the product-state families; ``CNOT`` covers entangling
-#: preparations such as the GHZ ladder a symmetric encoder needs.
-_GATE_SPECS: dict[str, tuple[object, int, int]] = {
-    "RX": (qml.RX, 1, 1),
-    "RY": (qml.RY, 1, 1),
-    "RZ": (qml.RZ, 1, 1),
-    "CNOT": (qml.CNOT, 2, 0),
-}
 
 
 def _validate_params(model: ConditionalModel, params: np.ndarray) -> np.ndarray:
@@ -70,25 +60,13 @@ def _resolve_device(
 
 
 def _prepare(encoder: Encoder, condition: int) -> None:
-    for operation in encoder.preparation_ops(condition):
-        if not isinstance(operation, Operation):
-            raise TypeError(
-                "preparation_ops must yield Operation instances, got "
-                f"{type(operation).__name__}",
-            )
-        spec = _GATE_SPECS.get(operation.name)
-        if spec is None:
-            raise ValueError(
-                f"unsupported preparation operation {operation.name!r}; "
-                f"expected one of {', '.join(sorted(_GATE_SPECS))}",
-            )
-        gate, n_wires, n_parameters = spec
-        if len(operation.wires) != n_wires or len(operation.parameters) != n_parameters:
-            raise ValueError(
-                f"{operation.name} preparation needs {n_wires} wire(s) and "
-                f"{n_parameters} parameter(s)",
-            )
-        gate(*operation.parameters, wires=operation.wires)
+    queue = encoder.preparation(condition)
+    if not callable(queue):
+        raise TypeError(
+            "preparation must return a callable that queues the preparation "
+            f"gates, got {type(queue).__name__}",
+        )
+    queue()
 
 
 def _hadamard_layer(n_qubits: int) -> None:

@@ -1,6 +1,6 @@
 [project]
 name = "iqp-cond"
-version = "0.6.0"
+version = "0.7.0"
 description = "Conditional IQP generation with classically tractable encoders."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -35,6 +35,8 @@ include = ["/README.md", "/pyproject.toml", "/src", "/tests", "/examples"]
 
 [dependency-groups]
 dev = [
+    "jupyterlab>=4.4",
+    "nbconvert>=7.16",
     "pytest>=9.0.3",
     "ruff>=0.15.17",
 ]
@@ -54,6 +56,9 @@ select = ["E", "F", "I", "N", "W", "B", "UP", "RUF"]
 [tool.ruff.lint.per-file-ignores]
 # The facade must enable JAX float64 before importing submodules.
 "src/iqp_cond/__init__.py" = ["E402"]
+# Notebook cells compile separately, so a `from __future__` import has to stay
+# in the cell that needs it, which F404 reads as a misplaced import.
+"*.ipynb" = ["F404"]
 
 [tool.ruff.format]
 quote-style = "double"

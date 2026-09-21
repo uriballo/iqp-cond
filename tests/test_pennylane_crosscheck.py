@@ -573,13 +573,15 @@ class _BellPreparation:
     def amplitude_ratios(self, samples, masks):  # pragma: no cover
         raise NotImplementedError
 
-    def preparation_ops(self, condition: int) -> tuple[ciqp.Operation, ...]:
+    def preparation(self, condition: int) -> Callable[[], None]:
         if condition != 0:
             raise IndexError(f"condition {condition} outside the batch")
-        return (
-            ciqp.Operation("RY", (0,), (np.pi / 2.0,)),
-            ciqp.Operation("CNOT", (0, 1)),
-        )
+
+        def queue() -> None:
+            qml.RY(np.pi / 2.0, wires=0)
+            qml.CNOT(wires=(0, 1))
+
+        return queue
 
     def select(self, condition: int) -> _BellPreparation:
         if condition != 0:
@@ -600,6 +602,59 @@ def test_nonproduct_preparation_matches_pennylane() -> None:
     def circuit() -> np.ndarray:
         qml.RY(np.pi / 2.0, wires=0)
         qml.CNOT(wires=[0, 1])
+        apply_iqp(params, np.asarray(ansatz.generators), 2)
+        return qml.probs(wires=range(2))
+
+    expected = np.asarray(circuit())
+    reordered = probabilities[0][reverse_bits(np.arange(4), 2)]
+    assert np.allclose(reordered, expected, atol=1e-12)
+
+
+@dataclass(frozen=True)
+class _StatePrepEncoder:
+    """A preparation using gates outside the retired bridge whitelist."""
+
+    amplitude: float = 0.8
+    n_conditions: int = 1
+    n_qubits: int = 2
+
+    def sample(self, key, n_samples):  # pragma: no cover - interface only
+        raise NotImplementedError
+
+    def amplitude_ratios(self, samples, masks):  # pragma: no cover
+        raise NotImplementedError
+
+    def preparation(self, condition: int) -> Callable[[], None]:
+        if condition != 0:
+            raise IndexError(f"condition {condition} outside the batch")
+
+        def queue() -> None:
+            other = np.sqrt(1.0 - self.amplitude**2)
+            qml.StatePrep(np.array([self.amplitude, other]), wires=0)
+            qml.CZ(wires=(0, 1))
+
+        return queue
+
+    def select(self, condition: int) -> _StatePrepEncoder:
+        if condition != 0:
+            raise IndexError(f"condition {condition} outside the batch")
+        return self
+
+
+def test_preparation_may_use_any_pennylane_gate() -> None:
+    """A StatePrep and CZ preparation compiles to the same circuit."""
+    ansatz = ciqp.Ansatz.complete(2)
+    params = np.random.default_rng(45).normal(0.0, 0.4, size=ansatz.n_parameters)
+    model = ciqp.ConditionalModel(ansatz, _StatePrepEncoder())
+    probabilities = model.probabilities(params)
+
+    dev = qml.device("default.qubit", wires=2)
+    other = np.sqrt(1.0 - 0.8**2)
+
+    @qml.qnode(dev)
+    def circuit() -> np.ndarray:
+        qml.StatePrep(np.array([0.8, other]), wires=0)
+        qml.CZ(wires=[0, 1])
         apply_iqp(params, np.asarray(ansatz.generators), 2)
         return qml.probs(wires=range(2))
 

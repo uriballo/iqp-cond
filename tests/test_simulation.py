@@ -83,9 +83,8 @@ def test_simulation_rejects_bad_devices_draw_counts_and_operations() -> None:
     with pytest.raises(ValueError, match="device must act on 1 wires"):
         model.probabilities(params, device=qml.device("default.qubit", wires=2))
 
-    encoder = _PreparedEncoder(operations=(object(),))
-    unsupported = ciqp.ConditionalModel(ciqp.Ansatz.complete(2), encoder)
-    with pytest.raises(TypeError, match="preparation_ops must yield"):
+    unsupported = ciqp.ConditionalModel(ciqp.Ansatz.complete(1), _BadEncoder())
+    with pytest.raises(TypeError, match="must return a callable"):
         unsupported.probabilities(np.zeros(unsupported.ansatz.n_parameters))
 
 
@@ -123,8 +122,9 @@ class _BadEncoder:
     def amplitude_ratios(self, samples, masks):  # pragma: no cover
         raise NotImplementedError
 
-    def preparation_ops(self, condition: int) -> tuple[ciqp.Operation, ...]:
-        return (ciqp.Operation("H", (0,), ()),)
+    def preparation(self, condition: int) -> object:
+        # Returns operations instead of the required callable.
+        return (qml.RY(0.3, wires=0),)
 
     def select(self, condition: int) -> _BadEncoder:
         return self
@@ -142,10 +142,6 @@ def test_simulation_validates_the_setup() -> None:
     with pytest.raises(IndexError, match="condition"):
         build_qnode(model, params, 3, shots=4)
 
-    unsupported = ciqp.ConditionalModel(ciqp.Ansatz.complete(1), _BadEncoder())
-    with pytest.raises(ValueError, match="unsupported preparation operation"):
-        unsupported.probabilities(np.zeros(1))
-
     class Minimal:
         n_conditions = 1
         n_qubits = 1
@@ -158,42 +154,3 @@ def test_simulation_validates_the_setup() -> None:
 
     with pytest.raises(TypeError, match="Encoder protocol"):
         ciqp.ConditionalModel(ciqp.Ansatz.complete(1), Minimal())
-
-
-@dataclass(frozen=True)
-class _PreparedEncoder:
-    """A test encoder that returns the preparation operations the test supplies."""
-
-    operations: tuple[ciqp.Operation, ...]
-    n_conditions: int = 1
-    n_qubits: int = 2
-
-    def sample(self, key, n_samples):  # pragma: no cover - interface only
-        raise NotImplementedError
-
-    def amplitude_ratios(self, samples, masks):  # pragma: no cover
-        raise NotImplementedError
-
-    def preparation_ops(self, condition: int) -> tuple[ciqp.Operation, ...]:
-        return self.operations
-
-    def select(self, condition: int) -> _PreparedEncoder:
-        if condition != 0:
-            raise IndexError(f"condition {condition} outside the batch")
-        return self
-
-
-def test_preparation_gate_arity_is_validated() -> None:
-    cases = (
-        ((ciqp.Operation("CNOT", (0,)),), "CNOT preparation needs 2 wire"),
-        (
-            (ciqp.Operation("CNOT", (0, 1), (0.3,)),),
-            "0 parameter",
-        ),
-        ((ciqp.Operation("RY", (0, 1), (0.3,)),), "RY preparation needs 1 wire"),
-    )
-    for operations, message in cases:
-        encoder = _PreparedEncoder(operations=operations)
-        model = ciqp.ConditionalModel(ciqp.Ansatz.complete(2), encoder)
-        with pytest.raises(ValueError, match=message):
-            model.probabilities(np.zeros(model.ansatz.n_parameters))
