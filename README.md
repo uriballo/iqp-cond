@@ -257,6 +257,30 @@ encoder = HadamardEncoder(jnp.zeros((3, 6)))
 model = ciqp.ConditionalModel(ciqp.Ansatz.complete(6), encoder)
 ```
 
+### Verifying your encoder
+
+Training trusts two operations that no circuit simulator checks: `sample` and
+`amplitude_ratios` must describe one post-Hadamard state, or the loss is quietly
+biased. `check_encoder` derives that state from your own `preparation` through
+PennyLane and compares both operations against it:
+
+```python
+check = ciqp.check_encoder(encoder)
+print(check.summary())
+assert check.ok, check.summary()
+```
+
+It reports contract violations, a sampling law that disagrees with the
+preparation, ratio errors above `rtol`, a `select` that disagrees with the
+batched call, and an optional exact-state mismatch when the encoder also
+implements `post_hadamard_amplitudes`. Observational notes — skipped ratio
+entries, an empty preparation, no rejection of an out-of-range condition — do
+not fail the check. The reference is a statevector, so registers are capped at
+`max_qubits=16` by default. Ratios are only compared where both amplitudes reach
+`floor=1e-3` of the largest one, and values where `psi_c(z)` vanishes are
+unspecified: the estimator samples `z` from `|psi_c(z)|**2` and never queries
+them.
+
 ## Ancillas
 
 The model allows extra qubits and marginalizes them after measurement.  Qubits
@@ -277,7 +301,7 @@ and `iqp_cond.initialization`.
 
 | Module | Contents |
 |---|---|
-| `iqp_cond` | `Ansatz`, `ConditionalModel`, `Encoder`, `AngleEncoder`, `TrainingConfig`, `train` |
+| `iqp_cond` | `Ansatz`, `ConditionalModel`, `Encoder`, `AngleEncoder`, `TrainingConfig`, `train`, `check_encoder`, `EncoderCheck` |
 | `iqp_cond.model` | `Ansatz`, `ConditionalModel`, `pad_visible_masks`, `ancilla_support` |
 | `iqp_cond.encoders` | `Encoder`, `ExactEncoder`, `AngleEncoder`, `layered_amplitudes` |
 | `iqp_cond.simulation` | `build_qnode` |
@@ -285,6 +309,7 @@ and `iqp_cond.initialization`.
 | `iqp_cond.loss` | `mmd`, `target_moments`, `hamming_rbf`, `ConditionalMMDResult` |
 | `iqp_cond.training` | `TrainingConfig`, `TrainingResult`, `train`, `STEP`, `CACHE` |
 | `iqp_cond.initialization` | `random_parameters`, `parameters_from_data` |
+| `iqp_cond.verification` | `check_encoder`, `EncoderCheck` |
 
 The advanced building blocks are in `iqp_cond.operators` (mask law,
 `OperatorBank`, `operator_bank`, `bank_from_ragged`,

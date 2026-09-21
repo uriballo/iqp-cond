@@ -10,6 +10,7 @@ import iqp_cond as ciqp
 from iqp_cond.estimator import estimate_pauli_z
 from iqp_cond.loss import mmd
 from iqp_cond.model import ancilla_support, pad_visible_masks
+from iqp_cond.verification import EncoderCheck, check_encoder
 
 
 def test_package_root_is_the_compact_workflow_api() -> None:
@@ -18,9 +19,14 @@ def test_package_root_is_the_compact_workflow_api() -> None:
         "Ansatz",
         "ConditionalModel",
         "Encoder",
+        "EncoderCheck",
         "TrainingConfig",
+        "check_encoder",
         "train",
     ]
+    # The verification helpers resolve lazily, without importing PennyLane.
+    assert ciqp.check_encoder is check_encoder
+    assert ciqp.EncoderCheck is EncoderCheck
     for removed in (
         "CircuitEncoder",
         "Operation",

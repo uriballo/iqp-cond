@@ -31,6 +31,21 @@ __all__ = [
     "Ansatz",
     "ConditionalModel",
     "Encoder",
+    "EncoderCheck",
     "TrainingConfig",
+    "check_encoder",
     "train",
 ]
+
+
+def __getattr__(name: str) -> object:
+    """Resolve the verification helpers on demand.
+
+    They need PennyLane, which importing this package must not pull in, so the
+    module is imported on first attribute access.
+    """
+    if name in {"EncoderCheck", "check_encoder"}:
+        from .verification import EncoderCheck, check_encoder
+
+        return {"EncoderCheck": EncoderCheck, "check_encoder": check_encoder}[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

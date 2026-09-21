@@ -80,7 +80,11 @@ class Encoder(Protocol):
         """Draw ``(C, S, n)`` bitstrings distributed as ``|psi_c(z)|^2``."""
 
     def amplitude_ratios(self, samples: jnp.ndarray, masks: jnp.ndarray) -> jnp.ndarray:
-        """Return ``(C, S, R)`` ratios ``psi_c(z xor a) / psi_c(z)``."""
+        """Return ``(C, S, R)`` ratios ``psi_c(z xor a) / psi_c(z)``.
+
+        Values where ``psi_c(z)`` vanishes are unspecified: the estimator
+        samples ``z`` from ``|psi_c(z)|**2``, so it never queries them.
+        """
 
     def preparation(self, condition: int) -> Callable[[], None]:
         """Return a callable queuing ``|phi(condition)>`` before ``H^n``."""
