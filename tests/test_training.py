@@ -664,6 +664,44 @@ def test_training_is_deterministic_in_the_seed(
     assert not np.array_equal(first.final_params, other.final_params)
 
 
+def test_external_selection_metric_selects_checkpoint_and_keeps_mmd_history(
+    model: ciqp.ConditionalModel,
+    targets: tuple[np.ndarray, np.ndarray],
+) -> None:
+    training, validation = targets
+    config = ciqp.TrainingConfig(
+        steps=4,
+        batch_size=8,
+        validation_interval=2,
+        n_ops=8,
+        mc_samples=16,
+        validation_n_ops=8,
+        validation_mc_samples=16,
+    )
+    calls: list[float] = []
+
+    def selection(params: np.ndarray) -> float:
+        score = float(len(calls))
+        calls.append(float(np.linalg.norm(params)))
+        return -score
+
+    result = ciqp.train(
+        model,
+        training,
+        validation,
+        seed=21,
+        config=config,
+        selection_metric=selection,
+    )
+
+    assert len(calls) == 3
+    assert result.best_step == 4
+    assert result.best_selection_score == -2.0
+    assert result.selection_scores.tolist() == [0.0, -1.0, -2.0]
+    assert result.validation_losses.shape == result.selection_scores.shape
+    assert np.all(np.isfinite(result.validation_losses))
+
+
 def test_complex_ancilla_model_trains(
     targets: tuple[np.ndarray, np.ndarray],
 ) -> None:

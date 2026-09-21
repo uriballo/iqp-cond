@@ -17,6 +17,7 @@ scores stay comparable across steps.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import jax
@@ -150,10 +151,12 @@ class TrainingResult:
     final_params: np.ndarray
     best_step: int
     best_validation_loss: float
+    best_selection_score: float
     train_steps: np.ndarray
     train_losses: np.ndarray
     validation_steps: np.ndarray
     validation_losses: np.ndarray
+    selection_scores: np.ndarray
 
 
 def _batch_schedule(
@@ -305,6 +308,7 @@ def train(
     seed: int,
     config: TrainingConfig,
     initial_params: np.ndarray | None = None,
+    selection_metric: Callable[[np.ndarray], float] | None = None,
 ) -> TrainingResult:
     """Train one shared conditional model with fixed validation randomness.
 
@@ -319,7 +323,10 @@ def train(
     Without ``initial_params`` the parameters start from the mean-covariance
     prescription applied to the pooled training conditions, with seeded noise on
     ancilla-supported rows.  The bandwidth schedule comes from
-    ``config.resolved_sigmas(model.visible)``.
+    ``config.resolved_sigmas(model.visible)``. By default, sampled validation
+    MMD selects checkpoints. ``selection_metric`` may supply a deterministic
+    scalar diagnostic such as exact TVD instead. Validation MMD is still
+    recorded at every checkpoint when an alternative selection metric is used.
     """
     training_targets = np.asarray(training_targets, dtype=np.float64)
     validation_targets = np.asarray(validation_targets, dtype=np.float64)
@@ -487,12 +494,21 @@ def train(
     train_losses = []
     validation_steps = []
     validation_losses = []
+    selection_scores = []
     best_params = params
     best_step = 0
-    best_validation = float(evaluate_validation(params))
+    initial_validation = float(evaluate_validation(params))
+    initial_selection = (
+        initial_validation
+        if selection_metric is None
+        else float(selection_metric(np.asarray(params)))
+    )
+    best_validation = initial_validation
+    best_selection = initial_selection
 
     validation_steps.append(0)
-    validation_losses.append(best_validation)
+    validation_losses.append(initial_validation)
+    selection_scores.append(initial_selection)
     for step in range(config.steps):
         bandwidth = int(bandwidth_indices[step])
         condition = int(condition_indices[step])
@@ -536,10 +552,17 @@ def train(
         completed_step = step + 1
         if completed_step % config.validation_interval == 0:
             current_validation = float(evaluate_validation(params))
+            current_selection = (
+                current_validation
+                if selection_metric is None
+                else float(selection_metric(np.asarray(params)))
+            )
             validation_steps.append(completed_step)
             validation_losses.append(current_validation)
-            if current_validation < best_validation:
+            selection_scores.append(current_selection)
+            if current_selection < best_selection:
                 best_validation = current_validation
+                best_selection = current_selection
                 best_params = params
                 best_step = completed_step
 
@@ -549,8 +572,10 @@ def train(
         final_params=np.asarray(params),
         best_step=best_step,
         best_validation_loss=best_validation,
+        best_selection_score=best_selection,
         train_steps=np.asarray(train_steps),
         train_losses=np.asarray(jnp.stack(train_losses)),
         validation_steps=np.asarray(validation_steps),
         validation_losses=np.asarray(validation_losses),
+        selection_scores=np.asarray(selection_scores),
     )
