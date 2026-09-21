@@ -1,4 +1,4 @@
-"""The conditional Pauli estimator: sources, ancilla padding, error paths."""
+"""Sample sources, ancilla padding, and error paths of the Pauli estimator."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from iqp_cond.model import pad_visible_masks
 
 
 def y_layer(angles: np.ndarray) -> ciqp.AngleEncoder:
-    """One ``RY`` layer per qubit: the plain product-state encoding."""
+    """One ``RY`` layer per qubit, the plain product-state encoding."""
     angles = np.asarray(angles)
     return ciqp.AngleEncoder(angles[:, None, :], axes=("Y" * angles.shape[1],))
 
@@ -66,7 +66,7 @@ def test_visible_masks_are_padded_with_identity_on_ancillas(
 
 
 def test_pre_drawn_samples_match_the_key_source(setup) -> None:
-    """Passing samples evaluates exactly those strings."""
+    """Passing samples evaluates exactly those bitstrings."""
     ansatz, encoders, _targets = setup
     masks = np.ones((1, N_VISIBLE))
     params = np.zeros(ansatz.n_parameters)
@@ -389,7 +389,7 @@ def test_mixed_precision_gemm_stays_close_to_float64(setup) -> None:
     deviation = float(
         np.max(np.abs(np.asarray(mixed.values) - np.asarray(reference.values))),
     )
-    # Nonzero pins the cast as active; the bound pins it as harmless.
+    # Nonzero deviation shows the cast is active; the bound shows it is harmless.
     assert 0.0 < deviation < 1e-5
 
 

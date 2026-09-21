@@ -2,7 +2,7 @@
 
 The model uses one parameter vector for every condition; only the encoder state
 changes with the condition.  Every update selects one condition and one
-bandwidth uniformly, so its expected loss and gradient equal the
+bandwidth uniformly, so the expected loss and gradient of that update equal the
 condition-balanced multiscale objective.  The trainer selects checkpoints on a
 held-out validation split by the full objective.
 
@@ -42,7 +42,7 @@ CACHE = "cache"
 #: Extra width over the pilot distinct-mask count when fixing a refreshed bank's
 #: width.  Distinct counts concentrate across banks, so this margin keeps a
 #: redraw rare.  A redraw conditions the entry on ``distinct <= width``, and
-#: every step still evaluates only the columns the law realistically reaches.
+#: every step still evaluates only the columns the law reaches in practice.
 _BANK_HEADROOM = 1.15
 _BANK_MARGIN = 2
 _BANDWIDTH_SEED_OFFSET = 83_001
@@ -55,29 +55,29 @@ class TrainingConfig:
 
     Defaults: 2000 updates, batches of 256 per condition, initialization from
     the pooled training data by the mean-covariance prescription, checkpoints
-    every 25 steps by validation MMD, and a width-aware bandwidth schedule, with
-    ``sigmas=None`` resolving through :meth:`resolved_sigmas` to the bodyness
-    targets ``(2, n/4, 0.49 n)``.  The mask and Monte Carlo budgets are kept
-    light so that default runs finish quickly: ``n_ops``/``validation_n_ops``
-    default to 512 and ``mc_samples``/``validation_mc_samples`` to 1000, the
-    smallest calibrated budget passing the estimator gates.  Raise them toward
-    2000 masks and 8192 reference draws for full-scale runs.
-    ``mask_refresh="cache"`` retains one mask bank per fit instead of redrawing
-    every step; both refresh modes select one condition-bandwidth objective
-    cell per update.  See :func:`train`.
+    every 25 steps by validation MMD, and a width-aware bandwidth schedule.
+    ``sigmas=None`` resolves through :meth:`resolved_sigmas` to the bodyness
+    targets ``(2, n/4, 0.49 n)``.  The mask and Monte Carlo budgets are small,
+    so default runs stay short.  ``n_ops`` and ``validation_n_ops`` default to
+    512 and ``mc_samples`` and ``validation_mc_samples`` to 1000, the smallest
+    calibrated budget passing the estimator gates; raise them toward 2000 masks
+    and 8192 reference draws for full-scale runs.  ``mask_refresh="cache"``
+    retains one mask bank per fit instead of redrawing every step; both refresh
+    modes select one condition-bandwidth objective cell per update.  See
+    :func:`train`.
 
     ``n_ops`` and ``validation_n_ops`` give the number of nonidentity operator
     draws per condition and bandwidth that feed the compressed operator banks.
     The trainer selects one condition and one bandwidth uniformly before every
-    update.  Under the default per-step refresh it then builds a fresh bank for
-    that objective cell; cache refresh selects the matching slice from a
-    retained bank.  In expectation both estimate the same condition-balanced
+    update.  Under the default per-step refresh the trainer then builds a fresh
+    bank for that objective cell; cache refresh selects the matching slice from
+    a retained bank.  In expectation both estimate the same condition-balanced
     arithmetic-mean multiscale objective.  Validation draws one bank covering
     every condition and bandwidth.
 
     ``gemm_dtype`` runs the phase contraction in a reduced dtype such as
-    ``jnp.float32`` and casts the result back to float64, which is the mixed
-    precision mode that helps on GPUs; the reductions stay float64.
+    ``jnp.float32`` and casts the result back to float64.  This mixed precision
+    mode helps on GPUs; the reductions stay float64.
 
     ``sample_chunk`` streams the Monte Carlo samples in slices, bounding the live
     ``(samples, masks, qubits)`` ratio tensor.  It is faster at large sample
@@ -214,9 +214,9 @@ def _pytree_encoder_signature(
 ) -> tuple[object, tuple[tuple[tuple[int, ...], str], ...]] | None:
     """Return a stable JAX signature, or ``None`` for opaque encoders.
 
-    Only array leaves are accepted: passing an arbitrary Python object through
-    ``jit`` would make the dynamic path fail during tracing.  The fallback
-    remains important for user-defined encoders that intentionally are not
+    Only array leaves are accepted, because passing an arbitrary Python object
+    through ``jit`` would make the dynamic path fail during tracing.  The
+    fallback matters for user-defined encoders that are deliberately not
     registered as pytrees.
     """
     leaves, structure = jax.tree_util.tree_flatten(encoder)
@@ -308,17 +308,18 @@ def train(
 ) -> TrainingResult:
     """Train one shared conditional model with fixed validation randomness.
 
-    ``config.mask_refresh`` selects how the training masks are drawn:
-    Both modes select one condition and one bandwidth uniformly per update,
-    which is unbiased for the condition-balanced arithmetic-mean multiscale
-    MMD.  ``"step"``, the default, draws a fresh bank for the selected objective
-    cell before every compiled step.  ``"cache"`` draws one full compressed
-    NumPy bank and selects the corresponding cached cell for each update.
+    ``config.mask_refresh`` selects how the training masks are drawn.  Both
+    modes pick one condition and one bandwidth uniformly per update, so each
+    update is unbiased for the condition-balanced arithmetic-mean multiscale
+    MMD.  ``"step"``, the default, draws a fresh bank for the selected
+    objective cell before every compiled step.  ``"cache"`` draws one full
+    compressed NumPy bank and selects the corresponding cached cell for each
+    update.
 
     Without ``initial_params`` the parameters start from the mean-covariance
-    prescription applied to the pooled training conditions,
-    with seeded noise on ancilla-supported rows.  The bandwidth schedule comes
-    from ``config.resolved_sigmas(model.visible)``.
+    prescription applied to the pooled training conditions, with seeded noise on
+    ancilla-supported rows.  The bandwidth schedule comes from
+    ``config.resolved_sigmas(model.visible)``.
     """
     training_targets = np.asarray(training_targets, dtype=np.float64)
     validation_targets = np.asarray(validation_targets, dtype=np.float64)
@@ -528,7 +529,7 @@ def train(
             step_encoder,
         )
         train_steps.append(step + 1)
-        # Defer the device sync. There is no ``float(loss)`` here, so the host
+        # Defer the device sync.  There is no ``float(loss)`` here, so the host
         # bank build for the next step overlaps with the running device program.
         train_losses.append(loss)
 

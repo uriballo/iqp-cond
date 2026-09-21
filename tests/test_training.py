@@ -18,7 +18,7 @@ from iqp_cond.training import CACHE, STEP
 
 
 def y_layer(angles: np.ndarray) -> ciqp.AngleEncoder:
-    """One ``RY`` layer per qubit: the plain product-state encoding."""
+    """One ``RY`` layer per qubit, the plain product-state encoding."""
     angles = np.asarray(angles)
     return ciqp.AngleEncoder(angles[:, None, :], axes=("Y" * angles.shape[1],))
 
@@ -151,7 +151,7 @@ def test_model_rejects_mismatched_widths() -> None:
 
 
 def test_model_requires_an_integer_visible_width() -> None:
-    """A float would be truncated silently, so it is rejected."""
+    """A float would be truncated silently, so the model rejects it."""
     encoders = y_layer(np.zeros((2, 3)))
     with pytest.raises(ValueError, match="n_visible must be an integer"):
         ciqp.ConditionalModel(ciqp.Ansatz.complete(3), encoders, n_visible=2.5)
@@ -451,7 +451,7 @@ def test_sample_chunk_training_runs(
     model: ciqp.ConditionalModel,
     targets: tuple[np.ndarray, np.ndarray],
 ) -> None:
-    """The streaming option works through the trainer."""
+    """The streaming option runs through the trainer."""
     training, validation = targets
     config = ciqp.TrainingConfig(
         steps=10,
@@ -623,7 +623,7 @@ def test_train_rejects_splits_with_one_sample_per_condition(
 def test_angle_encoder_trains_end_to_end(
     targets: tuple[np.ndarray, np.ndarray],
 ) -> None:
-    """A layered encoder survives selection and jit inside the trainer."""
+    """A layered encoder runs through selection and jit inside the trainer."""
     training, validation = targets
     angles = np.random.default_rng(16).uniform(
         0.3,
@@ -728,7 +728,7 @@ def _exact_objective(
 ) -> float:
     """Exact conditional MMD from model probabilities and target samples.
 
-    Independent of :mod:`iqp_cond.loss`: the Hamming-RBF character expansion
+    Independent of :mod:`iqp_cond.loss`. The Hamming-RBF character expansion
     gives ``k(x, y) = sum_a P(a) chi_a(x) chi_a(y)`` with
     ``P(a) = prod_i p^{a_i} (1-p)^{1-a_i}`` and
     ``p = (1 - exp(-1/(2 sigma^2))) / 2``.

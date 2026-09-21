@@ -1,8 +1,8 @@
 """The encoder contract and the built-in product-state implementation.
 
 The ratio query must equal ``psi_c(z xor a) / psi_c(z)`` computed from the full
-post-Hadamard state.  A custom class satisfying the structural protocol must
-work directly, without registration or inheritance.
+post-Hadamard state.  A custom class that satisfies the structural protocol
+works without registration or inheritance.
 """
 
 from __future__ import annotations
@@ -138,7 +138,7 @@ def test_built_in_encoder_has_the_optional_exact_capability(
 
 @dataclass(frozen=True)
 class UniformBits:
-    """A minimal frozen family: uniform bits with unit ratios."""
+    """A minimal frozen family with uniform bits and unit ratios."""
 
     angles: jnp.ndarray
 
@@ -321,7 +321,7 @@ def test_angle_encoder_validates_axes_and_shapes() -> None:
 
 
 def test_angle_encoder_is_a_registered_pytree() -> None:
-    """The encoder passes through JAX transformations as dynamic arrays."""
+    """JAX transformations treat the encoder as a pytree of dynamic arrays."""
     angles = np.random.default_rng(16).uniform(
         0.3,
         2.4,
@@ -366,7 +366,7 @@ def test_angle_encoder_selects_conditions_as_a_pytree() -> None:
 
 
 def test_preparation_ops_follow_axes_and_layers() -> None:
-    """Operations come in layer order, then qubit order, as rotations."""
+    """The encoder lists rotations in layer order, then qubit order."""
     angles = np.array([[[0.1, 0.2], [0.3, 0.4]]])
     states = ciqp.AngleEncoder(angles, axes=("XY", "ZY"))
     ops = states.preparation_ops(0)

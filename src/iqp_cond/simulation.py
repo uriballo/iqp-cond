@@ -1,9 +1,9 @@
 """Sampling the conditional model through PennyLane backends.
 
 The trainer does not use this module.  It calls the encoder's sampling and
-amplitude-ratio interface directly.  Sampling the trained model, by contrast,
-is a statevector or hardware operation, so this module compiles the model into
-a PennyLane circuit and runs it on a device chosen by the caller::
+amplitude-ratio interface directly.  Sampling a trained model is instead a
+statevector or hardware operation, so this module compiles the model into a
+PennyLane circuit and runs it on a device chosen by the caller::
 
     import pennylane as qml
 
@@ -198,8 +198,7 @@ def _probabilities(
     Analytic evaluation, so this is a small-system path.  The device must
     support analytic execution, which means a statevector simulator.  Use
     :meth:`iqp_cond.model.ConditionalModel.sample` for hardware or shot-based
-    evaluation.  Indices are
-    little-endian, matching the rest of the package.
+    evaluation.  Indices are little-endian, matching the rest of the package.
     """
     encoder = model.encoder
     values = _validate_params(model, params)

@@ -7,7 +7,7 @@ circuit representation.  It also needs ``select`` to expose one condition at
 a time.  Registering the dataclass as a JAX pytree is optional, but lets the
 trainer reuse one compiled optimizer step when every selected encoder has the
 same pytree structure and array shapes.  The array state is dynamic and the
-descriptive ``name`` is static.  Encoders that are not pytrees still work
+``name`` is static.  Encoders that are not pytrees still work
 through the trainer's condition-specific closure fallback.  The estimator,
 loss, trainer, and simulation bridge use either form unchanged.
 
@@ -27,7 +27,7 @@ import iqp_cond as ciqp
 
 @dataclass(frozen=True)
 class HadamardEncoder:
-    """Every condition is ``|+>^n``: uniform bits, unit amplitude ratios."""
+    """Every condition is ``|+>^n``; bits are uniform and ratios are one."""
 
     angles: jnp.ndarray
     name: str = "hadamard"
@@ -60,7 +60,7 @@ class HadamardEncoder:
 
 # ``angles`` is dynamic JAX state; ``name`` is static metadata.  This is an
 # optimization for the trainer, not a requirement of the public Encoder
-# protocol: opaque custom encoders continue to use the closure fallback.
+# protocol. Opaque custom encoders keep using the closure fallback.
 jax.tree_util.register_dataclass(
     HadamardEncoder,
     data_fields=["angles"],

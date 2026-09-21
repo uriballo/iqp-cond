@@ -44,7 +44,7 @@ def expected_bodyness_sigmas(
     The mean mask weight under bandwidth ``sigma`` is ``E[K] = n p_sigma`` with
     ``p_sigma = (1 - exp(-1/(2 sigma**2))) / 2``, so a bodyness target ``K``
     inverts to ``sigma = [-2 log(1 - 2K/n)]**-1/2``.  The library default
-    targets ``(2, n/4, 0.49 n)``: a low-order band, a mid band at a quarter of
+    targets ``(2, n/4, 0.49 n)``, a low-order band, a mid band at a quarter of
     the register, and a band just inside the high-bodyness limit.
 
     No bandwidth reaches ``K = n/2``, because ``p_sigma < 1/2`` strictly;
@@ -135,8 +135,7 @@ def sample_nonidentity_masks(
     from ``q(mask | mask != 0)`` only rescales by the analytic factor
     ``1 - q(0)``; the sampler folds that factor into the returned weights.  It
     represents duplicate masks once with their exact empirical multiplicity,
-    which reproduces the unweighted mean exactly while evaluating far fewer
-    masks.
+    which reproduces the unweighted mean exactly while evaluating fewer masks.
 
     This function runs outside any JIT, because rejection sampling needs a
     concrete NumPy generator.
@@ -187,7 +186,7 @@ def _sample_nonidentity_codes(
 ) -> np.ndarray:
     """Draw nonidentity masks for every condition as little-endian codes.
 
-    The draw is exact and rejection-free: the Hamming weight comes from the
+    The draw is exact and rejection-free.  The Hamming weight comes from the
     binomial law conditioned on ``k >= 1`` by inverse CDF, and the bitstring is
     a uniformly random ``k``-subset taken from one order statistic of ``n``
     uniforms.  Every draw is accepted, so the cost does not degrade as sigma
@@ -198,10 +197,10 @@ def _sample_nonidentity_codes(
     """
     cdf = _conditional_weight_cdf(n_qubits, sigma)
     powers = 1 << np.arange(n_qubits, dtype=np.int64)
-    # 32-bit integer ranks: the order statistic only needs a total order, and a
-    # tie is a 2**-32 event, so the subset law is unchanged.  Draws and sorts
-    # run for every condition at once; this measured ~1.7x faster than float64
-    # uniforms drawn per condition.
+    # The order statistic only needs a total order, so 32-bit integer ranks
+    # work; a tie is a 2**-32 event, so the subset law is unchanged.  Draws and
+    # sorts run for every condition at once; this measured ~1.7x faster than
+    # float64 uniforms drawn per condition.
     weights = np.searchsorted(cdf, rng.random((n_conditions, n_ops)), side="right") + 1
     ranks = rng.integers(
         0,
@@ -539,7 +538,8 @@ def operator_bank(
     Each bandwidth is evaluated at its own width, the largest distinct count its
     own entries reached, so a bandwidth whose mask law cannot reach many masks
     does not evaluate the widest one's columns.  ``max_masks`` may therefore be
-    one width for every bandwidth, an int, or one per bandwidth, a sequence.
+    an int that applies to every bandwidth, or a sequence with one width per
+    bandwidth.
     The per-bandwidth form keeps a refreshed bank's *per-bandwidth* widths fixed
     while each bandwidth stays as narrow as its own law allows.
     """

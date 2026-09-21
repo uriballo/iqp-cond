@@ -76,8 +76,8 @@ def main() -> None:
     print(f"validation MMD {result.best_validation_loss:.6f}")
 
     # The simulation bridge compiles the trained model into a PennyLane
-    # circuit: exact probabilities when the device supports analytic
-    # execution, and shots otherwise (including hardware backends).
+    # circuit. The device returns exact probabilities when it supports
+    # analytic execution, and shots otherwise (including hardware backends).
     draws = model.sample(
         result.best_params,
         2000,

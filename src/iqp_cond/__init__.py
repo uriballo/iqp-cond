@@ -12,7 +12,7 @@ The compact public API covers the full workflow: build a
 estimate moments, train, and sample through model methods.  Numerical building
 blocks remain available from their expert submodules.
 
-Importing this package enables JAX float64
+Importing this package turns on JAX float64
 (``jax.config.update("jax_enable_x64", True)``).  The estimator, the loss, and
 the trainer assume float64 throughout, so enable it before you create JAX
 arrays.  Disable it only if you know the precision change is acceptable.

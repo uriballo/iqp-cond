@@ -1,18 +1,18 @@
 """Monte Carlo Pauli-Z estimation for conditional IQP circuits.
 
-The estimator is a conditional Pauli estimator: for a Fourier mask
-``a`` it averages ``Re[R_c(z, a) exp(i Delta_a f_theta(z))]`` over basis samples
-``z`` drawn from the post-Hadamard reference state.  The encoder supplies
+For a Fourier mask ``a`` the estimator averages
+``Re[R_c(z, a) exp(i Delta_a f_theta(z))]`` over basis samples ``z`` drawn
+from the post-Hadamard reference state.  The encoder supplies
 ``R_c(z, a) = psi_c(z xor a)/psi_c(z)``, where
 ``psi_c(z) = <z|H^n|phi(c)>``; the diagonal phase bank supplies ``Delta_a f``.
 Both pieces are classically computable, so the estimator is unbiased with
 bounded variance and its parameter gradient is available in closed form.
 
-The module exposes two entry points.  :func:`estimate_pauli_z` validates its
-inputs and pads visible-width masks with identity on the ancillas.
-:func:`estimate_pauli_z_unchecked` skips both checks and is safe to trace under
-``jax.jit``.  Either function accepts a random key or pre-drawn reference
-samples, so several mask banks can share one draw.
+:func:`estimate_pauli_z` validates its inputs and pads visible-width masks
+with identity on the ancillas.  :func:`estimate_pauli_z_unchecked` skips both
+checks and is safe to trace under ``jax.jit``.  Either function accepts a
+random key or pre-drawn reference samples, so several mask banks can share
+one draw.
 """
 
 from __future__ import annotations
@@ -98,10 +98,9 @@ def _phase_differences(
 
     ``gemm_dtype`` runs only the ``(samples, generators) x (masks, generators)``
     contraction in a reduced dtype and casts the result back to float64, so the
-    exponentiation and every reduction stay precise.  This is the mixed
-    precision mode that gives large speedups on GPUs, whose float64 throughput
-    is a small fraction of float32.  On CPU it ranges from no change to a small
-    speedup.
+    exponentiation and every reduction stay precise.  This mixed-precision
+    mode gives large speedups on GPUs, where float64 throughput is a small
+    fraction of float32.  On CPU it ranges from no change to a small speedup.
     """
     sample_parities = jnp.einsum("bsn,mn->bsm", samples, generators)
     sample_characters = 1.0 - 2.0 * jnp.mod(sample_parities, 2.0)
@@ -199,10 +198,10 @@ def estimate_pauli_z(
     would otherwise broadcast silently.  A rank-two ``(samples, qubits)`` draw
     is accepted only for a single-condition encoder, because sharing one draw
     across different reference states would bias every condition but the one
-    it was sampled from.  ``masks`` has shape
-    ``(n_masks, n_qubits)``; visible-width masks are accepted and padded with
-    identity on the ancilla positions, following the visible-first convention
-    of :mod:`iqp_cond.model`.
+    it was sampled from.  ``masks`` has shape ``(n_masks, n_qubits)``.
+    Visible-width masks are accepted and padded with identity on the ancilla
+    positions.  The padding follows the visible-first convention of
+    :mod:`iqp_cond.model`.
     """
     params = jnp.asarray(params, dtype=jnp.float64)
     generators = jnp.asarray(generators, dtype=jnp.float64)

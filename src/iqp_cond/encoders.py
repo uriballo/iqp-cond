@@ -17,9 +17,9 @@ capabilities:
     evaluation.
 
 The first two operations make training classically tractable and keep the
-trainer independent of any circuit simulator.  The third is used only by
-:mod:`iqp_cond.simulation`.  Encoder families are ordinary Python objects;
-custom implementations are instantiated directly and need no registration::
+trainer independent of any circuit simulator.  Only :mod:`iqp_cond.simulation`
+uses the third.  Encoder families are ordinary Python objects, so a custom
+implementation needs no registration and is used directly::
 
     import iqp_cond as ciqp
 
@@ -74,7 +74,7 @@ class Encoder(Protocol):
     """A condition-parameterised encoder evaluated over a batch of conditions.
 
     Shapes are ``C`` conditions, ``S`` samples, ``R`` masks, ``n`` qubits.
-    To save memory, the library evaluates one condition at a time through
+    To save memory, the library evaluates one condition at a time by calling
     :meth:`select`.  Implementations may also register as JAX pytrees when
     useful, but that is not part of the public extension contract.
     """
@@ -125,8 +125,8 @@ def _local_amplitudes(
     Writing ``c = cos(a/2)`` and ``s = sin(a/2)`` the state is
     ``(c + s)/sqrt(2) |0> + (c - s)/sqrt(2) |1>``.  The amplitudes are real, so
     the function returns them in float64.  The ratio query then runs on real
-    arithmetic, which halves the memory traffic of its
-    ``(samples, masks, qubits)`` intermediate.
+    arithmetic, which halves the memory traffic of its ``(samples, masks,
+    qubits)`` intermediate.
     """
     angles = jnp.asarray(angles, dtype=jnp.float64)
     cosine = jnp.cos(angles / 2.0)
@@ -136,10 +136,10 @@ def _local_amplitudes(
     pre_zero = cosine * zero - sine * one
     pre_one = sine * zero + cosine * one
     scale = jnp.sqrt(jnp.asarray(2.0, dtype=jnp.float64))
-    # XLA divides complex by real differently from real by real, a reciprocal
-    # multiply, so the code extracts the components from the complex expression
-    # the regression fixtures pin rather than recomputing them in real
-    # arithmetic.
+    # XLA divides complex by real differently from real by real, using a
+    # reciprocal multiply, so the code takes the components from the complex
+    # expression the regression fixtures pin instead of recomputing them in
+    # real arithmetic.
     return (
         jnp.real((pre_zero + pre_one) / scale),
         jnp.real((pre_zero - pre_one) / scale),
@@ -155,8 +155,8 @@ def _normalize_axes(
 
     A layer may be any sequence of labels, so ``("YYY", ("X", "Y", "X"))`` is
     valid for three qubits.  The first layer must not contain ``Z``, because
-    ``R_Z`` on ``|0>`` is a global phase, which cancels from every probability
-    and ratio, so accepting it would silently ignore its angle.
+    ``R_Z`` on ``|0>`` is a global phase that cancels from every probability
+    and ratio, and accepting it would silently ignore its angle.
     """
     if isinstance(axes, str):
         raise TypeError(
@@ -325,11 +325,11 @@ class AngleEncoder(_ProductEncoder):
 
     ``angles`` is ``(n_conditions, n_layers, n_qubits)`` and ``axes`` the
     static ``(n_layers, n_qubits)`` rotation labels, with layer 0 applied
-    first.  A single all-``Y`` layer is the plain ``RY`` product state;
-    anything else composes rotations, which makes the local amplitudes complex
-    as soon as ``X`` or ``Z`` appears, since only ``Y`` keeps the single-qubit
-    matrices real.  Construction validates the axes and caches the local
-    post-Hadamard amplitudes used by sampling and ratio queries.
+    first.  A single all-``Y`` layer is the plain ``RY`` product state.
+    Anything else composes rotations, which makes the local amplitudes complex
+    as soon as ``X`` or ``Z`` appears, because only ``Y`` keeps the
+    single-qubit matrices real.  Construction validates the axes and caches the
+    local post-Hadamard amplitudes used by sampling and ratio queries.
     """
 
     axes: tuple[tuple[str, ...], ...]

@@ -30,7 +30,7 @@ from iqp_cond.operators import mmd_operator_probability, operator_bank
 
 
 def y_layer(angles: np.ndarray) -> ciqp.AngleEncoder:
-    """One ``RY`` layer per qubit: the plain product-state encoding."""
+    """One ``RY`` layer per qubit, the plain product-state encoding."""
     angles = np.asarray(angles)
     return ciqp.AngleEncoder(angles[:, None, :], axes=("Y" * angles.shape[1],))
 
@@ -50,7 +50,7 @@ def reverse_bits(indices: np.ndarray, n_bits: int) -> np.ndarray:
 
 
 def angles_for(seed: int = 3) -> np.ndarray:
-    """Well-spread product-state angles, one per condition and qubit."""
+    """Uniformly drawn product-state angles, one per condition and qubit."""
     return np.random.default_rng(seed).uniform(0.4, 2.2, size=(N_CONDITIONS, N_QUBITS))
 
 
@@ -68,7 +68,7 @@ def prepare_angle_encoder(axes: tuple[str, ...], angles: np.ndarray) -> None:
 
 
 def apply_iqp(params: np.ndarray, generators: np.ndarray, n_qubits: int) -> None:
-    """The shared IQP block: H, diagonal phases, H."""
+    """The shared IQP block applies H, then diagonal phases, then H."""
     for wire in range(n_qubits):
         qml.Hadamard(wire)
     for generator, theta in zip(generators, params, strict=True):
@@ -208,7 +208,7 @@ def test_pauli_moments_match_pennylane() -> None:
     """Estimator moments against exact PennyLane expectation values.
 
     The model carries one ancilla, so the comparison also exercises the
-    visible-mask padding and the ancilla marginalization: PennyLane measures Z
+    visible-mask padding and the ancilla marginalization.  PennyLane measures Z
     on the same visible wires and identity elsewhere.  The identity mask must
     return exactly one, and the reported errors must be the sample statistics.
     """
@@ -397,7 +397,7 @@ def test_mmd_expectation_matches_exact_pennylane_value() -> None:
     The target is an analytic product law, so its character moments are exact;
     the model moments come from PennyLane; the mask expectation is the exact
     Hamming-RBF character sum.  The estimator's mean over independent keys must
-    land on that value within Monte Carlo error.
+    match that value within Monte Carlo error.
     """
     sigma = 2.0
     n_ops, n_samples, n_keys = 32, 64, 240

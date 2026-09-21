@@ -4,9 +4,9 @@ The kernel ``k(x, y) = exp(-d_H(x, y) / (2 sigma^2))`` has a product character
 expansion, so the squared MMD is a weighted sum over Fourier masks whose
 probability under each bandwidth is Bernoulli with
 ``p = (1 - exp(-1/(2 sigma^2))) / 2``.  The loss averages over conditions and
-bandwidths, uses the unbiased ``(B-1)`` normalization for both target and model
-moments, and needs only the quantities the encoder makes classically
-computable: sampled masks, sampled bitstrings, and amplitude ratios.
+bandwidths and uses the unbiased ``(B-1)`` normalization for both target and
+model moments.  The remaining inputs are sampled masks, sampled bitstrings,
+and amplitude ratios, all classically computable by the encoder.
 
 :func:`mmd` is the single objective; its masks come from exactly one of two
 sources, which differ in cost and statistics, not in target:
@@ -18,11 +18,11 @@ sources, which differ in cost and statistics, not in target:
 ``bank``
     Evaluate a prebuilt compressed
     :class:`~iqp_cond.operators.OperatorBank` with duplicates collapsed to
-    multiplicities.  This is the evaluation path the regression fixtures pin.
+    multiplicities.  The regression fixtures pin this evaluation path.
 
 Both sources skip the identity mask exactly.  It contributes zero to the kernel
-MMD, so spending draws on it only adds variance.  Mask law, samplers, and banks
-are in :mod:`iqp_cond.operators`.
+MMD, so spending draws on it only adds variance.  See
+:mod:`iqp_cond.operators` for the mask law, samplers, and banks.
 """
 
 from __future__ import annotations
@@ -97,12 +97,11 @@ def _validate_loss_inputs(
     encoders: Encoder,
     n_samples: int,
 ) -> int:
-    """Shared shape checks; returns the number of target visible qubits.
+    """Validate shared shapes and return the number of target visible qubits.
 
-    The function inspects only static properties, so the checks stay valid
-    while the trainer traces ``mmd`` under ``jax.jit``.  The messages mirror
-    the checked estimator's, because the loss itself must call the unchecked
-    kernel.
+    The checks read only static shapes, so they stay valid while the trainer
+    traces ``mmd`` under ``jax.jit``.  The messages mirror the checked
+    estimator's, because the loss calls the unchecked kernel.
     """
     if targets.ndim != 3:
         raise ValueError(
@@ -222,8 +221,8 @@ def mmd(
     batch.
 
     With ``shared_samples=True`` each condition draws one reference sample set
-    and evaluates every bandwidth's masks on it, regardless of the mask source,
-    which avoids resampling once per bandwidth.  The default resamples per
+    and evaluates every bandwidth's masks on it, whatever the mask source.
+    This avoids resampling once per bandwidth.  The default resamples once per
     (bandwidth, condition) entry.
     """
     params = jnp.asarray(params, dtype=jnp.float64)
@@ -277,8 +276,7 @@ def mmd(
     assert sigmas is not None and n_ops is not None
     n_bandwidths = len(sigmas)
     if shared_samples:
-        # Shared-draw form: one reference draw per condition covers every
-        # bandwidth's masks.
+        # One reference draw per condition covers every bandwidth's masks.
         keys = jax.random.split(key, n_bandwidths * n_conditions + n_conditions)
         mask_keys = keys[: n_bandwidths * n_conditions]
         sample_keys = keys[n_bandwidths * n_conditions :]

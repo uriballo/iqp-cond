@@ -2,8 +2,9 @@
 
 The one-body phases come from the observed marginals and the two-body phases
 from the observed covariance; both are classical statistics of the training
-sample.  Unsupported rows are set to zero.  Ancilla-supported parameters have
-no data to learn from, so they are initialized from small seeded noise instead.
+sample.  The initializer leaves rows of any other weight at zero.  The
+ancilla-supported parameters have no data to learn from, so they come from
+small seeded noise instead.
 """
 
 from __future__ import annotations
@@ -85,10 +86,10 @@ def parameters_from_data(
     scales the population covariance, with ``bias=True``, of the ``{-1,+1}``
     representation by ``pi`` and by ``scale / max_abs_cov``.  With
     ``scale=None`` it uses the default heuristic
-    ``sqrt(2*n_features/sum(cov**2))*max_abs_cov/pi``.  Rows of other weights
-    are deterministically initialized to zero, and so are two-body rows when
-    every visible pair covariance is exactly zero, because the prescription has
-    no observed covariance to scale by.
+    ``sqrt(2*n_features/sum(cov**2))*max_abs_cov/pi``.  It fixes rows of other
+    weights at zero.  It also fixes two-body rows at zero when every visible
+    pair covariance is exactly zero, because the prescription has no observed
+    covariance to scale by.
     """
     values = np.asarray(data)
     rows = np.asarray(generators)

@@ -1,8 +1,8 @@
-"""The conditional MMD objective: estimator semantics and exact identities.
+"""Estimator semantics and exact identities of the conditional MMD objective.
 
-The PennyLane cross-check owns the exact-expectation validation.  These tests
-cover the two mask sources, the shared-draw layout, result shapes, JIT
-behavior, chunking, and the target moments without recorded reference values.
+The PennyLane cross-check owns the exact-expectation validation. These tests
+cover the two mask sources, the shared-draw layout, result shapes, JIT behavior,
+chunking, and the target moments without recorded reference values.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from iqp_cond.operators import (
 
 
 def y_layer(angles: np.ndarray) -> ciqp.AngleEncoder:
-    """One ``RY`` layer per qubit: the plain product-state encoding."""
+    """One ``RY`` layer per qubit, the plain product-state encoding."""
     angles = np.asarray(angles)
     return ciqp.AngleEncoder(angles[:, None, :], axes=("Y" * angles.shape[1],))
 
@@ -338,7 +338,7 @@ def test_target_moments_are_unbiased_for_an_exact_product_law() -> None:
     masks = ((np.arange(2**n_visible)[:, None] >> np.arange(n_visible)) & 1).astype(
         np.float64
     )
-    # Masks are row zero of the little-endian enumeration, identity first.
+    # Rows enumerate the little-endian bit patterns, identity first.
     exact = np.prod(
         np.where(masks == 1.0, 1.0 - 2.0 * probabilities, 1.0),
         axis=1,
@@ -438,7 +438,7 @@ def test_shared_samples_agrees_with_per_entry_sampling() -> None:
 def test_shared_samples_reuses_one_draw_per_condition_with_fresh_masks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The fresh-mask path honors shared_samples: one encoder draw per condition."""
+    """The fresh-mask path honors shared_samples, one encoder draw per condition."""
     rng = np.random.default_rng(43)
     ansatz = ciqp.Ansatz.complete(3)
     encoders = y_layer(rng.uniform(0.4, 2.4, size=(2, 3)))

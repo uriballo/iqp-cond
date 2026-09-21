@@ -161,8 +161,8 @@ qnode = build_qnode(model, params, 0, device=device, shots=1000)
   plugin.
 
 Every exact sampler still represents the full `2**n_qubits` state, so simulator
-sampling fits only registers that fit in memory; hardware runs use shots and the
-same circuit.
+sampling works only for registers that fit in memory; hardware runs use shots
+and the same circuit.
 
 ## Encoders
 
@@ -251,9 +251,9 @@ model = ciqp.ConditionalModel(ansatz_on_5_qubits, encoder, n_visible=3)
 model.n_ancillas  # 2
 ```
 
-The encoder and the generator bank cover the full register, targets keep the
-visible width only, and the estimator and the loss pad visible masks with
-identity on the ancilla positions automatically. Advanced mask padding,
+The encoder and the generator bank cover the full register, while targets keep
+the visible width only. The estimator and the loss pad visible masks with
+identity on the ancilla positions. Advanced mask padding,
 ancilla support, and data initialization are available from `iqp_cond.model`
 and `iqp_cond.initialization`.
 
@@ -278,8 +278,9 @@ The advanced building blocks are in `iqp_cond.operators` (mask law,
 ## Masks and the MMD estimator
 
 Training minimizes the stochastic operator estimator of the squared multiscale
-Hamming–RBF MMD implemented by `iqp_cond.loss.mmd`. The reference-state randomness always
-comes from the call's `key`; the mask source is exactly one of:
+Hamming-RBF MMD implemented by `iqp_cond.loss.mmd`. The reference-state
+randomness always comes from the call's `key`; the mask source is exactly
+one of:
 
 - `sigmas` + `n_ops`: draw nonidentity masks afresh inside the call, one draw
   per condition and bandwidth;
@@ -288,9 +289,9 @@ comes from the call's `key`; the mask source is exactly one of:
 
 A bandwidth `sigma` induces the mask law `a_i ~ Bernoulli(p_sigma)` with
 `p_sigma = (1 - e^{-1/(2 sigma^2)})/2`, so `E[|a|] = n p_sigma` is the expected
-bodyness. `iqp_cond.operators.expected_bodyness_sigmas(n, targets)` inverts a bodyness
-target into its bandwidth; the default targets are `(2, n/4, 0.49n)`, capped at
-`0.49n` because `p_sigma < 1/2` strictly. `TrainingConfig.sigmas=None`
+bodyness. `iqp_cond.operators.expected_bodyness_sigmas(n, targets)` inverts a
+bodyness target into its bandwidth; the default targets are `(2, n/4, 0.49n)`,
+capped at `0.49n` because `p_sigma < 1/2` strictly. `TrainingConfig.sigmas=None`
 resolves through that helper once the model width is known.
 
 Skipping the identity mask is exact.  It contributes zero to the kernel MMD, so
@@ -320,13 +321,13 @@ package.
 Two opt-in settings cover large-budget regimes.
 
 - `TrainingConfig(gemm_dtype=jnp.float32)` (or `gemm_dtype` on the expert loss
-  and estimator functions) runs only the phase contraction in float32 and casts the
-  phase result back to float64 before subsequent operations. Outputs remain
-  float64, with measured gradient error of about 1e-7. It gives the largest
-  speedup on GPUs, and on CPU it saves 6–16% of a full fit.
+  and estimator functions) runs only the phase contraction in float32 and casts
+  the phase result back to float64 before subsequent operations. Outputs remain
+  float64, with measured gradient error of about 1e-7. The speedup is largest
+  on GPUs; on CPU it saves 6 to 16% of a full fit.
 - `TrainingConfig(sample_chunk=N)` streams the Monte Carlo samples in slices
   and accumulates the per-mask moments, bounding the live ratio tensor. It is
-  faster at large sample budgets (1.1–1.24× at 8192+ samples) and slightly
+  faster at large sample budgets (1.1 to 1.24× at 8192+ samples) and slightly
   slower for small ones.
 
 ## Examples

@@ -55,9 +55,8 @@ def _validated_generators(generators: jnp.ndarray | np.ndarray) -> jnp.ndarray:
 class Ansatz:
     """A bank of diagonal IQP generator masks.
 
-    ``generators`` is ``(n_parameters, n_qubits)`` and binary; the constructor
-    validates the rows, so no path can build an ansatz whose generators the
-    estimator would read mod two.
+    ``generators`` is ``(n_parameters, n_qubits)`` and binary.  The
+    constructor validates the rows before the estimator reads them mod two.
     """
 
     generators: jnp.ndarray

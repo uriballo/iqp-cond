@@ -1,7 +1,7 @@
-"""The PennyLane bridge: device handling, seeds, shapes, and validation.
+"""The PennyLane bridge, with device handling, seeds, shapes, and validation.
 
-Circuit fidelity and the sampled law are checked against PennyLane in
-``test_pennylane_crosscheck.py``; these tests cover the bridge API.
+``test_pennylane_crosscheck.py`` checks circuit fidelity and the sampled law
+against PennyLane; these tests cover the bridge API.
 """
 
 from __future__ import annotations
@@ -162,7 +162,7 @@ def test_simulation_validates_the_setup() -> None:
 
 @dataclass(frozen=True)
 class _PreparedEncoder:
-    """A test encoder whose preparation operations are fixed by the test."""
+    """A test encoder that returns the preparation operations the test supplies."""
 
     operations: tuple[ciqp.Operation, ...]
     n_conditions: int = 1

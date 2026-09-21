@@ -1,7 +1,7 @@
 """Mask law, samplers, and compressed operator banks.
 
-Both samplers must draw the conditional Bernoulli law ``P(a | a != 0)`` with
-the nonidentity mass divided over the draws as weights; the bank tests check
+Both samplers must draw the conditional Bernoulli law ``P(a | a != 0)``, with
+the nonidentity mass divided over the draws as weights. The bank tests check
 inert padding, static shapes, per-bandwidth widths, and pytree registration.
 """
 
@@ -282,13 +282,13 @@ def test_operator_bank_is_deterministic_and_skips_the_identity() -> None:
             assert np.array_equal(np.asarray(masks_a), np.asarray(masks_b))
             carried = np.asarray(masks_a)[np.asarray(weights_a) > 0.0]
             assert np.all(carried.sum(axis=1) > 0)
-            # Padding is inert: zero mask implies zero weight.
+            # Padding is inert, so a zero mask implies zero weight.
             padded = np.asarray(weights_a)[np.asarray(masks_a).sum(axis=1) == 0.0]
             assert np.all(padded == 0.0)
 
 
 def test_max_masks_fixes_the_padded_width() -> None:
-    """A fixed width is what lets refreshed banks reuse one compilation."""
+    """A fixed width lets refreshed banks reuse one compilation."""
     natural = operator_bank(SIGMAS, 64, 2, 6, seed=5)
     fixed = operator_bank(SIGMAS, 64, 2, 6, seed=5, max_masks=natural.n_masks + 4)
     assert fixed.n_masks == natural.n_masks + 4
@@ -300,7 +300,7 @@ def test_max_masks_fixes_the_padded_width() -> None:
 
 
 def test_operator_bank_is_a_pytree() -> None:
-    """The bank must be passable into a compiled step as an argument."""
+    """A bank can be passed to a compiled step as an argument."""
     bank = operator_bank(SIGMAS, 16, 1, 4, seed=6)
     leaves, treedef = jax.tree_util.tree_flatten(bank)
     assert len(leaves) == 2
@@ -311,7 +311,7 @@ def test_operator_bank_is_a_pytree() -> None:
 
 
 def test_compressed_bank_shrinks_the_mask_set() -> None:
-    """At a small qubit count the bank is far smaller than the draw budget."""
+    """At a small qubit count the bank holds fewer masks than the draw budget."""
     bank = operator_bank((4.0,), 2000, 1, 8, seed=3)
     assert bank.n_masks < 2000  # duplicates collapse
     assert bank.n_ops == 2000
@@ -352,9 +352,9 @@ def test_fixed_per_bandwidth_widths_keep_refreshed_banks_one_shape() -> None:
 def test_bank_reproduces_the_conditional_mask_law() -> None:
     """Bank weights must recover ``P(a | a != 0)`` after removing the mass factor.
 
-    A public-path check of the batched sampler: on a tiny register every
-    nonidentity mask is reachable, so the weight of a mask divided by the
-    nonidentity mass is its analytic conditional probability.
+    The test drives the batched sampler through the public path. On a tiny
+    register every nonidentity mask is reachable, so the weight of a mask
+    divided by the nonidentity mass is its analytic conditional probability.
     """
     import math
 
