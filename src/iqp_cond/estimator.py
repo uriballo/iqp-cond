@@ -93,19 +93,28 @@ def _phase_differences(
     masks: jnp.ndarray,
     samples: jnp.ndarray,
     gemm_dtype: jnp.dtype | None = None,
+    estimator_dtype: jnp.dtype | None = None,
 ) -> jnp.ndarray:
     """Return ``Delta_a f_theta(z)`` for every sample and mask.
 
-    ``gemm_dtype`` runs only the ``(samples, generators) x (masks, generators)``
-    contraction in a reduced dtype and casts the result back to float64, so the
-    exponentiation and every reduction stay precise.  This mixed-precision
-    mode gives large speedups on GPUs, where float64 throughput is a small
-    fraction of float32.  On CPU it ranges from no change to a small speedup.
+    ``gemm_dtype`` runs only the final contraction in a reduced dtype and casts
+    the result back to float64. ``estimator_dtype=float32`` instead runs parity
+    construction and the phase contraction in float32; the caller then keeps
+    the complex estimator arithmetic in single precision before returning to
+    float64 for statistics and loss accumulation.
     """
+    resolved_dtype = _resolve_estimator_dtype(gemm_dtype, estimator_dtype)
+    if resolved_dtype is not None:
+        samples = samples.astype(resolved_dtype)
+        generators = generators.astype(resolved_dtype)
+        masks = masks.astype(resolved_dtype)
+        params = params.astype(resolved_dtype)
     sample_parities = jnp.einsum("bsn,mn->bsm", samples, generators)
     sample_characters = 1.0 - 2.0 * jnp.mod(sample_parities, 2.0)
     op_parities = jnp.mod(jnp.einsum("rn,mn->rm", masks, generators), 2.0)
     weighted_flips = -2.0 * op_parities * params[None, :]
+    if resolved_dtype is not None:
+        return jnp.einsum("bsm,rm->bsr", sample_characters, weighted_flips)
     if gemm_dtype is not None:
         phases = jnp.einsum(
             "bsm,rm->bsr",
@@ -116,6 +125,23 @@ def _phase_differences(
     return jnp.einsum("bsm,rm->bsr", sample_characters, weighted_flips)
 
 
+def _resolve_estimator_dtype(
+    gemm_dtype: jnp.dtype | None,
+    estimator_dtype: jnp.dtype | None,
+) -> jnp.dtype | None:
+    """Validate precision options and normalize the estimator compute dtype."""
+    if gemm_dtype is not None and estimator_dtype is not None:
+        raise ValueError("gemm_dtype and estimator_dtype are mutually exclusive")
+    if estimator_dtype is None:
+        return None
+    dtype = jnp.dtype(estimator_dtype)
+    if dtype == jnp.dtype(jnp.float64):
+        return None
+    if dtype != jnp.dtype(jnp.float32):
+        raise ValueError("estimator_dtype must be float32, float64, or None")
+    return jnp.float32
+
+
 def _estimate(
     params: jnp.ndarray,
     generators: jnp.ndarray,
@@ -123,11 +149,27 @@ def _estimate(
     masks: jnp.ndarray,
     samples: jnp.ndarray,
     gemm_dtype: jnp.dtype | None,
+    estimator_dtype: jnp.dtype | None,
     return_samples: bool,
 ) -> ExpectationEstimate:
+    resolved_dtype = _resolve_estimator_dtype(gemm_dtype, estimator_dtype)
     ratios = encoders.amplitude_ratios(samples, masks)
-    phases = _phase_differences(params, generators, masks, samples, gemm_dtype)
-    sample_values = jnp.real(ratios * jnp.exp(1j * phases))
+    phases = _phase_differences(
+        params,
+        generators,
+        masks,
+        samples,
+        gemm_dtype,
+        resolved_dtype,
+    )
+    if resolved_dtype is not None:
+        ratios = ratios.astype(jnp.complex64)
+        imaginary_unit = jnp.asarray(1j, dtype=jnp.complex64)
+        sample_values = jnp.real(ratios * jnp.exp(imaginary_unit * phases)).astype(
+            jnp.float64
+        )
+    else:
+        sample_values = jnp.real(ratios * jnp.exp(1j * phases))
     values = jnp.mean(sample_values, axis=1)
     return ExpectationEstimate(
         values,
@@ -188,6 +230,7 @@ def estimate_pauli_z(
     samples: jnp.ndarray | None = None,
     n_samples: int | None = None,
     gemm_dtype: jnp.dtype | None = None,
+    estimator_dtype: jnp.dtype | None = None,
     return_samples: bool = False,
 ) -> ExpectationEstimate:
     """Estimate Pauli-Z expectations for one or more conditions.
@@ -202,6 +245,12 @@ def estimate_pauli_z(
     Visible-width masks are accepted and padded with identity on the ancilla
     positions.  The padding follows the visible-first convention of
     :mod:`iqp_cond.model`.
+
+    ``gemm_dtype`` changes only the final phase contraction. Set
+    ``estimator_dtype=jnp.float32`` to also construct parities and phases in
+    float32 and evaluate the ratio-phase product in complex64. The estimator
+    casts per-sample values back to float64 before statistics. The two dtype
+    options are mutually exclusive.
     """
     params = jnp.asarray(params, dtype=jnp.float64)
     generators = jnp.asarray(generators, dtype=jnp.float64)
@@ -237,6 +286,7 @@ def estimate_pauli_z(
         masks,
         drawn,
         gemm_dtype,
+        estimator_dtype,
         return_samples,
     )
 
@@ -251,11 +301,13 @@ def estimate_pauli_z_unchecked(
     samples: jnp.ndarray | None = None,
     n_samples: int | None = None,
     gemm_dtype: jnp.dtype | None = None,
+    estimator_dtype: jnp.dtype | None = None,
     return_samples: bool = False,
 ) -> ExpectationEstimate:
-    """Traceable estimator kernel with no validation and model-width masks.
+    """Traceable estimator kernel with no array validation and model-width masks.
 
-    The loss calls this function under ``jax.jit``.
+    The loss calls this function under ``jax.jit``. Precision-option validation
+    is retained because dtype choices are static Python values.
     """
     drawn = _draw(encoders, key, samples, n_samples)
     return _estimate(
@@ -265,5 +317,6 @@ def estimate_pauli_z_unchecked(
         masks,
         drawn,
         gemm_dtype,
+        estimator_dtype,
         return_samples,
     )

@@ -25,6 +25,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
+from .estimator import _resolve_estimator_dtype
 from .initialization import parameters_from_data
 from .model import ConditionalModel
 from .operators import OperatorBank, expected_bodyness_sigmas, operator_bank
@@ -80,6 +81,12 @@ class TrainingConfig:
     ``jnp.float32`` and casts the result back to float64.  This mixed precision
     mode helps on GPUs; the reductions stay float64.
 
+    ``estimator_dtype=jnp.float32`` also runs parity and phase construction in
+    single precision, casts amplitude ratios to complex64, and evaluates the
+    complex exponential there. It returns to float64 before statistics and MMD
+    accumulation. It is mutually exclusive with ``gemm_dtype``. ``None``
+    retains the default float64 estimator.
+
     ``sample_chunk`` streams the Monte Carlo samples in slices, bounding the live
     ``(samples, masks, qubits)`` ratio tensor.  It is faster at large sample
     budgets and slightly slower for small ones, so it is off by default.
@@ -96,6 +103,7 @@ class TrainingConfig:
     validation_n_ops: int = 512
     validation_mc_samples: int = 1_000
     gemm_dtype: jnp.dtype | None = None
+    estimator_dtype: jnp.dtype | None = None
     sample_chunk: int | None = None
     mask_refresh: str = STEP
 
@@ -133,6 +141,7 @@ class TrainingConfig:
             raise ValueError(
                 "mc_samples and validation_mc_samples must be at least two",
             )
+        _resolve_estimator_dtype(self.gemm_dtype, self.estimator_dtype)
         if self.sample_chunk is not None and self.sample_chunk < 1:
             raise ValueError("sample_chunk must be positive")
         if self.mask_refresh not in (STEP, CACHE):
@@ -437,6 +446,7 @@ def train(
                 n_samples=config.mc_samples,
                 shared_samples=True,
                 gemm_dtype=config.gemm_dtype,
+                estimator_dtype=config.estimator_dtype,
                 sample_chunk=config.sample_chunk,
             ).loss
 
@@ -486,6 +496,7 @@ def train(
             bank=validation_bank,
             n_samples=config.validation_mc_samples,
             gemm_dtype=config.gemm_dtype,
+            estimator_dtype=config.estimator_dtype,
         ).loss
 
     evaluate_validation = jax.jit(validation_loss)

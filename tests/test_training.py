@@ -352,6 +352,7 @@ def test_selected_condition_gradient_is_unbiased_for_balanced_loss(
                     samples,
                     None,
                     None,
+                    None,
                 )
             )
         return jnp.mean(jnp.stack(values))
@@ -492,6 +493,13 @@ def test_training_config_validates_its_fields() -> None:
         ciqp.TrainingConfig(validation_interval=0)
     with pytest.raises(ValueError, match="unknown mask_refresh"):
         ciqp.TrainingConfig(mask_refresh="sometimes")
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        ciqp.TrainingConfig(
+            gemm_dtype=jnp.float32,
+            estimator_dtype=jnp.float32,
+        )
+    with pytest.raises(ValueError, match="must be float32, float64, or None"):
+        ciqp.TrainingConfig(estimator_dtype=jnp.bfloat16)
 
 
 def test_training_config_defaults_follow_the_library_protocol() -> None:
@@ -502,6 +510,8 @@ def test_training_config_defaults_follow_the_library_protocol() -> None:
     assert config.validation_n_ops == 512
     assert config.mc_samples == 1000
     assert config.validation_mc_samples == 1000
+    assert config.gemm_dtype is None
+    assert config.estimator_dtype is None
     assert config.mask_refresh == STEP
     assert config.sigmas is None
     n_visible = 12
@@ -758,6 +768,92 @@ def test_mixed_precision_and_chunked_training_run(
     assert np.all(np.isfinite(result.train_losses))
     assert np.all(np.isfinite(result.validation_losses))
     assert result.best_params.shape == (model.ansatz.n_parameters,)
+
+
+def test_float32_estimator_training_stays_close_to_default(
+    model: ciqp.ConditionalModel,
+    targets: tuple[np.ndarray, np.ndarray],
+) -> None:
+    """Training and validation both receive the estimator dtype option."""
+    training, validation = targets
+    base = ciqp.TrainingConfig(
+        steps=6,
+        batch_size=8,
+        learning_rate=0.015,
+        final_learning_rate=0.002,
+        validation_interval=3,
+        sigmas=(0.8, 1.3),
+        n_ops=8,
+        mc_samples=17,
+        validation_n_ops=8,
+        validation_mc_samples=19,
+        sample_chunk=8,
+    )
+    initial = np.linspace(-0.05, 0.05, model.ansatz.n_parameters)
+    reference = ciqp.train(
+        model,
+        training,
+        validation,
+        seed=31,
+        config=base,
+        initial_params=initial,
+    )
+    mixed = ciqp.train(
+        model,
+        training,
+        validation,
+        seed=31,
+        config=dataclasses.replace(base, estimator_dtype=jnp.float32),
+        initial_params=initial,
+    )
+    assert np.max(np.abs(mixed.final_params - reference.final_params)) < 2e-6
+    assert np.max(np.abs(mixed.validation_losses - reference.validation_losses)) < 1e-7
+    assert mixed.final_params.dtype == np.float64
+
+
+def test_float32_estimator_chunking_matches_full_samples(
+    model: ciqp.ConditionalModel,
+    targets: tuple[np.ndarray, np.ndarray],
+) -> None:
+    training, _validation = targets
+    params = jnp.linspace(-0.2, 0.2, model.ansatz.n_parameters)
+    bank = operator_bank((1.2,), 16, N_CONDITIONS, N_QUBITS, seed=81)
+    arguments = (params, jnp.asarray(training[:, :16]), jax.random.PRNGKey(82))
+    full = model.mmd(
+        *arguments,
+        bank=bank,
+        n_samples=32,
+        shared_samples=True,
+        estimator_dtype=jnp.float32,
+    )
+    chunked = model.mmd(
+        *arguments,
+        bank=bank,
+        n_samples=32,
+        shared_samples=True,
+        estimator_dtype=jnp.float32,
+        sample_chunk=8,
+    )
+    assert jnp.allclose(chunked.loss, full.loss, atol=1e-14, rtol=0.0)
+
+    def objective(current_params, estimator_dtype=None):
+        return model.mmd(
+            current_params,
+            arguments[1],
+            arguments[2],
+            bank=bank,
+            n_samples=32,
+            shared_samples=True,
+            estimator_dtype=estimator_dtype,
+        ).loss
+
+    reference_gradient = jax.grad(objective)(params)
+    mixed_gradient = jax.grad(lambda current: objective(current, jnp.float32))(params)
+    relative_error = float(
+        jnp.linalg.norm(mixed_gradient - reference_gradient)
+        / jnp.linalg.norm(reference_gradient)
+    )
+    assert relative_error < 2e-6
 
 
 def _exact_objective(

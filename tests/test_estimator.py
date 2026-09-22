@@ -393,6 +393,99 @@ def test_mixed_precision_gemm_stays_close_to_float64(setup) -> None:
     assert 0.0 < deviation < 1e-5
 
 
+@pytest.mark.parametrize("complex_encoder", [False, True])
+def test_float32_estimator_keeps_float64_outputs_and_gradients_close(
+    complex_encoder: bool,
+) -> None:
+    """The wider mixed path returns to float64 before statistics."""
+    rng = np.random.default_rng(41)
+    n_qubits = N_VISIBLE + N_ANCILLAS
+    axes = ("X" * n_qubits, "Z" * n_qubits) if complex_encoder else ("Y" * n_qubits,)
+    encoder = ciqp.AngleEncoder(
+        rng.uniform(0.4, 2.2, size=(N_CONDITIONS, len(axes), n_qubits)),
+        axes=axes,
+    )
+    ansatz = ciqp.Ansatz.complete(n_qubits)
+    params = jnp.linspace(-0.3, 0.3, ansatz.n_parameters)
+    masks = jnp.asarray([[1.0, 0.0, 1.0], [0.0, 1.0, 1.0], [1.0, 1.0, 0.0]])
+    samples = encoder.sample(jax.random.PRNGKey(42), 1_024)
+
+    def objective(current_params, estimator_dtype=None):
+        result = estimate_pauli_z(
+            current_params,
+            ansatz.generators,
+            encoder,
+            masks,
+            samples=samples,
+            estimator_dtype=estimator_dtype,
+            return_samples=True,
+        )
+        assert result.sample_values is not None
+        return jnp.sum(result.values), result
+
+    reference_loss, reference_gradient = jax.value_and_grad(
+        lambda current: objective(current)[0]
+    )(params)
+    mixed_loss, mixed_gradient = jax.value_and_grad(
+        lambda current: objective(current, jnp.float32)[0]
+    )(params)
+    _, mixed = objective(params, jnp.float32)
+    _, explicit_float64 = objective(params, jnp.float64)
+
+    relative_error = float(
+        jnp.linalg.norm(mixed_gradient - reference_gradient)
+        / jnp.linalg.norm(reference_gradient)
+    )
+    assert mixed.values.dtype == jnp.float64
+    assert mixed.sample_values is not None
+    assert mixed.sample_values.dtype == jnp.float64
+    assert mixed.standard_errors.dtype == jnp.float64
+    # A sum of raw moments has a small, cancellation-prone gradient. The MMD
+    # test below applies the tighter relative gate to the training objective.
+    assert 0.0 < relative_error < 2e-5
+    assert abs(float(mixed_loss - reference_loss)) < 1e-6
+    assert jnp.array_equal(explicit_float64.values, objective(params)[1].values)
+
+    model_masks = pad_visible_masks(masks, N_ANCILLAS)
+
+    @jax.jit
+    def unchecked(current_params):
+        return estimate_pauli_z_unchecked(
+            current_params,
+            ansatz.generators,
+            encoder,
+            model_masks,
+            samples=samples,
+            estimator_dtype=jnp.float32,
+        ).values
+
+    assert jnp.allclose(unchecked(params), mixed.values, atol=0.0, rtol=0.0)
+
+
+def test_estimator_dtype_validation(setup) -> None:
+    ansatz, encoders, _targets = setup
+    samples = encoders.sample(jax.random.PRNGKey(43), 32)
+    arguments = (
+        np.zeros(ansatz.n_parameters),
+        ansatz.generators,
+        encoders,
+        np.ones((1, N_VISIBLE)),
+    )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        estimate_pauli_z(
+            *arguments,
+            samples=samples,
+            gemm_dtype=jnp.float32,
+            estimator_dtype=jnp.float32,
+        )
+    with pytest.raises(ValueError, match="must be float32, float64, or None"):
+        estimate_pauli_z(
+            *arguments,
+            samples=samples,
+            estimator_dtype=jnp.bfloat16,
+        )
+
+
 def test_checked_estimator_rejects_non_binary_samples(setup) -> None:
     """A fractional sample matrix would be read mod two by the kernel."""
     ansatz, encoders, _targets = setup

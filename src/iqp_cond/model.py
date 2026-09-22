@@ -196,6 +196,7 @@ class ConditionalModel:
         samples: jnp.ndarray | None = None,
         n_samples: int | None = None,
         gemm_dtype: jnp.dtype | None = None,
+        estimator_dtype: jnp.dtype | None = None,
         return_samples: bool = False,
     ) -> ExpectationEstimate:
         """Estimate visible Pauli-Z moments for every condition and mask."""
@@ -210,6 +211,7 @@ class ConditionalModel:
             samples=samples,
             n_samples=n_samples,
             gemm_dtype=gemm_dtype,
+            estimator_dtype=estimator_dtype,
             return_samples=return_samples,
         )
 
@@ -225,6 +227,7 @@ class ConditionalModel:
         n_samples: int,
         shared_samples: bool = False,
         gemm_dtype: jnp.dtype | None = None,
+        estimator_dtype: jnp.dtype | None = None,
         sample_chunk: int | None = None,
     ) -> ConditionalMMDResult:
         """Condition-balanced multiscale MMD against visible-width targets."""
@@ -247,6 +250,7 @@ class ConditionalModel:
             n_samples=n_samples,
             shared_samples=shared_samples,
             gemm_dtype=gemm_dtype,
+            estimator_dtype=estimator_dtype,
             sample_chunk=sample_chunk,
         )
 

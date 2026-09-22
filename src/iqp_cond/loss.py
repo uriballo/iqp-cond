@@ -33,7 +33,7 @@ import jax
 import jax.numpy as jnp
 
 from .encoders import Encoder
-from .estimator import estimate_pauli_z_unchecked
+from .estimator import _resolve_estimator_dtype, estimate_pauli_z_unchecked
 from .model import pad_visible_masks
 from .operators import OperatorBank, sample_nonidentity_masks_jax
 
@@ -141,6 +141,7 @@ def _condition_value(
     n_ancillas: int,
     samples: jnp.ndarray,
     gemm_dtype: jnp.dtype | None,
+    estimator_dtype: jnp.dtype | None,
     sample_chunk: int | None,
 ) -> jnp.ndarray:
     """Weighted sum of per-mask squared moment differences for one condition.
@@ -164,6 +165,7 @@ def _condition_value(
                 model_masks,
                 samples=samples[:, start : start + sample_chunk],
                 gemm_dtype=gemm_dtype,
+                estimator_dtype=estimator_dtype,
                 return_samples=True,
             ).sample_values
             assert chunk is not None
@@ -184,6 +186,7 @@ def _condition_value(
             model_masks,
             samples=samples,
             gemm_dtype=gemm_dtype,
+            estimator_dtype=estimator_dtype,
             return_samples=True,
         )
         assert model.sample_values is not None
@@ -209,6 +212,7 @@ def mmd(
     n_samples: int,
     shared_samples: bool = False,
     gemm_dtype: jnp.dtype | None = None,
+    estimator_dtype: jnp.dtype | None = None,
     sample_chunk: int | None = None,
 ) -> ConditionalMMDResult:
     """Estimate the condition-balanced multiscale squared MMD.
@@ -224,10 +228,15 @@ def mmd(
     and evaluates every bandwidth's masks on it, whatever the mask source.
     This avoids resampling once per bandwidth.  The default resamples once per
     (bandwidth, condition) entry.
+
+    ``estimator_dtype=jnp.float32`` selects the wider mixed-precision estimator
+    and returns to float64 before the MMD reductions. It is mutually exclusive
+    with the narrower ``gemm_dtype`` option.
     """
     params = jnp.asarray(params, dtype=jnp.float64)
     generators = jnp.asarray(generators, dtype=jnp.float64)
     targets = jnp.asarray(targets, dtype=jnp.float64)
+    estimator_dtype = _resolve_estimator_dtype(gemm_dtype, estimator_dtype)
     if sample_chunk is not None and sample_chunk < 1:
         raise ValueError("sample_chunk must be positive")
     if bank is None:
@@ -270,6 +279,7 @@ def mmd(
             n_samples,
             shared_samples,
             gemm_dtype,
+            estimator_dtype,
             sample_chunk,
         )
 
@@ -305,6 +315,7 @@ def mmd(
                         n_ancillas,
                         samples,
                         gemm_dtype,
+                        estimator_dtype,
                         sample_chunk,
                     ),
                 )
@@ -339,6 +350,7 @@ def mmd(
                     n_ancillas,
                     samples,
                     gemm_dtype,
+                    estimator_dtype,
                     sample_chunk,
                 ),
             )
@@ -356,6 +368,7 @@ def _mmd_from_bank(
     n_samples: int,
     shared_samples: bool,
     gemm_dtype: jnp.dtype | None,
+    estimator_dtype: jnp.dtype | None,
     sample_chunk: int | None,
 ) -> ConditionalMMDResult:
     n_data_qubits = targets.shape[2]
@@ -381,6 +394,7 @@ def _mmd_from_bank(
                     n_ancillas,
                     samples,
                     gemm_dtype,
+                    estimator_dtype,
                     sample_chunk,
                 )
                 for bandwidth in range(bank.n_bandwidths)
@@ -409,6 +423,7 @@ def _mmd_from_bank(
                     n_ancillas,
                     samples,
                     gemm_dtype,
+                    estimator_dtype,
                     sample_chunk,
                 ),
             )

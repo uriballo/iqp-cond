@@ -22,6 +22,7 @@ This installs the checkout in editable mode. Use `uv run` to run Python,
 notebooks, and development commands in the project environment.
 
 ```python
+import jax.numpy as jnp
 import numpy as np
 import iqp_cond as ciqp
 
@@ -72,3 +73,10 @@ custom encoders. Then work through the notebooks:
 
 Importing `iqp_cond` enables JAX float64, which the estimator, loss, and trainer
 use internally. Create JAX arrays after importing the package.
+
+For an opt-in mixed-precision estimator, set
+`TrainingConfig(estimator_dtype=jnp.float32)`. This computes parities and
+phases in float32, evaluates the ratio-phase product in complex64, and returns
+to float64 before statistics and MMD accumulation. The default remains the
+existing float64 path. The narrower `gemm_dtype=jnp.float32` option still
+changes only the final phase contraction; do not set both options.

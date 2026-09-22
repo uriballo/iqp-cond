@@ -41,6 +41,7 @@ or `Z` label for each layer and qubit. Layer zero acts first and cannot include
 layer is the usual RY product state.
 
 ```python
+import jax.numpy as jnp
 import numpy as np
 import iqp_cond as ciqp
 
@@ -85,8 +86,11 @@ updates, batch size 256, learning rates from `1e-2` to `1e-3`, validation every
 validation. The default bandwidth schedule is derived from visible width.
 `mask_refresh="step"` draws a bank for each selected objective cell; use
 `mask_refresh="cache"` to retain a bank for the fit. Reduced precision
-contraction (`gemm_dtype`) and streamed samples (`sample_chunk`) are optional
-memory/performance controls.
+and streamed samples (`sample_chunk`) are optional memory/performance controls.
+`gemm_dtype=jnp.float32` reduces only the final phase contraction.
+`estimator_dtype=jnp.float32` also computes parities and phases in float32 and
+evaluates the ratio-phase product in complex64 before returning to float64 for
+statistics and loss accumulation. The two dtype options are mutually exclusive.
 
 If `initial_params` is omitted, initialization uses pooled training data and a
 mean-covariance prescription, with seeded noise for generator rows involving
@@ -149,9 +153,12 @@ contain only visible bits. Expectation masks are visible-width and are padded
 with identity on ancillas.
 
 The library enables float64 at import because its numerical routines rely on
-that precision. `TrainingConfig.gemm_dtype` can reduce the phase contraction
-precision (for example to `jnp.float32`); reductions are cast back to float64.
-This trades some accuracy for lower memory traffic on supported devices.
+that precision. Leave both dtype options unset for the default path. Use
+`TrainingConfig(gemm_dtype=jnp.float32)` for the conservative phase-contraction
+option, or `TrainingConfig(estimator_dtype=jnp.float32)` for the wider and
+faster mixed-precision estimator. Both modes retain float64 outputs and loss
+accumulation. The wider mode supports only float32 or an explicit float64
+spelling; it rejects float16 and bfloat16.
 
 Exact probabilities and `check_encoder` allocate statevector-scale memory,
 which grows exponentially with the total model qubit count. Use shot-based
