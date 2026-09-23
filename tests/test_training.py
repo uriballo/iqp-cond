@@ -205,13 +205,13 @@ def test_step_refresh_is_the_default_and_cache_changes_the_trajectory(
     assert np.all(np.isfinite(step_result.train_losses))
 
 
-def test_step_refresh_selects_one_uniform_bandwidth_per_update(
+def test_step_refresh_uses_direct_sampling_without_banks(
     model: ciqp.ConditionalModel,
     targets: tuple[np.ndarray, np.ndarray],
     config: ciqp.TrainingConfig,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Training samples one bandwidth while pilot and validation cover all."""
+    """Step refresh samples directly; validation also avoids host banks."""
     training, validation = targets
     config = dataclasses.replace(config, steps=5, validation_interval=5)
     calls: list[tuple[tuple[float, ...], int]] = []
@@ -224,9 +224,7 @@ def test_step_refresh_selects_one_uniform_bandwidth_per_update(
     monkeypatch.setattr(training_module, "operator_bank", recording_bank)
     ciqp.train(model, training, validation, seed=14, config=config)
 
-    expected = training_module._bandwidth_schedule(len(config.sigmas), config.steps, 14)
-    assert calls[:2] == [(config.sigmas, N_CONDITIONS)] * 2
-    assert calls[2:] == [((config.sigmas[index],), 1) for index in expected]
+    assert calls == []
 
 
 def test_cache_refresh_builds_one_full_multiscale_bank(
@@ -235,7 +233,7 @@ def test_cache_refresh_builds_one_full_multiscale_bank(
     config: ciqp.TrainingConfig,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cache mode builds one full training bank and one validation bank."""
+    """Cache mode builds one full training bank; validation samples directly."""
     training, validation = targets
     config = dataclasses.replace(
         config,
@@ -253,7 +251,7 @@ def test_cache_refresh_builds_one_full_multiscale_bank(
     monkeypatch.setattr(training_module, "operator_bank", recording_bank)
     ciqp.train(model, training, validation, seed=14, config=config)
 
-    assert calls == [config.sigmas, config.sigmas]
+    assert calls == [config.sigmas]
 
 
 def test_condition_schedule_is_uniform_and_reproducible() -> None:

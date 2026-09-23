@@ -84,9 +84,10 @@ params = result.best_params
 updates, batch size 256, learning rates from `1e-2` to `1e-3`, validation every
 25 steps, 512 operator draws, and 1000 reference samples for both training and
 validation. The default bandwidth schedule is derived from visible width.
-`mask_refresh="step"` draws a bank for each selected objective cell; use
-`mask_refresh="cache"` to retain a bank for the fit. Reduced precision
-and streamed samples (`sample_chunk`) are optional memory/performance controls.
+`mask_refresh="step"` draws `n_ops` nonidentity masks directly for each selected
+objective cell; use `mask_refresh="cache"` to retain a compressed bank for the
+fit. Reduced precision and streamed samples (`sample_chunk`) are optional
+memory/performance controls.
 `gemm_dtype=jnp.float32` reduces only the final phase contraction.
 `estimator_dtype=jnp.float32` also computes parities and phases in float32 and
 evaluates the ratio-phase product in complex64 before returning to float64 for
