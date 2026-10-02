@@ -27,5 +27,16 @@ prototypes/
 
 # Local benchmarks and documentation
 /benchmarks/
+# Include the conditional pipeline source and docs; keep generated outputs local.
+!/benchmarks/
+/benchmarks/*
+!/benchmarks/__init__.py
+!/benchmarks/README.md
+!/benchmarks/conditional_pipeline/
+!/benchmarks/conditional_pipeline/**
+benchmarks/conditional_pipeline/**/__pycache__/
+benchmarks/conditional_pipeline/results/
+benchmarks/conditional_pipeline/*.jsonl
+benchmarks/conditional_pipeline/*.json
 /docs/
 CONTEXT.md
