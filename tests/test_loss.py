@@ -15,7 +15,14 @@ import numpy as np
 import pytest
 
 import iqp_cond as ciqp
-from iqp_cond.loss import ConditionalMMDResult, hamming_rbf, mmd, target_moments
+from iqp_cond.loss import (
+    ConditionalMMDResult,
+    _fixed_mmd,
+    _fixed_mmd_plan,
+    hamming_rbf,
+    mmd,
+    target_moments,
+)
 from iqp_cond.operators import (
     bank_from_ragged,
     mmd_operator_probability,
@@ -475,10 +482,13 @@ def test_shared_samples_reuses_one_draw_per_condition_with_fresh_masks(
             ).loss,
         )
 
+    # Pytree encoders trace one condition body for every condition, so count
+    # calls relative to the shared layout: one draw per bandwidth there.
     assert np.isfinite(evaluate(True))
-    assert len(calls) == 2
+    shared_calls = len(calls)
+    assert shared_calls in (1, 2)
     assert np.isfinite(evaluate(False))
-    assert len(calls) == 2 * 3
+    assert len(calls) == 3 * shared_calls
 
 
 def test_sample_chunk_matches_the_monolithic_objective() -> None:
@@ -569,3 +579,41 @@ def test_parameter_gradient_matches_finite_differences() -> None:
         ],
     )
     assert np.max(np.abs(gradient - finite)) < 1e-8
+
+
+@pytest.mark.parametrize("axes", ["Y", "YZ"])
+@pytest.mark.parametrize(
+    "precision",
+    [{}, {"estimator_dtype": jnp.float32}, {"gemm_dtype": jnp.float32}],
+)
+def test_fixed_plan_matches_the_fresh_mask_objective(axes, precision) -> None:
+    """A fixed-key plan reproduces the fresh-mask MMD with its randomness."""
+    rng = np.random.default_rng(83)
+    n_qubits, n_visible, n_conditions = 6, 4, 3
+    encoders = ciqp.AngleEncoder(
+        rng.uniform(0.4, 2.4, size=(n_conditions, len(axes), n_qubits)),
+        axes=tuple(axis * n_qubits for axis in axes),
+    )
+    ansatz = ciqp.Ansatz.complete(n_qubits)
+    targets = rng.integers(0, 2, size=(n_conditions, 32, n_visible)).astype(float)
+    params = jnp.asarray(rng.normal(0.0, 0.3, size=ansatz.n_parameters))
+    key = jax.random.PRNGKey(17)
+    options = {"sigmas": SIGMAS, "n_ops": 32, "n_samples": 128}
+
+    sampled = mmd(
+        params, ansatz.generators, encoders, targets, key, **options, **precision
+    )
+    plan = _fixed_mmd_plan(encoders, targets, key, **options)
+    assert plan is not None
+    planned = jax.jit(
+        lambda current, plan: _fixed_mmd(plan, current, ansatz.generators, **precision)
+    )(params, plan)
+
+    # The float32 estimator agrees to single precision between the eager
+    # reference and the compiled plan, which may fuse differently.
+    rtol = 1e-5 if "estimator_dtype" in precision else 1e-12
+    np.testing.assert_allclose(
+        planned.per_bandwidth_condition,
+        sampled.per_bandwidth_condition,
+        rtol=rtol,
+    )

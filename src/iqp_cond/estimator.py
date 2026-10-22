@@ -142,6 +142,23 @@ def _resolve_estimator_dtype(
     return jnp.float32
 
 
+def _sample_values(
+    ratios: jnp.ndarray,
+    phases: jnp.ndarray,
+    resolved_dtype: jnp.dtype | None,
+) -> jnp.ndarray:
+    """Return the float64 per-sample values ``Re[R exp(i Delta f)]``.
+
+    ``resolved_dtype`` comes from :func:`_resolve_estimator_dtype`; float32
+    evaluates the product in complex64 before returning to float64.
+    """
+    if resolved_dtype is not None:
+        ratios = ratios.astype(jnp.complex64)
+        imaginary_unit = jnp.asarray(1j, dtype=jnp.complex64)
+        return jnp.real(ratios * jnp.exp(imaginary_unit * phases)).astype(jnp.float64)
+    return jnp.real(ratios * jnp.exp(1j * phases))
+
+
 def _estimate(
     params: jnp.ndarray,
     generators: jnp.ndarray,
@@ -162,14 +179,7 @@ def _estimate(
         gemm_dtype,
         resolved_dtype,
     )
-    if resolved_dtype is not None:
-        ratios = ratios.astype(jnp.complex64)
-        imaginary_unit = jnp.asarray(1j, dtype=jnp.complex64)
-        sample_values = jnp.real(ratios * jnp.exp(imaginary_unit * phases)).astype(
-            jnp.float64
-        )
-    else:
-        sample_values = jnp.real(ratios * jnp.exp(1j * phases))
+    sample_values = _sample_values(ratios, phases, resolved_dtype)
     values = jnp.mean(sample_values, axis=1)
     return ExpectationEstimate(
         values,

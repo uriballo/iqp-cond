@@ -24,6 +24,12 @@ import optax
 
 from .estimator import _resolve_estimator_dtype
 from .initialization import parameters_from_data
+from .loss import (
+    _dynamic_encoder_support,
+    _fixed_mmd,
+    _fixed_mmd_plan,
+    _FixedMMDPlan,
+)
 from .model import ConditionalModel
 from .operators import OperatorBank, expected_bodyness_sigmas, operator_bank
 
@@ -209,38 +215,6 @@ def _select_condition(bank: OperatorBank, condition: int) -> OperatorBank:
         n_visible=bank.n_visible,
         n_masks=bank.n_masks,
         widths=bank.widths,
-    )
-
-
-def _pytree_encoder_signature(
-    encoder: object,
-) -> tuple[object, tuple[tuple[tuple[int, ...], str], ...]] | None:
-    """Return a stable JAX signature, or ``None`` for opaque encoders.
-
-    Only array leaves are accepted, because passing an arbitrary Python object
-    through ``jit`` would make the dynamic path fail during tracing.  The
-    fallback matters for user-defined encoders that are deliberately not
-    registered as pytrees.
-    """
-    leaves, structure = jax.tree_util.tree_flatten(encoder)
-    if not leaves:
-        return None
-    signatures = []
-    for leaf in leaves:
-        if not isinstance(leaf, (jax.Array, np.ndarray)):
-            return None
-        signatures.append((tuple(leaf.shape), np.dtype(leaf.dtype).str))
-    return structure, tuple(signatures)
-
-
-def _dynamic_encoder_support(encoders: object) -> bool:
-    """Whether all selected encoders can share one JIT-compiled step."""
-    signatures = [
-        _pytree_encoder_signature(encoders.select(i))
-        for i in range(encoders.n_conditions)
-    ]
-    return signatures[0] is not None and all(
-        signature == signatures[0] for signature in signatures[1:]
     )
 
 
@@ -472,11 +446,42 @@ def train(
             for condition in range(encoders.n_conditions)
         )
 
-    def validation_loss(current_params: jnp.ndarray) -> jnp.ndarray:
+    validation_key = jax.random.PRNGKey(seed + 1_000_000)
+    device_validation_targets = jnp.asarray(validation_targets)
+    # Validation randomness is fixed, so every checkpoint redraws the same
+    # masks and samples; the plan keeps them, the ratios, and the target
+    # moments for the whole fit and only the phases are recomputed.
+    validation_plan = _fixed_mmd_plan(
+        encoders,
+        device_validation_targets,
+        validation_key,
+        sigmas=sigmas,
+        n_ops=config.validation_n_ops,
+        n_samples=config.validation_mc_samples,
+    )
+
+    @jax.jit
+    def planned_validation_loss(
+        current_params: jnp.ndarray,
+        plan: _FixedMMDPlan,
+    ) -> jnp.ndarray:
+        return _fixed_mmd(
+            plan,
+            current_params,
+            model.generators,
+            gemm_dtype=config.gemm_dtype,
+            estimator_dtype=config.estimator_dtype,
+        ).loss
+
+    @jax.jit
+    def sampled_validation_loss(
+        current_params: jnp.ndarray,
+        targets: jnp.ndarray,
+    ) -> jnp.ndarray:
         return model.mmd(
             current_params,
-            jnp.asarray(validation_targets),
-            jax.random.PRNGKey(seed + 1_000_000),
+            targets,
+            validation_key,
             sigmas=sigmas,
             n_ops=config.validation_n_ops,
             n_samples=config.validation_mc_samples,
@@ -484,7 +489,10 @@ def train(
             estimator_dtype=config.estimator_dtype,
         ).loss
 
-    evaluate_validation = jax.jit(validation_loss)
+    def evaluate_validation(current_params: jnp.ndarray) -> jnp.ndarray:
+        if validation_plan is None:
+            return sampled_validation_loss(current_params, device_validation_targets)
+        return planned_validation_loss(current_params, validation_plan)
 
     train_steps = []
     train_losses = []

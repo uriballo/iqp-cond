@@ -154,6 +154,34 @@ def layered_amplitudes(
     return (zero_state + one_state) / scale, (zero_state - one_state) / scale
 
 
+@jax.jit
+def _product_ratios(
+    amp_zero: jnp.ndarray,
+    amp_one: jnp.ndarray,
+    samples: jnp.ndarray,
+    masks: jnp.ndarray,
+) -> jnp.ndarray:
+    """Product-state ratio kernel, compiled once so eager calls dispatch once."""
+    zero_to_one = _safe_ratio(amp_one, amp_zero)[:, None, :]
+    one_to_zero = _safe_ratio(amp_zero, amp_one)[:, None, :]
+    local = jnp.where(samples == 0.0, zero_to_one, one_to_zero)
+    vanishing = local == 0.0
+    log_magnitude = jnp.log(jnp.where(vanishing, 1.0, jnp.abs(local)))
+    is_complex = jnp.iscomplexobj(local)
+    # Real ratios contract a negative-factor count, whose parity is the
+    # exact sign; complex ratios contract their arguments.
+    angle = jnp.angle(local) if is_complex else (local < 0.0)
+    features = jnp.stack(
+        [log_magnitude, angle.astype(jnp.float64), vanishing.astype(jnp.float64)],
+    )
+    totals = jnp.einsum("kcsn,rn->kcsr", features, masks.astype(jnp.float64))
+    if is_complex:
+        ratios = jnp.exp(totals[0] + 1j * totals[1])
+    else:
+        ratios = jnp.exp(totals[0]) * (1.0 - 2.0 * jnp.mod(totals[1], 2.0))
+    return jnp.where(totals[2] > 0.0, 0.0, ratios)
+
+
 @dataclass(frozen=True)
 class _ProductEncoder:
     """Batched product-state encoder with per-qubit local amplitudes.
@@ -194,24 +222,7 @@ class _ProductEncoder:
         magnitudes, the signs or phases, and the vanishing factors contract
         separately, so a zero local factor still gives an exact zero ratio.
         """
-        zero_to_one = _safe_ratio(self.amp_one, self.amp_zero)[:, None, :]
-        one_to_zero = _safe_ratio(self.amp_zero, self.amp_one)[:, None, :]
-        local = jnp.where(samples == 0.0, zero_to_one, one_to_zero)
-        vanishing = local == 0.0
-        log_magnitude = jnp.log(jnp.where(vanishing, 1.0, jnp.abs(local)))
-        is_complex = jnp.iscomplexobj(local)
-        # Real ratios contract a negative-factor count, whose parity is the
-        # exact sign; complex ratios contract their arguments.
-        angle = jnp.angle(local) if is_complex else (local < 0.0)
-        features = jnp.stack(
-            [log_magnitude, angle.astype(jnp.float64), vanishing.astype(jnp.float64)],
-        )
-        totals = jnp.einsum("kcsn,rn->kcsr", features, masks.astype(jnp.float64))
-        if is_complex:
-            ratios = jnp.exp(totals[0] + 1j * totals[1])
-        else:
-            ratios = jnp.exp(totals[0]) * (1.0 - 2.0 * jnp.mod(totals[1], 2.0))
-        return jnp.where(totals[2] > 0.0, 0.0, ratios)
+        return _product_ratios(self.amp_zero, self.amp_one, samples, masks)
 
     def post_hadamard_amplitudes(self) -> jnp.ndarray:
         """Return ``(n_conditions, 2**n_qubits)`` little-endian amplitudes."""
