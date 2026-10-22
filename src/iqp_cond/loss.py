@@ -162,54 +162,28 @@ def _condition_value(
     n_samples = samples.shape[1]
     model_masks = pad_visible_masks(visible_masks, n_ancillas)
     if sample_chunk is not None and 0 < sample_chunk < n_samples:
-
-        def chunk_moments(
-            chunk_samples: jnp.ndarray,
-        ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        sums = None
+        square_sums = None
+        for start in range(0, n_samples, sample_chunk):
             chunk = estimate_pauli_z_unchecked(
                 params,
                 generators,
                 encoder,
                 model_masks,
-                samples=chunk_samples,
+                samples=samples[:, start : start + sample_chunk],
                 gemm_dtype=gemm_dtype,
                 estimator_dtype=estimator_dtype,
                 return_samples=True,
             ).sample_values
             assert chunk is not None
-            return jnp.sum(chunk, axis=1), jnp.sum(chunk**2, axis=1)
-
-        def accumulate(
-            carry: tuple[jnp.ndarray, jnp.ndarray],
-            chunk_samples: jnp.ndarray,
-        ) -> tuple[tuple[jnp.ndarray, jnp.ndarray], None]:
-            chunk_sums, chunk_squares = chunk_moments(chunk_samples)
-            return (carry[0] + chunk_sums, carry[1] + chunk_squares), None
-
-        # Full chunks run in one scan, so the compiled program does not grow
-        # with the number of chunks; a ragged tail is evaluated once after it.
-        # The accumulation order matches a left-to-right pass over the chunks.
-        n_full = n_samples // sample_chunk
-        full = samples[:, : n_full * sample_chunk].reshape(
-            samples.shape[0],
-            n_full,
-            sample_chunk,
-            samples.shape[2],
-        )
-        full = jnp.swapaxes(full, 0, 1)
-        moments = chunk_moments(full[0])
-        if _traced(params, samples):
-            moments, _ = jax.lax.scan(accumulate, moments, full[1:])
-        else:
-            # Eager calls would compile the scan body on every call.
-            for chunk_samples in full[1:]:
-                moments, _ = accumulate(moments, chunk_samples)
-        sums, square_sums = moments
-        if n_full * sample_chunk < n_samples:
-            (sums, square_sums), _ = accumulate(
-                (sums, square_sums),
-                samples[:, n_full * sample_chunk :],
+            chunk_sums = jnp.sum(chunk, axis=1)
+            chunk_squares = jnp.sum(chunk**2, axis=1)
+            sums = chunk_sums if sums is None else sums + chunk_sums
+            square_sums = (
+                chunk_squares if square_sums is None else square_sums + chunk_squares
             )
+        assert sums is not None
+        assert square_sums is not None
         values = sums / n_samples
     else:
         model = estimate_pauli_z_unchecked(
@@ -318,7 +292,6 @@ def mmd(
 
     assert sigmas is not None and n_ops is not None
     n_bandwidths = len(sigmas)
-    traced = _traced(params, generators, targets, key)
 
     def condition_values(
         encoder: Encoder,
@@ -373,7 +346,6 @@ def mmd(
 
         per_condition = _per_condition(
             encoders,
-            traced,
             shared_condition,
             targets,
             mask_keys,
@@ -397,7 +369,7 @@ def mmd(
             return condition_values(encoder, target, samples, masks_and_weights)
 
         bandwidth_values.append(
-            _per_condition(encoders, traced, fresh_condition, targets, keys[bandwidth]),
+            _per_condition(encoders, fresh_condition, targets, keys[bandwidth]),
         )
     return _result(jnp.stack(bandwidth_values))
 
@@ -418,7 +390,6 @@ def _mmd_from_bank(
     n_data_qubits = targets.shape[2]
     n_conditions = targets.shape[0]
     n_ancillas = encoders.n_qubits - n_data_qubits
-    traced = _traced(params, generators, targets, key)
     # Condition-major copies, so the per-condition map slices one bank entry
     # row per condition.
     condition_masks = jnp.swapaxes(bank.masks, 0, 1)
@@ -469,7 +440,6 @@ def _mmd_from_bank(
 
         per_condition = _per_condition(
             encoders,
-            traced,
             shared_condition,
             targets,
             condition_masks,
@@ -497,7 +467,6 @@ def _mmd_from_bank(
         bandwidth_values.append(
             _per_condition(
                 encoders,
-                traced,
                 bank_condition,
                 targets,
                 condition_masks,
@@ -613,8 +582,8 @@ def _fixed_mmd(
 ) -> ConditionalMMDResult:
     """Evaluate a :class:`_FixedMMDPlan` at ``params``.
 
-    Entries run one at a time through ``lax.map``, so the live phase tensor
-    covers a single ``(bandwidth, condition)`` entry.
+    Bandwidths run one at a time and their conditions are vectorized, so the
+    live phase tensor covers one bandwidth's conditions.
     """
     params = jnp.asarray(params, dtype=jnp.float64)
     generators = jnp.asarray(generators, dtype=jnp.float64)
@@ -641,23 +610,27 @@ def _fixed_mmd(
         per_mask = model_squares - 2.0 * values * target_means + target_squares
         return jnp.sum(per_mask * weights)
 
-    values = jax.lax.map(
-        entry_value,
-        (
-            plan.masks,
-            plan.weights,
-            plan.samples,
-            plan.ratios,
-            plan.target_means,
-            plan.target_squares,
-        ),
+    entries = (
+        plan.masks,
+        plan.weights,
+        plan.samples,
+        plan.ratios,
+        plan.target_means,
+        plan.target_squares,
     )
-    return _result(values.reshape(plan.n_bandwidths, plan.n_conditions))
-
-
-def _traced(*values: object) -> bool:
-    """Whether any value is a tracer, so a JAX transformation is active."""
-    return any(isinstance(value, jax.core.Tracer) for value in values)
+    by_bandwidth = [
+        entry.reshape(plan.n_bandwidths, plan.n_conditions, *entry.shape[1:])
+        for entry in entries
+    ]
+    values = jnp.stack(
+        [
+            jax.vmap(lambda *inputs: entry_value(inputs))(
+                *(entry[bandwidth] for entry in by_bandwidth),
+            )
+            for bandwidth in range(plan.n_bandwidths)
+        ],
+    )
+    return _result(values)
 
 
 def _pytree_encoder_signature(
@@ -698,21 +671,23 @@ def _dynamic_encoder_support(encoders: Encoder) -> bool:
 
 def _per_condition(
     encoders: Encoder,
-    traced: bool,
     body: Callable[..., jnp.ndarray],
     *per_condition_inputs: jnp.ndarray,
 ) -> jnp.ndarray:
     """Stack ``body(encoder_c, *inputs[c])`` over the conditions.
 
-    Under tracing, encoders whose selections share one pytree signature are
-    stacked and run through ``lax.map``, so the program is traced once whatever
-    the condition count, and conditions still run one at a time to bound
-    memory.  Opaque encoders, and eager calls, which would otherwise compile
-    the map body on every call, use a Python loop.
+    Encoders whose selections share one pytree signature are stacked and
+    vectorized with ``vmap``, so the program is traced once whatever the
+    condition count and the conditions run in parallel.  The product
+    encoder's ratio contraction keeps one condition's live buffer at
+    ``(samples, masks)``, so the batch stays below the former
+    ``(samples, masks, qubits)`` buffer of a single condition whenever the
+    conditions do not outnumber the qubits.  Opaque encoders fall back to a
+    Python loop.
     """
     n_conditions = encoders.n_conditions
     selected = [encoders.select(condition) for condition in range(n_conditions)]
-    if n_conditions == 1 or not traced or not _dynamic_encoder_support(encoders):
+    if n_conditions == 1 or not _dynamic_encoder_support(encoders):
         return jnp.stack(
             [
                 body(encoder, *(values[condition] for values in per_condition_inputs))
@@ -720,10 +695,7 @@ def _per_condition(
             ],
         )
     stacked = jax.tree_util.tree_map(lambda *leaves: jnp.stack(leaves), *selected)
-    return jax.lax.map(
-        lambda inputs: body(*inputs),
-        (stacked, *per_condition_inputs),
-    )
+    return jax.vmap(body)(stacked, *per_condition_inputs)
 
 
 def _result(per_bandwidth_condition: jnp.ndarray) -> ConditionalMMDResult:
