@@ -185,16 +185,33 @@ class _ProductEncoder:
         ).astype(jnp.float64)
 
     def amplitude_ratios(self, samples: jnp.ndarray, masks: jnp.ndarray) -> jnp.ndarray:
-        """Return ``(n_conditions, n_samples, n_masks)`` product ratios."""
-        zero_to_one = _safe_ratio(self.amp_one, self.amp_zero)[:, None, None, :]
-        one_to_zero = _safe_ratio(self.amp_zero, self.amp_one)[:, None, None, :]
-        local_flip_ratios = jnp.where(
-            samples[:, :, None, :] == 0.0,
-            zero_to_one,
-            one_to_zero,
+        """Return ``(n_conditions, n_samples, n_masks)`` product ratios.
+
+        A product-state ratio factorizes over the flipped qubits, so its
+        logarithm is a contraction of the per-sample local log-ratios with the
+        masks.  Running that contraction as one matrix product avoids the
+        ``(samples, masks, qubits)`` intermediate of the direct product.  The
+        magnitudes, the signs or phases, and the vanishing factors contract
+        separately, so a zero local factor still gives an exact zero ratio.
+        """
+        zero_to_one = _safe_ratio(self.amp_one, self.amp_zero)[:, None, :]
+        one_to_zero = _safe_ratio(self.amp_zero, self.amp_one)[:, None, :]
+        local = jnp.where(samples == 0.0, zero_to_one, one_to_zero)
+        vanishing = local == 0.0
+        log_magnitude = jnp.log(jnp.where(vanishing, 1.0, jnp.abs(local)))
+        is_complex = jnp.iscomplexobj(local)
+        # Real ratios contract a negative-factor count, whose parity is the
+        # exact sign; complex ratios contract their arguments.
+        angle = jnp.angle(local) if is_complex else (local < 0.0)
+        features = jnp.stack(
+            [log_magnitude, angle.astype(jnp.float64), vanishing.astype(jnp.float64)],
         )
-        selected = jnp.where(masks[None, None, :, :] == 1.0, local_flip_ratios, 1.0)
-        return jnp.prod(selected, axis=-1)
+        totals = jnp.einsum("kcsn,rn->kcsr", features, masks.astype(jnp.float64))
+        if is_complex:
+            ratios = jnp.exp(totals[0] + 1j * totals[1])
+        else:
+            ratios = jnp.exp(totals[0]) * (1.0 - 2.0 * jnp.mod(totals[1], 2.0))
+        return jnp.where(totals[2] > 0.0, 0.0, ratios)
 
     def post_hadamard_amplitudes(self) -> jnp.ndarray:
         """Return ``(n_conditions, 2**n_qubits)`` little-endian amplitudes."""

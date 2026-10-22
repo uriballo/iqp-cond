@@ -459,7 +459,9 @@ def test_float32_estimator_keeps_float64_outputs_and_gradients_close(
             estimator_dtype=jnp.float32,
         ).values
 
-    assert jnp.allclose(unchecked(params), mixed.values, atol=0.0, rtol=0.0)
+    # Compiled and eager evaluation may fuse the ratio contraction differently,
+    # so they agree to single precision rather than bit for bit.
+    assert jnp.allclose(unchecked(params), mixed.values, atol=1e-6, rtol=0.0)
 
 
 def test_estimator_dtype_validation(setup) -> None:
