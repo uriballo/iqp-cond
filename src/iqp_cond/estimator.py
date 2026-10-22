@@ -150,13 +150,21 @@ def _sample_values(
     """Return the float64 per-sample values ``Re[R exp(i Delta f)]``.
 
     ``resolved_dtype`` comes from :func:`_resolve_estimator_dtype`; float32
-    evaluates the product in complex64 before returning to float64.
+    evaluates the product in single precision before returning to float64.
     """
+    # Re[R exp(i phi)] = Re R cos phi - Im R sin phi, which skips the complex
+    # exponential and, for real ratios, the sine and the imaginary part.
     if resolved_dtype is not None:
-        ratios = ratios.astype(jnp.complex64)
-        imaginary_unit = jnp.asarray(1j, dtype=jnp.complex64)
-        return jnp.real(ratios * jnp.exp(imaginary_unit * phases)).astype(jnp.float64)
-    return jnp.real(ratios * jnp.exp(1j * phases))
+        phases = phases.astype(jnp.float32)
+        if jnp.iscomplexobj(ratios):
+            ratios = ratios.astype(jnp.complex64)
+        else:
+            ratios = ratios.astype(jnp.float32)
+    if jnp.iscomplexobj(ratios):
+        values = jnp.real(ratios) * jnp.cos(phases) - jnp.imag(ratios) * jnp.sin(phases)
+    else:
+        values = ratios * jnp.cos(phases)
+    return values.astype(jnp.float64)
 
 
 def _estimate(
@@ -258,9 +266,9 @@ def estimate_pauli_z(
 
     ``gemm_dtype`` changes only the final phase contraction. Set
     ``estimator_dtype=jnp.float32`` to also construct parities and phases in
-    float32 and evaluate the ratio-phase product in complex64. The estimator
-    casts per-sample values back to float64 before statistics. The two dtype
-    options are mutually exclusive.
+    float32 and evaluate the ratio-phase product in single precision. The
+    estimator casts per-sample values back to float64 before statistics. The
+    two dtype options are mutually exclusive.
     """
     params = jnp.asarray(params, dtype=jnp.float64)
     generators = jnp.asarray(generators, dtype=jnp.float64)

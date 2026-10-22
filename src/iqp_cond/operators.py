@@ -87,7 +87,7 @@ def sample_nonidentity_masks_jax(
     key: jax.Array,
     n_ops: int,
     n_visible: int,
-    sigma: float,
+    sigma: float | jax.Array,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Draw ``n_ops`` nonidentity masks from the Hamming-RBF mask law, in JAX.
 
@@ -103,7 +103,8 @@ def sample_nonidentity_masks_jax(
     """
     if n_ops < 1 or n_visible < 1:
         raise ValueError("n_ops and n_visible must be positive")
-    if sigma <= 0.0:
+    # A traced sigma, as in the trainer's shared step, is validated upstream.
+    if not isinstance(sigma, jax.core.Tracer) and sigma <= 0.0:
         raise ValueError("sigma must be positive")
     p = mmd_operator_probability(sigma)
     k = jnp.arange(n_visible + 1, dtype=jnp.float64)

@@ -341,7 +341,7 @@ def mmd(
             sample_chunk,
         )
 
-    def fresh_masks(mask_key: jax.Array, sigma: float):
+    def fresh_masks(mask_key: jax.Array, sigma: float | jax.Array):
         return sample_nonidentity_masks_jax(mask_key, n_ops, n_data_qubits, sigma)
 
     if shared_samples:
@@ -365,7 +365,7 @@ def mmd(
                         encoder,
                         target,
                         samples,
-                        fresh_masks(condition_mask_keys[bandwidth], float(sigma)),
+                        fresh_masks(condition_mask_keys[bandwidth], sigma),
                     )
                     for bandwidth, sigma in enumerate(sigmas)
                 ],
@@ -390,7 +390,7 @@ def mmd(
             encoder: Encoder,
             target: jnp.ndarray,
             entry_keys: jax.Array,
-            sigma: float = float(sigma),
+            sigma: float | jax.Array = sigma,
         ) -> jnp.ndarray:
             masks_and_weights = fresh_masks(entry_keys[0], sigma)
             samples = encoder.sample(entry_keys[1], n_samples)

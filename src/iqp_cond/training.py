@@ -79,8 +79,8 @@ class TrainingConfig:
     mode helps on GPUs; the reductions stay float64.
 
     ``estimator_dtype=jnp.float32`` also runs parity and phase construction in
-    single precision, casts amplitude ratios to complex64, and evaluates the
-    complex exponential there. It returns to float64 before statistics and MMD
+    single precision and evaluates the ratio-phase product there, in complex64
+    only for complex ratios. It returns to float64 before statistics and MMD
     accumulation. It is mutually exclusive with ``gemm_dtype``. ``None``
     retains the default float64 estimator.
 
@@ -353,11 +353,22 @@ def train(
         )
     dynamic_encoder = _dynamic_encoder_support(encoders)
 
-    def compile_training_step(
-        closed_encoder: object | None,
-        selected_sigma: float | None,
-    ):
-        """Compile a shared dynamic step or an opaque-encoder closure."""
+    # The whole schedule lives on the device, so each update passes only the
+    # step, condition, and bandwidth scalars and slices its batch in the step.
+    device_training_targets = jnp.asarray(training_targets)
+    device_batch_indices = jnp.asarray(batch_indices)
+    sigma_values = tuple(jnp.asarray(sigma, dtype=jnp.float64) for sigma in sigmas)
+    selected_encoders = tuple(
+        encoders.select(condition) for condition in range(encoders.n_conditions)
+    )
+
+    def make_training_step(closed_encoder: object | None):
+        """Compile one step for every bandwidth, sharing or closing the encoder.
+
+        The bandwidth enters as a traced sigma under per-step refresh and
+        through the selected bank under cache refresh, so one compiled program
+        serves every bandwidth whose bank shape agrees.
+        """
 
         def training_loss(
             current_params: jnp.ndarray,
@@ -365,6 +376,7 @@ def train(
             current_bank: OperatorBank | None,
             step_key: jax.Array,
             selected_encoder: object,
+            sigma: jax.Array | None,
         ) -> jnp.ndarray:
             active_encoder = (
                 selected_encoder if closed_encoder is None else closed_encoder
@@ -374,7 +386,7 @@ def train(
                 active_encoder,
                 n_visible=model.n_visible,
             )
-            if selected_sigma is None:
+            if current_bank is not None:
                 return selected_model.mmd(
                     current_params,
                     target_batch,
@@ -390,7 +402,7 @@ def train(
                 current_params,
                 target_batch,
                 step_key,
-                sigmas=(selected_sigma,),
+                sigmas=(sigma,),
                 n_ops=config.n_ops,
                 n_samples=config.mc_samples,
                 shared_samples=True,
@@ -405,17 +417,21 @@ def train(
         def training_step(
             current_params: jnp.ndarray,
             current_optimizer_state: optax.OptState,
-            target_batch: jnp.ndarray,
+            step: jax.Array,
+            condition: jax.Array,
             current_bank: OperatorBank | None,
-            step_key: jax.Array,
             selected_encoder: object,
+            sigma: jax.Array | None,
         ) -> tuple[jnp.ndarray, jnp.ndarray, optax.OptState]:
+            indices = device_batch_indices[step, condition]
+            target_batch = device_training_targets[condition, indices][None]
             loss, gradient = jax.value_and_grad(training_loss)(
                 current_params,
                 target_batch,
                 current_bank,
-                step_key,
+                jax.random.fold_in(random_key, step),
                 selected_encoder,
+                sigma,
             )
             updates, new_optimizer_state = optimizer.update(
                 gradient,
@@ -428,22 +444,12 @@ def train(
         return training_step
 
     if dynamic_encoder:
-        shared_training_steps = tuple(
-            compile_training_step(None, sigma if config.mask_refresh == STEP else None)
-            for sigma in sigmas
-        )
+        shared_training_step = make_training_step(None)
         training_steps = None
     else:
-        shared_training_steps = None
+        shared_training_step = None
         training_steps = tuple(
-            tuple(
-                compile_training_step(
-                    encoders.select(condition),
-                    sigma if config.mask_refresh == STEP else None,
-                )
-                for sigma in sigmas
-            )
-            for condition in range(encoders.n_conditions)
+            make_training_step(encoder) for encoder in selected_encoders
         )
 
     validation_key = jax.random.PRNGKey(seed + 1_000_000)
@@ -518,27 +524,27 @@ def train(
         condition = int(condition_indices[step])
         if config.mask_refresh == STEP:
             training_bank = None
+            sigma = sigma_values[bandwidth]
         else:
             assert cached_training_banks is not None
             training_bank = cached_training_banks[bandwidth][condition]
-        indices = batch_indices[step, condition]
-        batch = training_targets[condition : condition + 1, indices]
-        step_key = jax.random.fold_in(random_key, step)
+            sigma = None
         if dynamic_encoder:
-            assert shared_training_steps is not None
-            training_step = shared_training_steps[bandwidth]
-            step_encoder = encoders.select(condition)
+            assert shared_training_step is not None
+            training_step = shared_training_step
+            step_encoder = selected_encoders[condition]
         else:
             assert training_steps is not None
-            training_step = training_steps[condition][bandwidth]
+            training_step = training_steps[condition]
             step_encoder = ()
         loss, params, optimizer_state = training_step(
             params,
             optimizer_state,
-            jnp.asarray(batch),
+            step,
+            condition,
             training_bank,
-            step_key,
             step_encoder,
+            sigma,
         )
         train_steps.append(step + 1)
         # Defer the device sync so Python does not block on each optimizer update.
