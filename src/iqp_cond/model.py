@@ -19,13 +19,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from ._layout import ancilla_support, pad_visible_masks
 from .encoders import Encoder
+from .estimator import ExpectationEstimate, estimate_pauli_z
+from .loss import ConditionalMMDResult, mmd
 
 if TYPE_CHECKING:
     import pennylane as qml
 
-    from .estimator import ExpectationEstimate
-    from .loss import ConditionalMMDResult
     from .operators import OperatorBank
 
 __all__ = [
@@ -86,46 +87,6 @@ class Ansatz:
         two_body[np.arange(left.size), right] = 1.0
         generators = np.concatenate([np.eye(n_qubits, dtype=np.float64), two_body])
         return cls(generators=generators, name="complete")
-
-
-def ancilla_support(
-    generators: jnp.ndarray | np.ndarray,
-    n_visible: int,
-) -> np.ndarray:
-    """Return the parameter mask whose generators act on an ancilla qubit.
-
-    Under the visible-first ordering this is the set of parameters that have no
-    data-based initialization and receive seeded noise instead; pass it to
-    :func:`iqp_cond.parameters_from_data`.
-    """
-    rows = np.asarray(generators)
-    if rows.ndim != 2:
-        raise ValueError("generators must have shape (n_generators, n_qubits)")
-    if not 0 <= n_visible <= rows.shape[1]:
-        raise ValueError("n_visible must be between zero and the register width")
-    return np.any(rows[:, n_visible:] != 0, axis=1)
-
-
-def pad_visible_masks(
-    masks: jnp.ndarray | np.ndarray,
-    n_ancillas: int,
-) -> jnp.ndarray:
-    """Extend visible-qubit masks to the model register by zero padding.
-
-    ``masks`` has shape ``(n_masks, n_visible)``; the result has shape
-    ``(n_masks, n_visible + n_ancillas)``.
-    """
-    masks = jnp.asarray(masks)
-    if n_ancillas < 0:
-        raise ValueError("n_ancillas must be nonnegative")
-    if masks.ndim == 1:
-        masks = masks[None, :]
-    if masks.ndim != 2:
-        raise ValueError("masks must have shape (n_masks, n_visible)")
-    if n_ancillas == 0:
-        return masks
-    zeros = jnp.zeros((masks.shape[0], n_ancillas), dtype=masks.dtype)
-    return jnp.concatenate([masks, zeros], axis=1)
 
 
 @dataclass(frozen=True)
@@ -200,8 +161,6 @@ class ConditionalModel:
         return_samples: bool = False,
     ) -> ExpectationEstimate:
         """Estimate visible Pauli-Z moments for every condition and mask."""
-        from .estimator import estimate_pauli_z
-
         return estimate_pauli_z(
             params,
             self.generators,
@@ -231,8 +190,6 @@ class ConditionalModel:
         sample_chunk: int | None = None,
     ) -> ConditionalMMDResult:
         """Condition-balanced multiscale MMD against visible-width targets."""
-        from .loss import mmd
-
         if targets.shape[-1] != self.visible:
             raise ValueError(
                 f"targets have {targets.shape[-1]} visible qubits but the model "

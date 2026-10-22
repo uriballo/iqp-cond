@@ -34,14 +34,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from ._layout import pad_visible_masks
+from ._precision import resolve_estimator_dtype
 from .encoders import Encoder
 from .estimator import (
     _phase_differences,
-    _resolve_estimator_dtype,
     _sample_values,
     estimate_pauli_z_unchecked,
 )
-from .model import pad_visible_masks
 from .operators import OperatorBank, sample_nonidentity_masks_jax
 
 __all__ = [
@@ -243,7 +243,7 @@ def mmd(
     params = jnp.asarray(params, dtype=jnp.float64)
     generators = jnp.asarray(generators, dtype=jnp.float64)
     targets = jnp.asarray(targets, dtype=jnp.float64)
-    estimator_dtype = _resolve_estimator_dtype(gemm_dtype, estimator_dtype)
+    estimator_dtype = resolve_estimator_dtype(gemm_dtype, estimator_dtype)
     if sample_chunk is not None and sample_chunk < 1:
         raise ValueError("sample_chunk must be positive")
     if bank is None:
@@ -587,7 +587,7 @@ def _fixed_mmd(
     """
     params = jnp.asarray(params, dtype=jnp.float64)
     generators = jnp.asarray(generators, dtype=jnp.float64)
-    resolved_dtype = _resolve_estimator_dtype(gemm_dtype, estimator_dtype)
+    resolved_dtype = resolve_estimator_dtype(gemm_dtype, estimator_dtype)
 
     def entry_value(
         inputs: tuple[jnp.ndarray, ...],

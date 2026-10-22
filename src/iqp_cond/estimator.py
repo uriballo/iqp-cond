@@ -22,8 +22,9 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 
+from ._layout import pad_visible_masks
+from ._precision import resolve_estimator_dtype
 from .encoders import Encoder
-from .model import pad_visible_masks
 
 __all__ = [
     "ExpectationEstimate",
@@ -103,7 +104,7 @@ def _phase_differences(
     the complex estimator arithmetic in single precision before returning to
     float64 for statistics and loss accumulation.
     """
-    resolved_dtype = _resolve_estimator_dtype(gemm_dtype, estimator_dtype)
+    resolved_dtype = resolve_estimator_dtype(gemm_dtype, estimator_dtype)
     if resolved_dtype is not None:
         samples = samples.astype(resolved_dtype)
         generators = generators.astype(resolved_dtype)
@@ -125,23 +126,6 @@ def _phase_differences(
     return jnp.einsum("bsm,rm->bsr", sample_characters, weighted_flips)
 
 
-def _resolve_estimator_dtype(
-    gemm_dtype: jnp.dtype | None,
-    estimator_dtype: jnp.dtype | None,
-) -> jnp.dtype | None:
-    """Validate precision options and normalize the estimator compute dtype."""
-    if gemm_dtype is not None and estimator_dtype is not None:
-        raise ValueError("gemm_dtype and estimator_dtype are mutually exclusive")
-    if estimator_dtype is None:
-        return None
-    dtype = jnp.dtype(estimator_dtype)
-    if dtype == jnp.dtype(jnp.float64):
-        return None
-    if dtype != jnp.dtype(jnp.float32):
-        raise ValueError("estimator_dtype must be float32, float64, or None")
-    return jnp.float32
-
-
 def _sample_values(
     ratios: jnp.ndarray,
     phases: jnp.ndarray,
@@ -149,7 +133,7 @@ def _sample_values(
 ) -> jnp.ndarray:
     """Return the float64 per-sample values ``Re[R exp(i Delta f)]``.
 
-    ``resolved_dtype`` comes from :func:`_resolve_estimator_dtype`; float32
+    ``resolved_dtype`` comes from :func:`resolve_estimator_dtype`; float32
     evaluates the product in single precision before returning to float64.
     """
     # Re[R exp(i phi)] = Re R cos phi - Im R sin phi, which skips the complex
@@ -177,7 +161,7 @@ def _estimate(
     estimator_dtype: jnp.dtype | None,
     return_samples: bool,
 ) -> ExpectationEstimate:
-    resolved_dtype = _resolve_estimator_dtype(gemm_dtype, estimator_dtype)
+    resolved_dtype = resolve_estimator_dtype(gemm_dtype, estimator_dtype)
     ratios = encoders.amplitude_ratios(samples, masks)
     phases = _phase_differences(
         params,
