@@ -1,115 +1,25 @@
-"""The encoder interface and the product-state angle encoder.
+"""The product-state angle encoder.
 
-A conditional IQP model applies one shared diagonal unitary ``U_theta`` to a
-condition-dependent input state ``|phi(c)>``.  An encoder provides four
-capabilities:
-
-``sample``
-    Draw bitstrings from ``|psi_c(z)|^2`` in polynomial time, where
-    ``psi_c(z) = <z|H^n|phi(c)>`` is the post-Hadamard reference amplitude.
-``amplitude_ratios``
-    Evaluate ``psi_c(z xor a) / psi_c(z)`` for sampled ``z`` and Fourier masks ``a``.
-``preparation``
-    Return a callable that queues ``|phi(c)>`` in the active PennyLane queuing
-    context, so the model can be compiled to a circuit and sampled on a
-    simulator or backend.
-``select``
-    Restrict the condition batch to one condition for memory-bounded loss
-    evaluation.
-
-The first two operations make training classically tractable and keep the
-trainer independent of any circuit simulator.  Only :mod:`iqp_cond.simulation`
-uses the third.  Encoder families are ordinary Python objects, so a custom
-implementation needs no registration and is used directly::
-
-    import iqp_cond as ciqp
-
-    states = MyEncoder(angles)
-    model = ciqp.ConditionalModel(ciqp.Ansatz.complete(states.n_qubits), states)
-
-The product-state family here is :class:`AngleEncoder`, built from any number
-of fixed-axis single-qubit rotation layers.  The entangled parity, twisted
-parity and collective phase encoders live in
-:mod:`iqp_cond.symmetric_encoders`.  Implementations are batched
-over conditions.  ``angles`` always has a leading condition axis, and every
-method keeps that axis, because the estimator samples all conditions from a
-single random key.  Exact small-system work needs a further capability,
-``post_hadamard_amplitudes``, declared separately by :class:`ExactEncoder`.
+:class:`AngleEncoder` builds a product state from any number of fixed-axis
+single-qubit rotation layers.  ``angles`` has a leading condition axis, and
+every method keeps that axis, because the estimator samples all conditions from
+a single random key.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-__all__ = [
-    "AngleEncoder",
-    "Encoder",
-    "ExactEncoder",
-    "layered_amplitudes",
-]
+from .base import _safe_ratio
+
+__all__ = ["AngleEncoder", "layered_amplitudes"]
 
 _ROTATION_AXES = ("X", "Y", "Z")
-
-
-@runtime_checkable
-class Encoder(Protocol):
-    """A condition-parameterised encoder evaluated over a batch of conditions.
-
-    Shapes are ``C`` conditions, ``S`` samples, ``R`` masks, ``n`` qubits.
-    To save memory, the library evaluates one condition at a time by calling
-    :meth:`select`.  Implementations may also register as JAX pytrees when
-    useful, but that is not part of the public extension contract.  The
-    preparation callable runs inside a PennyLane queuing context while a
-    circuit is built and may queue any PennyLane operation; training never
-    calls it.
-    """
-
-    @property
-    def n_conditions(self) -> int:
-        """Number of conditions in the batch."""
-
-    @property
-    def n_qubits(self) -> int:
-        """Number of qubits the encoder state lives on."""
-
-    def sample(self, key: jax.Array, n_samples: int) -> jnp.ndarray:
-        """Draw ``(C, S, n)`` bitstrings distributed as ``|psi_c(z)|^2``."""
-
-    def amplitude_ratios(self, samples: jnp.ndarray, masks: jnp.ndarray) -> jnp.ndarray:
-        """Return ``(C, S, R)`` ratios ``psi_c(z xor a) / psi_c(z)``.
-
-        Values where ``psi_c(z)`` vanishes are unspecified: the estimator
-        samples ``z`` from ``|psi_c(z)|**2``, so it never queries them.
-        """
-
-    def preparation(self, condition: int) -> Callable[[], None]:
-        """Return a callable queuing ``|phi(condition)>`` before ``H^n``."""
-
-    def select(self, condition: int) -> Encoder:
-        """Return an encoder containing only ``condition``."""
-
-
-@runtime_checkable
-class ExactEncoder(Encoder, Protocol):
-    """A training encoder that can also materialise its exact post-Hadamard state.
-
-    Required only for small-system exact checks (the full ``2**n`` state and the
-    ratio-identity tests); training and simulation never call it.
-    """
-
-    def post_hadamard_amplitudes(self) -> jnp.ndarray:
-        """Return normalised ``(C, 2**n)`` amplitudes ``<z|H^n|phi(c)>``."""
-
-
-def _safe_ratio(numerator: jnp.ndarray, denominator: jnp.ndarray) -> jnp.ndarray:
-    """Divide, mapping division by zero to zero."""
-    return jnp.where(denominator != 0.0, numerator / denominator, 0.0)
 
 
 def _local_amplitudes(

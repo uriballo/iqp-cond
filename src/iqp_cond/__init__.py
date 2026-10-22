@@ -22,13 +22,14 @@ import jax
 
 jax.config.update("jax_enable_x64", True)
 
-from .encoders import AngleEncoder, Encoder
-from .model import Ansatz, ConditionalModel
-from .symmetric_encoders import (
+from .encoders import (
+    AngleEncoder,
     CollectivePhaseEncoder,
+    Encoder,
     ParityEncoder,
     TwistedParityEncoder,
 )
+from .model import Ansatz, ConditionalModel
 from .training import TrainingConfig, train
 
 __all__ = [

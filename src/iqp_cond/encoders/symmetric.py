@@ -40,7 +40,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .encoders import _safe_ratio
+from .base import _safe_ratio
 
 __all__ = [
     "CollectivePhaseEncoder",
