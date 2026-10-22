@@ -52,7 +52,7 @@ Read [`USER_GUIDE.md`](USER_GUIDE.md) for shapes, training, inference, and custo
 
 ## API map
 
-- `iqp_cond`: `Ansatz`, `ConditionalModel`, `AngleEncoder`, `TrainingConfig`, `train`, and `check_encoder`.
+- `iqp_cond`: `Ansatz`, `ConditionalModel`, the encoders `AngleEncoder`, `ParityEncoder`, `TwistedParityEncoder` and `CollectivePhaseEncoder`, `TrainingConfig`, `train`, and `check_encoder`.
 - `model`: moment estimation, MMD evaluation, exact probabilities, and sampling are methods on `ConditionalModel`.
 - `iqp_cond.estimator`, `iqp_cond.initialization`, `iqp_cond.operators`, and `iqp_cond.simulation`: numerical routines and circuit construction for advanced workflows.
 

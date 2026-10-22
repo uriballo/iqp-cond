@@ -27,8 +27,10 @@ implementation needs no registration and is used directly::
     states = MyEncoder(angles)
     model = ciqp.ConditionalModel(ciqp.Ansatz.complete(states.n_qubits), states)
 
-The built-in family is :class:`AngleEncoder`, a product state built from any
-number of fixed-axis single-qubit rotation layers.  Implementations are batched
+The product-state family here is :class:`AngleEncoder`, built from any number
+of fixed-axis single-qubit rotation layers.  The entangled parity, twisted
+parity and collective phase encoders live in
+:mod:`iqp_cond.symmetric_encoders`.  Implementations are batched
 over conditions.  ``angles`` always has a leading condition axis, and every
 method keeps that axis, because the estimator samples all conditions from a
 single random key.  Exact small-system work needs a further capability,

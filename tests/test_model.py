@@ -18,10 +18,13 @@ def test_package_root_is_the_compact_workflow_api() -> None:
     assert ciqp.__all__ == [
         "AngleEncoder",
         "Ansatz",
+        "CollectivePhaseEncoder",
         "ConditionalModel",
         "Encoder",
         "EncoderCheck",
+        "ParityEncoder",
         "TrainingConfig",
+        "TwistedParityEncoder",
         "check_encoder",
         "train",
     ]
