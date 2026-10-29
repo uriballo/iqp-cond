@@ -26,6 +26,7 @@ from .encoders import (
     AngleEncoder,
     CollectivePhaseEncoder,
     Encoder,
+    MPSEncoder,
     ParityEncoder,
     TwistedParityEncoder,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "ConditionalModel",
     "Encoder",
     "EncoderCheck",
+    "MPSEncoder",
     "ParityEncoder",
     "TrainingConfig",
     "TwistedParityEncoder",

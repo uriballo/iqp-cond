@@ -37,6 +37,9 @@ The package is organised by shared machinery:
     :class:`ParityEncoder`, :class:`TwistedParityEncoder` and
     :class:`CollectivePhaseEncoder`, entangled states whose amplitudes depend
     only on Hamming weights.
+:mod:`~iqp_cond.encoders.mps`
+    :class:`MPSEncoder`, a phase-dressed matrix product state whose bond
+    dimension a sliding-window circuit bounds.
 
 Implementations are batched over conditions: every array has a leading
 condition axis.  Exact small-system work needs a further capability,
@@ -45,6 +48,7 @@ A new family goes in its own module and is re-exported here.
 """
 
 from .base import Encoder, ExactEncoder
+from .mps import MPSEncoder
 from .product import AngleEncoder, layered_amplitudes
 from .symmetric import CollectivePhaseEncoder, ParityEncoder, TwistedParityEncoder
 
@@ -53,6 +57,7 @@ __all__ = [
     "CollectivePhaseEncoder",
     "Encoder",
     "ExactEncoder",
+    "MPSEncoder",
     "ParityEncoder",
     "TwistedParityEncoder",
     "layered_amplitudes",

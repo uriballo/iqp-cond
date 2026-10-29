@@ -16,6 +16,8 @@ The main shapes are:
 | Training and validation targets | `(conditions, samples, visible qubits)` |
 | Ansatz generators | `(parameters, model qubits)` |
 | Angle encoder angles | `(conditions, layers, model qubits)` |
+| MPS encoder angles | `(conditions, model qubits - k, layers, k + 1, 2)` for bond dimension `2**k` |
+| MPS encoder dressing | `(conditions, n_qubits + n_qubits (n_qubits - 1) / 2)` |
 | Pauli-Z masks | `(masks, visible qubits)` |
 | Sampled model outputs | `(conditions, samples, visible qubits)` |
 | Exact model probabilities | `(conditions, 2**visible qubits)` |
@@ -49,6 +51,20 @@ The library also ships three entangled encoders whose amplitudes depend only on 
 | `CollectivePhaseEncoder(linear, quadratic, n_qubits=n)` | `exp[-i (a J_z + b J_z^2)] \|+>^n` with `J_z = sum Z_j / 2` | Uniform input probabilities, with condition-dependent reference magnitudes |
 
 The twisted parity and collective phase encoders build a table indexed by Hamming weight. Their sampling and training queries remain accurate on registers of several dozen qubits, but exact `post_hadamard_amplitudes` is meant for small registers.
+
+`MPSEncoder` gives a correlated reference without a symmetry. Its reference amplitude is a matrix product state `A_c(z)` multiplied by a diagonal phase, `psi_c(z) = exp(i f_c(z)) A_c(z)`, where `f_c(z) = sum_j lambda_cj (-1)**(g_j . z)` runs over the generators of `Ansatz.complete(n_qubits)` in the same order. It stays tractable for a different reason than the encoders above. A circuit that slides a window of `k + 1` qubits along the register bounds the bond dimension at `2**k`. Sampling then draws one site at a time from its conditional, which costs `O(n chi**2)` per sample after an `O(n chi**3)` environment sweep, and each ratio needs one `O(n chi**2)` contraction. No step touches all `2**n` amplitudes.
+
+```python
+rng = np.random.default_rng(0)
+k = 2  # bond dimension 4
+angles = rng.uniform(-np.pi, np.pi, (n_conditions, n_qubits - k, 2, k + 1, 2))
+dressing = rng.normal(0.0, 0.5, (n_conditions, n_qubits * (n_qubits + 1) // 2))
+encoder = ciqp.MPSEncoder(angles, dressing, n_qubits=n_qubits, bond_dimension=4)
+```
+
+Window `w` acts on qubits `w, ..., w + k`. Each of its layers applies `RY` and then `RZ` to every window qubit, followed by a CNOT ladder, and the number of layers is read from the angle shape. Bond dimension one is a product state. Shifting any single angle keeps the window structure, so both shifted encoders in a parameter-shift rule remain tractable.
+
+The dressing has unit modulus, so it leaves the sampling law `|A_c(z)|**2` unchanged. It is diagonal in the same generators as the head, so a dressing `lambda` gives the same model as the undressed encoder with parameters `theta + lambda`. Its purpose is to keep the MPS from spending bond dimension on phases the head already expresses. Pass `dressing=None` for the undressed control. The ratio intermediate has shape `(samples, masks, bond dimension)`, so set `sample_chunk` when the bond dimension is large.
 
 Custom ansatz generator arrays must be finite and contain only zeroes and ones. The ansatz and encoder must describe the same number of qubits.
 

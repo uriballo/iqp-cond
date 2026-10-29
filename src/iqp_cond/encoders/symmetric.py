@@ -40,7 +40,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .base import _safe_ratio
+from .base import _ConditionBatch, _safe_ratio
 
 __all__ = [
     "CollectivePhaseEncoder",
@@ -125,61 +125,6 @@ def _check_normalised(shells: np.ndarray, n_leaves: int) -> None:
         raise FloatingPointError(
             "reference amplitudes are not normalised; the Krawtchouk transform "
             f"loses precision at {n_leaves + shells.shape[1] - 1} qubits",
-        )
-
-
-class _ConditionBatch:
-    """Pytree and selection support for encoders batched over conditions.
-
-    Subclasses list their per-condition arrays in ``_data_fields``, each with a
-    leading condition axis, and their static attributes in ``_meta_fields``.
-    """
-
-    _data_fields: ClassVar[tuple[str, ...]]
-    _meta_fields: ClassVar[tuple[str, ...]] = ()
-
-    @classmethod
-    def _from_fields(cls, **fields: object) -> _ConditionBatch:
-        instance = object.__new__(cls)
-        for name, value in fields.items():
-            object.__setattr__(instance, name, value)
-        return instance
-
-    def tree_flatten(self) -> tuple[tuple[jnp.ndarray, ...], tuple[object, ...]]:
-        """Return dynamic arrays and static attributes for JAX transformations."""
-        return (
-            tuple(getattr(self, name) for name in self._data_fields),
-            tuple(getattr(self, name) for name in self._meta_fields),
-        )
-
-    @classmethod
-    def tree_unflatten(
-        cls,
-        meta: tuple[object, ...],
-        data: tuple[jnp.ndarray, ...],
-    ) -> _ConditionBatch:
-        """Rebuild a traced encoder without recomputing its amplitudes."""
-        return cls._from_fields(
-            **dict(zip(cls._data_fields, data, strict=True)),
-            **dict(zip(cls._meta_fields, meta, strict=True)),
-        )
-
-    @property
-    def n_conditions(self) -> int:
-        """Number of conditions in the batch."""
-        return int(getattr(self, self._data_fields[0]).shape[0])
-
-    def _check_condition(self, condition: int) -> None:
-        if not 0 <= condition < self.n_conditions:
-            raise IndexError(f"condition {condition} outside the batch")
-
-    def select(self, condition: int) -> _ConditionBatch:
-        """Return this encoder restricted to one condition."""
-        self._check_condition(condition)
-        selection = slice(condition, condition + 1)
-        return self._from_fields(
-            **{name: getattr(self, name)[selection] for name in self._data_fields},
-            **{name: getattr(self, name) for name in self._meta_fields},
         )
 
 
