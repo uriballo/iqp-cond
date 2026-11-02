@@ -122,7 +122,7 @@ def resolve_training_config(
             raise ValueError(f"{key} must be nonempty and finite")
     if out["validation_interval"] < 1:
         raise ValueError("validation_interval must be positive")
-    if out["precision_policy"] not in {"fp64", "gemm_f32", "estimator_f32"}:
+    if out["precision_policy"] not in {"fp64", "gemm_f32", "estimator_f32", "full_fp32"}:
         raise ValueError("unknown precision policy")
     return out
 
