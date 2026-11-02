@@ -22,9 +22,10 @@ class Encoder(Protocol):
     """A condition-parameterised encoder evaluated over a batch of conditions.
 
     Shapes are ``C`` conditions, ``S`` samples, ``R`` masks, ``n`` qubits.
-    To save memory, the library evaluates one condition at a time by calling
-    :meth:`select`.  Implementations may also register as JAX pytrees when
-    useful, but that is not part of the public extension contract.  The
+    The loss and trainer require a JAX pytree whose array leaves all carry the
+    leading condition axis: they index those leaves to vectorize over
+    conditions and to pick one condition inside a compiled update.  A
+    single-condition encoder may have no array leaves.  The
     preparation callable runs inside a PennyLane queuing context while a
     circuit is built and may queue any PennyLane operation; training never
     calls it.

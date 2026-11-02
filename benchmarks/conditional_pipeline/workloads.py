@@ -11,7 +11,7 @@ import numpy as np
 
 from iqp_cond.encoders import AngleEncoder
 from iqp_cond.estimator import _phase_differences, estimate_pauli_z_unchecked
-from iqp_cond.loss import _condition_value, mmd
+from iqp_cond.loss import _Entries, _mmd_from_entries, mmd, target_moments
 
 AXES = {"y": ("Y",), "yz": ("Y", "Z"), "yzyz": ("Y", "Z", "Y", "Z")}
 
@@ -27,23 +27,16 @@ def prepared_mmd(
     params, generators, encoder, targets, samples, masks, weights, config, dtype=None
 ):
     """Compute the per-condition U-statistic from stored random draws."""
-    values = [
-        _condition_value(
-            params,
-            generators,
-            encoder.select(c),
-            targets[c : c + 1],
-            masks[c],
-            weights[c],
-            0,
-            samples[c : c + 1],
-            None,
-            dtype,
-            config["sample_chunk"],
-        )
-        for c in range(config["n_conditions"])
-    ]
-    return jnp.mean(jnp.stack(values))
+    means, squares = jax.vmap(target_moments)(targets[:, None], masks)
+    entries = (_Entries(masks, weights, samples[:, None], means[:, 0], squares[:, 0]),)
+    return _mmd_from_entries(
+        params,
+        generators,
+        encoder,
+        entries,
+        estimator_dtype=dtype,
+        sample_chunk=config["sample_chunk"],
+    ).loss
 
 
 def build_kernels(config: dict[str, Any]):

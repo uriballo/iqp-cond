@@ -17,8 +17,8 @@ import pytest
 import iqp_cond as ciqp
 from iqp_cond.loss import (
     ConditionalMMDResult,
-    _fixed_mmd,
-    _fixed_mmd_plan,
+    _mmd_entries,
+    _mmd_from_entries,
     hamming_rbf,
     mmd,
     target_moments,
@@ -586,8 +586,8 @@ def test_parameter_gradient_matches_finite_differences() -> None:
     "precision",
     [{}, {"estimator_dtype": jnp.float32}, {"gemm_dtype": jnp.float32}],
 )
-def test_fixed_plan_matches_the_fresh_mask_objective(axes, precision) -> None:
-    """A fixed-key plan reproduces the fresh-mask MMD with its randomness."""
+def test_cached_entries_match_the_fresh_mask_objective(axes, precision) -> None:
+    """Entries drawn once with cached ratios reproduce the fresh-mask MMD."""
     rng = np.random.default_rng(83)
     n_qubits, n_visible, n_conditions = 6, 4, 3
     encoders = ciqp.AngleEncoder(
@@ -603,14 +603,23 @@ def test_fixed_plan_matches_the_fresh_mask_objective(axes, precision) -> None:
     sampled = mmd(
         params, ansatz.generators, encoders, targets, key, **options, **precision
     )
-    plan = _fixed_mmd_plan(encoders, targets, key, **options)
-    assert plan is not None
+    entries = _mmd_entries(
+        encoders,
+        targets,
+        key,
+        bank=None,
+        shared_samples=False,
+        cache_ratios=True,
+        **options,
+    )
     planned = jax.jit(
-        lambda current, plan: _fixed_mmd(plan, current, ansatz.generators, **precision)
-    )(params, plan)
+        lambda current, entries: _mmd_from_entries(
+            current, ansatz.generators, encoders, entries, **precision
+        )
+    )(params, entries)
 
     # The float32 estimator agrees to single precision between the eager
-    # reference and the compiled plan, which may fuse differently.
+    # reference and the compiled evaluation, which may fuse differently.
     rtol = 1e-5 if "estimator_dtype" in precision else 1e-12
     np.testing.assert_allclose(
         planned.per_bandwidth_condition,

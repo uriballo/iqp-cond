@@ -87,12 +87,12 @@ If `initial_params` is omitted, initialization uses pooled training data and a m
 
 ## Write and verify a custom encoder
 
-`Encoder` is a structural protocol; there is no base class or registration step. An encoder provides `n_conditions`, `n_qubits`, and four operations:
+`Encoder` is a structural protocol with no base class. Training and the MMD loss also require the encoder to be a JAX pytree whose array leaves all have a leading condition axis, for example a dataclass registered with `jax.tree_util.register_dataclass`; a single-condition encoder may have no array leaves. The loss indexes those leaves to evaluate every condition in one vectorized program. An encoder provides `n_conditions`, `n_qubits`, and four operations:
 
 - `sample(key, n_samples)` returns `(conditions, samples, qubits)` draws from the post-Hadamard reference distribution `|psi_c(z)|**2`, where `psi_c(z) = <z|H**n|phi(c)>`.
 - `amplitude_ratios(samples, masks)` returns `(conditions, samples, masks)` values `psi_c(z xor a) / psi_c(z)`.
 - `preparation(condition)` returns a callable that queues the input state `|phi(c)>` using PennyLane operations. The simulation bridge calls it before its first Hadamard layer; training does not call it.
-- `select(condition)` returns an encoder containing just that condition. The loss evaluates conditions individually to bound memory.
+- `select(condition)` returns an encoder containing just that condition. The simulation bridge and `check_encoder` use it.
 
 All four operations must describe the same reference state. Run `ciqp.check_encoder(encoder)` to compare the sampling and ratio methods with the PennyLane preparation. It returns an `EncoderCheck`; inspect `.ok`, `.failures`, and `.summary`. The check builds a reference statevector and defaults to a maximum of 16 qubits, so use it on small systems.
 

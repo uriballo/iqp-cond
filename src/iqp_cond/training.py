@@ -25,12 +25,7 @@ import optax
 
 from ._precision import resolve_estimator_dtype
 from .initialization import parameters_from_data
-from .loss import (
-    _dynamic_encoder_support,
-    _fixed_mmd,
-    _fixed_mmd_plan,
-    _FixedMMDPlan,
-)
+from .loss import _Entries, _mmd_entries, _mmd_from_entries, mmd
 from .model import ConditionalModel
 from .operators import OperatorBank, expected_bodyness_sigmas, operator_bank
 
@@ -193,33 +188,6 @@ def _condition_schedule(n_conditions: int, steps: int, seed: int) -> np.ndarray:
     return rng.integers(0, n_conditions, size=steps)
 
 
-def _select_bandwidth(bank: OperatorBank, bandwidth: int) -> OperatorBank:
-    """Return one exact bandwidth slice from a multiscale operator bank."""
-    width = bank.width(bandwidth)
-    return OperatorBank(
-        sigmas=(bank.sigmas[bandwidth],),
-        masks=bank.masks[bandwidth : bandwidth + 1, :, :width],
-        weights=bank.weights[bandwidth : bandwidth + 1, :, :width],
-        n_ops=bank.n_ops,
-        n_visible=bank.n_visible,
-        n_masks=width,
-        widths=(width,),
-    )
-
-
-def _select_condition(bank: OperatorBank, condition: int) -> OperatorBank:
-    """Return one exact condition slice from an operator bank."""
-    return OperatorBank(
-        sigmas=bank.sigmas,
-        masks=bank.masks[:, condition : condition + 1],
-        weights=bank.weights[:, condition : condition + 1],
-        n_ops=bank.n_ops,
-        n_visible=bank.n_visible,
-        n_masks=bank.n_masks,
-        widths=bank.widths,
-    )
-
-
 def _validate_training_inputs(
     model: ConditionalModel,
     training_targets: np.ndarray,
@@ -285,108 +253,112 @@ def _initial_parameters(
     return jnp.asarray(candidate, dtype=jnp.float64).copy()
 
 
-def _cached_training_banks(
-    sigmas: tuple[float, ...],
-    config: TrainingConfig,
-    n_conditions: int,
-    n_visible: int,
-    seed: int,
-) -> tuple[tuple[OperatorBank, ...], ...]:
-    """Draw the bank retained by cache refresh, sliced per (bandwidth, condition).
-
-    The fit keeps it whole; the loop only selects exact slices.
-    """
-    cached_bank = operator_bank(sigmas, config.n_ops, n_conditions, n_visible, seed)
-    return tuple(
-        tuple(
-            _select_condition(_select_bandwidth(cached_bank, bandwidth), condition)
-            for condition in range(n_conditions)
-        )
-        for bandwidth in range(cached_bank.n_bandwidths)
+def _cell_bank(
+    bank: OperatorBank,
+    bandwidth: int,
+    condition: jax.Array,
+) -> OperatorBank:
+    """Return the cached bank's (bandwidth, condition) cell at its exact width."""
+    width = bank.width(bandwidth)
+    return OperatorBank(
+        sigmas=(bank.sigmas[bandwidth],),
+        masks=bank.masks[bandwidth, condition, :width][None, None],
+        weights=bank.weights[bandwidth, condition, :width][None, None],
+        n_ops=bank.n_ops,
+        n_visible=bank.n_visible,
+        n_masks=width,
+        widths=(width,),
     )
 
 
-def _make_training_step(
+def _make_training_steps(
     model: ConditionalModel,
     config: TrainingConfig,
     optimizer: optax.GradientTransformation,
     random_key: jax.Array,
     training_targets: jnp.ndarray,
     batch_indices: jnp.ndarray,
-    closed_encoder: object | None,
-) -> Callable[..., tuple[jnp.ndarray, jnp.ndarray, optax.OptState]]:
-    """Compile one update for every bandwidth, sharing or closing the encoder.
+    sigmas: jnp.ndarray,
+) -> Callable[..., tuple[jnp.ndarray, optax.OptState, jnp.ndarray]]:
+    """Compile a scan of updates, one (condition, bandwidth) cell per update.
 
-    The bandwidth enters as a traced sigma under per-step refresh and through
-    the selected bank under cache refresh, so one compiled program serves every
-    bandwidth whose bank shape agrees.  The targets and the batch schedule stay
-    on the device; the step slices its batch and derives its key from the step
-    and condition scalars.  ``closed_encoder`` is ``None`` for pytree encoders,
-    which arrive as an argument, and the fixed condition's encoder otherwise.
+    The condition indexes the encoder leaves, the targets, and the batch
+    schedule on the device, so one program serves every condition.  Under
+    per-step refresh the bandwidth indexes ``sigmas``; under cache refresh it
+    switches between the bank's bandwidths, whose evaluated widths differ.
     """
 
-    def training_loss(
-        current_params: jnp.ndarray,
-        target_batch: jnp.ndarray,
-        current_bank: OperatorBank | None,
-        step_key: jax.Array,
-        selected_encoder: object,
-        sigma: jax.Array | None,
-    ) -> jnp.ndarray:
-        active_encoder = selected_encoder if closed_encoder is None else closed_encoder
-        selected_model = ConditionalModel(
-            model.ansatz,
-            active_encoder,
-            n_visible=model.n_visible,
-        )
-        mask_source = (
-            {"bank": current_bank}
-            if current_bank is not None
-            else {"sigmas": (sigma,), "n_ops": config.n_ops}
-        )
-        return selected_model.mmd(
-            current_params,
-            target_batch,
-            step_key,
-            **mask_source,
-            n_samples=config.mc_samples,
-            shared_samples=True,
-            gemm_dtype=config.gemm_dtype,
-            estimator_dtype=config.estimator_dtype,
-            sample_chunk=config.sample_chunk,
-        ).loss
-
-    # Compile differentiation and the full optimizer update together to avoid
-    # dispatching optimizer operations separately from the estimator.
-    @jax.jit
-    def training_step(
-        current_params: jnp.ndarray,
-        current_optimizer_state: optax.OptState,
+    def cell_loss(
+        params: jnp.ndarray,
+        encoders: object,
+        bank: OperatorBank | None,
         step: jax.Array,
         condition: jax.Array,
-        current_bank: OperatorBank | None,
-        selected_encoder: object,
-        sigma: jax.Array | None,
-    ) -> tuple[jnp.ndarray, jnp.ndarray, optax.OptState]:
-        indices = batch_indices[step, condition]
-        target_batch = training_targets[condition, indices][None]
-        loss, gradient = jax.value_and_grad(training_loss)(
-            current_params,
-            target_batch,
-            current_bank,
-            jax.random.fold_in(random_key, step),
-            selected_encoder,
-            sigma,
-        )
-        updates, new_optimizer_state = optimizer.update(
-            gradient,
-            current_optimizer_state,
-            current_params,
-        )
-        new_params = optax.apply_updates(current_params, updates)
-        return loss, new_params, new_optimizer_state
+        bandwidth: jax.Array,
+    ) -> jnp.ndarray:
+        encoder = jax.tree_util.tree_map(lambda leaf: leaf[condition][None], encoders)
+        target_batch = training_targets[condition, batch_indices[step, condition]][None]
 
-    return training_step
+        def loss(**mask_source: object) -> jnp.ndarray:
+            return mmd(
+                params,
+                model.generators,
+                encoder,
+                target_batch,
+                jax.random.fold_in(random_key, step),
+                **mask_source,
+                n_samples=config.mc_samples,
+                shared_samples=True,
+                gemm_dtype=config.gemm_dtype,
+                estimator_dtype=config.estimator_dtype,
+                sample_chunk=config.sample_chunk,
+            ).loss
+
+        if bank is None:
+            return loss(sigmas=(sigmas[bandwidth],), n_ops=config.n_ops)
+        return jax.lax.switch(
+            bandwidth,
+            [
+                lambda index=index: loss(bank=_cell_bank(bank, index, condition))
+                for index in range(bank.n_bandwidths)
+            ],
+        )
+
+    @jax.jit
+    def training_steps(
+        params: jnp.ndarray,
+        optimizer_state: optax.OptState,
+        encoders: object,
+        bank: OperatorBank | None,
+        cells: tuple[jax.Array, jax.Array, jax.Array],
+    ) -> tuple[jnp.ndarray, optax.OptState, jnp.ndarray]:
+        def update(carry, cell):
+            current_params, current_state = carry
+            loss, gradient = jax.value_and_grad(cell_loss)(
+                current_params,
+                encoders,
+                bank,
+                *cell,
+            )
+            updates, new_state = optimizer.update(
+                gradient,
+                current_state,
+                current_params,
+            )
+            return (optax.apply_updates(current_params, updates), new_state), loss
+
+        (params, optimizer_state), losses = jax.lax.scan(
+            update,
+            (params, optimizer_state),
+            cells,
+        )
+        return params, optimizer_state, losses
+
+    return training_steps
+
+
+# Largest ratio tensor validation may cache on the device for the whole fit.
+_VALIDATION_RATIO_BYTES = 1 << 30
 
 
 def _make_validation(
@@ -398,55 +370,50 @@ def _make_validation(
 ) -> Callable[[jnp.ndarray], jnp.ndarray]:
     """Return the fixed-randomness validation MMD as a function of parameters.
 
-    Every checkpoint would redraw the same masks and samples, so a plan keeps
-    them, the amplitude ratios, and the target moments for the whole fit and
-    only the phases are recomputed.  Without room for the plan, validation
-    samples afresh with the same key.
+    Every checkpoint would redraw the same masks and samples, so they are drawn
+    once for the fit and only the phases are recomputed.  The amplitude ratios
+    are cached too when they fit in ``_VALIDATION_RATIO_BYTES``.
     """
-    key = jax.random.PRNGKey(seed + 1_000_000)
     targets = jnp.asarray(validation_targets)
-    plan = _fixed_mmd_plan(
+    ratio_bytes = (
+        len(sigmas)
+        * targets.shape[0]
+        * config.validation_mc_samples
+        * config.validation_n_ops
+        * 16
+    )
+    entries = _mmd_entries(
         model.encoder,
         targets,
-        key,
+        jax.random.PRNGKey(seed + 1_000_000),
+        bank=None,
         sigmas=sigmas,
         n_ops=config.validation_n_ops,
         n_samples=config.validation_mc_samples,
+        shared_samples=False,
+        cache_ratios=ratio_bytes <= _VALIDATION_RATIO_BYTES,
     )
-    if plan is not None:
-
-        @jax.jit
-        def validation_loss(
-            current_params: jnp.ndarray,
-            plan: _FixedMMDPlan,
-        ) -> jnp.ndarray:
-            return _fixed_mmd(
-                plan,
-                current_params,
-                model.generators,
-                gemm_dtype=config.gemm_dtype,
-                estimator_dtype=config.estimator_dtype,
-            ).loss
-
-        return lambda current_params: validation_loss(current_params, plan)
 
     @jax.jit
     def validation_loss(
         current_params: jnp.ndarray,
-        targets: jnp.ndarray,
+        encoders: object,
+        entries: tuple[_Entries, ...],
     ) -> jnp.ndarray:
-        return model.mmd(
+        return _mmd_from_entries(
             current_params,
-            targets,
-            key,
-            sigmas=sigmas,
-            n_ops=config.validation_n_ops,
-            n_samples=config.validation_mc_samples,
+            model.generators,
+            encoders,
+            entries,
             gemm_dtype=config.gemm_dtype,
             estimator_dtype=config.estimator_dtype,
         ).loss
 
-    return lambda current_params: validation_loss(current_params, targets)
+    return lambda current_params: validation_loss(
+        current_params,
+        model.encoder,
+        entries,
+    )
 
 
 def train(
@@ -500,39 +467,20 @@ def train(
     )
     bandwidth_indices = _bandwidth_schedule(len(sigmas), config.steps, seed)
     condition_indices = _condition_schedule(n_conditions, config.steps, seed)
-    cached_banks = (
-        _cached_training_banks(sigmas, config, n_conditions, model.visible, seed)
+    bank = (
+        operator_bank(sigmas, config.n_ops, n_conditions, model.visible, seed)
         if config.mask_refresh == CACHE
         else None
     )
-    sigma_values = tuple(jnp.asarray(sigma, dtype=jnp.float64) for sigma in sigmas)
-    selected_encoders = tuple(
-        encoders.select(condition) for condition in range(n_conditions)
+    training_steps = _make_training_steps(
+        model,
+        config,
+        optimizer,
+        jax.random.PRNGKey(seed),
+        jnp.asarray(training_targets),
+        jnp.asarray(batch_indices),
+        jnp.asarray(sigmas, dtype=jnp.float64),
     )
-
-    device_targets = jnp.asarray(training_targets)
-    device_batch_indices = jnp.asarray(batch_indices)
-
-    def make_step(closed_encoder: object | None):
-        return _make_training_step(
-            model,
-            config,
-            optimizer,
-            jax.random.PRNGKey(seed),
-            device_targets,
-            device_batch_indices,
-            closed_encoder,
-        )
-
-    # Pytree encoders share one compiled step and arrive as an argument; any
-    # other encoder is closed over, one compiled step per condition.
-    if _dynamic_encoder_support(encoders):
-        shared_step = make_step(None)
-        training_steps = (shared_step,) * n_conditions
-        step_encoders: tuple[object, ...] = selected_encoders
-    else:
-        training_steps = tuple(make_step(encoder) for encoder in selected_encoders)
-        step_encoders = ((),) * n_conditions
     evaluate_validation = _make_validation(
         model,
         config,
@@ -554,36 +502,31 @@ def train(
     validation_steps = [0]
     validation_losses = [best_validation]
     selection_scores = [best_selection]
-    for step in range(config.steps):
-        bandwidth = int(bandwidth_indices[step])
-        condition = int(condition_indices[step])
-        if cached_banks is None:
-            training_bank, sigma = None, sigma_values[bandwidth]
-        else:
-            training_bank, sigma = cached_banks[bandwidth][condition], None
-        loss, params, optimizer_state = training_steps[condition](
+    for start in range(0, config.steps, config.validation_interval):
+        stop = min(start + config.validation_interval, config.steps)
+        params, optimizer_state, losses = training_steps(
             params,
             optimizer_state,
-            step,
-            condition,
-            training_bank,
-            step_encoders[condition],
-            sigma,
+            encoders,
+            bank,
+            (
+                jnp.arange(start, stop),
+                jnp.asarray(condition_indices[start:stop]),
+                jnp.asarray(bandwidth_indices[start:stop]),
+            ),
         )
-        # Defer the device sync so Python does not block on each optimizer update.
-        train_losses.append(loss)
-
-        completed_step = step + 1
-        if completed_step % config.validation_interval == 0:
+        # Defer the device sync so Python does not block on each interval.
+        train_losses.append(losses)
+        if stop % config.validation_interval == 0:
             current_validation, current_selection = score(params)
-            validation_steps.append(completed_step)
+            validation_steps.append(stop)
             validation_losses.append(current_validation)
             selection_scores.append(current_selection)
             if current_selection < best_selection:
                 best_validation = current_validation
                 best_selection = current_selection
                 best_params = params
-                best_step = completed_step
+                best_step = stop
 
     return TrainingResult(
         seed=seed,
@@ -593,7 +536,7 @@ def train(
         best_validation_loss=best_validation,
         best_selection_score=best_selection,
         train_steps=np.arange(1, config.steps + 1),
-        train_losses=np.asarray(jnp.stack(train_losses)),
+        train_losses=np.asarray(jnp.concatenate(train_losses)),
         validation_steps=np.asarray(validation_steps),
         validation_losses=np.asarray(validation_losses),
         selection_scores=np.asarray(selection_scores),

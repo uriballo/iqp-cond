@@ -13,8 +13,8 @@ import pytest
 import iqp_cond as ciqp
 from iqp_cond import training as training_module
 from iqp_cond.initialization import parameters_from_data
-from iqp_cond.loss import _condition_value
-from iqp_cond.operators import expected_bodyness_sigmas, operator_bank
+from iqp_cond.loss import mmd
+from iqp_cond.operators import OperatorBank, expected_bodyness_sigmas, operator_bank
 from iqp_cond.training import CACHE, STEP
 
 
@@ -262,176 +262,71 @@ def test_condition_schedule_is_uniform_and_reproducible() -> None:
     assert set(first) == set(range(5))
 
 
-def test_cached_condition_slice_preserves_exact_bank_entry() -> None:
-    bank = operator_bank((0.8, 1.6), 16, N_CONDITIONS, N_QUBITS, seed=70)
-    selected = training_module._select_condition(bank, 1)
-
-    assert selected.n_conditions == 1
-    assert selected.sigmas == bank.sigmas
-    assert selected.widths == bank.widths
-    assert jnp.array_equal(selected.masks[:, 0], bank.masks[:, 1])
-    assert jnp.array_equal(selected.weights[:, 0], bank.weights[:, 1])
-
-
-def test_selected_bandwidth_gradient_is_unbiased_for_multiscale_loss(
+def test_cached_cells_average_to_the_condition_objective(
     model: ciqp.ConditionalModel,
     targets: tuple[np.ndarray, np.ndarray],
 ) -> None:
-    """A uniform average of selected bands equals the full bank evaluation."""
+    """The bandwidth cells a cached update selects average to the full loss."""
     training, _ = targets
-    sigmas = (0.8, 1.6, 2.4)
-    bank = operator_bank(sigmas, 16, N_CONDITIONS, N_QUBITS, seed=71)
+    bank = operator_bank((0.8, 1.6, 2.4), 16, N_CONDITIONS, N_QUBITS, seed=71)
     params = jnp.linspace(-0.2, 0.2, model.ansatz.n_parameters)
-    target_batch = jnp.asarray(training[:, :16])
     key = jax.random.PRNGKey(72)
 
-    def objective(current_params, current_bank):
-        return model.mmd(
-            current_params,
-            target_batch,
-            key,
-            bank=current_bank,
-            n_samples=32,
-            shared_samples=True,
-        ).loss
+    for condition in range(N_CONDITIONS):
+        encoder = model.encoder.select(condition)
+        target_batch = jnp.asarray(training[condition : condition + 1, :16])
 
-    full_loss, full_gradient = jax.value_and_grad(objective)(params, bank)
-    selected = []
-    for bandwidth in range(bank.n_bandwidths):
-        selected_bank = training_module._select_bandwidth(bank, bandwidth)
-        selected.append(
-            jax.value_and_grad(objective)(params, selected_bank),
+        def objective(current_params, current_bank, encoder=encoder, t=target_batch):
+            return mmd(
+                current_params,
+                model.generators,
+                encoder,
+                t,
+                key,
+                bank=current_bank,
+                n_samples=32,
+                shared_samples=True,
+            ).loss
+
+        condition_bank = OperatorBank(
+            sigmas=bank.sigmas,
+            masks=bank.masks[:, condition : condition + 1],
+            weights=bank.weights[:, condition : condition + 1],
+            n_ops=bank.n_ops,
+            n_visible=bank.n_visible,
+            n_masks=bank.n_masks,
+            widths=bank.widths,
         )
-
-    selected_loss = jnp.mean(jnp.stack([loss for loss, _ in selected]))
-    selected_gradient = jnp.mean(
-        jnp.stack([gradient for _, gradient in selected]), axis=0
-    )
-    assert jnp.allclose(selected_loss, full_loss, atol=1e-15, rtol=0.0)
-    assert jnp.allclose(selected_gradient, full_gradient, atol=1e-15, rtol=0.0)
-
-
-def test_selected_condition_gradient_is_unbiased_for_balanced_loss(
-    model: ciqp.ConditionalModel,
-    targets: tuple[np.ndarray, np.ndarray],
-) -> None:
-    """A uniform average of condition cells equals the balanced objective."""
-    training, _ = targets
-    bank = operator_bank((1.2,), 16, N_CONDITIONS, N_QUBITS, seed=73)
-    params = jnp.linspace(-0.2, 0.2, model.ansatz.n_parameters)
-    target_batch = jnp.asarray(training[:, :16])
-    key = jax.random.PRNGKey(74)
-
-    def full_objective(current_params):
-        return model.mmd(
-            current_params,
-            target_batch,
-            key,
-            bank=bank,
-            n_samples=32,
-            shared_samples=True,
-        ).loss
-
-    def selected_objective(current_params):
-        values = []
-        for condition in range(N_CONDITIONS):
-            encoder = model.encoder.select(condition)
-            samples = encoder.sample(jax.random.fold_in(key, condition), 32)
-            masks, weights = bank.entry(0, condition)
-            values.append(
-                _condition_value(
-                    current_params,
-                    model.generators,
-                    encoder,
-                    target_batch[condition : condition + 1],
-                    masks,
-                    weights,
-                    model.n_ancillas,
-                    samples,
-                    None,
-                    None,
-                    None,
-                )
+        full_loss, full_gradient = jax.value_and_grad(objective)(
+            params,
+            condition_bank,
+        )
+        cells = [
+            jax.value_and_grad(objective)(
+                params,
+                training_module._cell_bank(bank, bandwidth, condition),
             )
-        return jnp.mean(jnp.stack(values))
+            for bandwidth in range(bank.n_bandwidths)
+        ]
 
-    full_loss, full_gradient = jax.value_and_grad(full_objective)(params)
-    selected_loss, selected_gradient = jax.value_and_grad(selected_objective)(params)
-    assert jnp.allclose(selected_loss, full_loss, atol=1e-15, rtol=0.0)
-    assert jnp.allclose(selected_gradient, full_gradient, atol=1e-15, rtol=0.0)
+        cell_loss = jnp.mean(jnp.stack([loss for loss, _ in cells]))
+        cell_gradient = jnp.mean(jnp.stack([gradient for _, gradient in cells]), axis=0)
+        assert jnp.allclose(cell_loss, full_loss, atol=1e-15, rtol=0.0)
+        assert jnp.allclose(cell_gradient, full_gradient, atol=1e-15, rtol=0.0)
 
 
-def test_training_supports_non_pytree_custom_encoder(
+def test_training_rejects_non_pytree_encoder(
     angles: np.ndarray,
     targets: tuple[np.ndarray, np.ndarray],
+    config: ciqp.TrainingConfig,
 ) -> None:
-    """Condition-specific closures keep custom encoders outside JIT arguments."""
     training, validation = targets
     model = ciqp.ConditionalModel(
         ciqp.Ansatz.complete(N_QUBITS),
         WrappedEncoder(y_layer(angles)),
     )
-    config = ciqp.TrainingConfig(
-        steps=4,
-        batch_size=8,
-        validation_interval=2,
-        sigmas=(1.0,),
-        n_ops=4,
-        mc_samples=16,
-        validation_n_ops=4,
-        validation_mc_samples=16,
-    )
-
-    result = ciqp.train(model, training, validation, seed=75, config=config)
-
-    assert np.all(np.isfinite(result.train_losses))
-    assert np.all(np.isfinite(result.validation_losses))
-
-
-def test_encoder_path_uses_shared_pytree_step_for_angle_encoder(
-    angles: np.ndarray,
-) -> None:
-    encoder = y_layer(angles)
-    assert training_module._dynamic_encoder_support(encoder)
-    assert not training_module._dynamic_encoder_support(WrappedEncoder(encoder))
-
-
-def test_dynamic_encoder_step_preserves_training_trajectory(
-    angles: np.ndarray,
-    targets: tuple[np.ndarray, np.ndarray],
-) -> None:
-    """The shared pytree step has the same deterministic result as the fallback."""
-    training, validation = targets
-    config = ciqp.TrainingConfig(
-        steps=3,
-        batch_size=8,
-        validation_interval=3,
-        sigmas=(1.0,),
-        n_ops=4,
-        mc_samples=16,
-        validation_n_ops=4,
-        validation_mc_samples=16,
-    )
-    dynamic = ciqp.train(
-        ciqp.ConditionalModel(ciqp.Ansatz.complete(N_QUBITS), y_layer(angles)),
-        training,
-        validation,
-        seed=76,
-        config=config,
-    )
-    fallback = ciqp.train(
-        ciqp.ConditionalModel(
-            ciqp.Ansatz.complete(N_QUBITS), WrappedEncoder(y_layer(angles))
-        ),
-        training,
-        validation,
-        seed=76,
-        config=config,
-    )
-    np.testing.assert_array_equal(dynamic.train_losses, fallback.train_losses)
-    np.testing.assert_array_equal(dynamic.validation_losses, fallback.validation_losses)
-    np.testing.assert_array_equal(dynamic.best_params, fallback.best_params)
-    np.testing.assert_array_equal(dynamic.final_params, fallback.final_params)
+    with pytest.raises(TypeError, match="JAX pytree"):
+        ciqp.train(model, training, validation, seed=75, config=config)
 
 
 def test_condition_count_mismatch_is_rejected(

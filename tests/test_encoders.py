@@ -182,8 +182,11 @@ class UniformBits:
         return UniformBits(self.angles[condition : condition + 1])
 
 
+jax.tree_util.register_dataclass(UniformBits, data_fields=["angles"], meta_fields=[])
+
+
 def test_custom_family_trains_through_the_public_api() -> None:
-    """A family defined outside the package works without registration."""
+    """A pytree family defined outside the package trains and samples."""
     ansatz = ciqp.Ansatz.complete(3)
     encoder = UniformBits(jnp.zeros((2, 3)))
     model = ciqp.ConditionalModel(ansatz, encoder)

@@ -27,21 +27,15 @@ MMD, so spending draws on it only adds variance.  See
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ._layout import pad_visible_masks
 from ._precision import resolve_estimator_dtype
 from .encoders import Encoder
-from .estimator import (
-    _phase_differences,
-    _sample_values,
-    estimate_pauli_z_unchecked,
-)
+from .estimator import _phase_differences, _sample_values
 from .operators import OperatorBank, sample_nonidentity_masks_jax
 
 __all__ = [
@@ -108,7 +102,7 @@ def _validate_loss_inputs(
 
     The checks read only static shapes, so they stay valid while the trainer
     traces ``mmd`` under ``jax.jit``.  The messages mirror the checked
-    estimator's, because the loss calls the unchecked kernel.
+    estimator's.
     """
     if targets.ndim != 3:
         raise ValueError(
@@ -138,72 +132,222 @@ def _validate_loss_inputs(
     return n_data_qubits
 
 
-def _condition_value(
+def _condition_rows(encoders: Encoder) -> Encoder:
+    """Return ``encoders`` with a size-1 axis after the leading condition axis.
+
+    Mapping over the leading axis then hands every condition an encoder with
+    the ``(1, ...)`` leaves its methods expect, so the conditions run as one
+    vectorized program.  That requires a JAX pytree whose array leaves all
+    carry the leading condition axis; a single-condition encoder may have no
+    leaves at all.
+    """
+    leaves = jax.tree_util.tree_leaves(encoders)
+    if (not leaves and encoders.n_conditions != 1) or any(
+        not isinstance(leaf, (jax.Array, np.ndarray))
+        or leaf.ndim == 0
+        or leaf.shape[0] != encoders.n_conditions
+        for leaf in leaves
+    ):
+        raise TypeError(
+            f"{type(encoders).__name__} must be a JAX pytree whose array leaves "
+            "share a leading condition axis",
+        )
+    return jax.tree_util.tree_map(lambda leaf: leaf[:, None], encoders)
+
+
+@dataclass(frozen=True)
+class _Entries:
+    """One bandwidth's parameter-independent MMD inputs, one row per condition.
+
+    ``masks`` are model-width ``(C, M, n)`` with matching ``(C, M)`` weights
+    and target moments; ``samples`` are ``(C, 1, S, n)``, keeping the size-1
+    condition axis of each condition's encoder.  ``ratios`` ``(C, 1, S, M)``
+    is cached only when the same entries are evaluated repeatedly; otherwise
+    the evaluator computes it per sample chunk.
+    """
+
+    masks: jnp.ndarray
+    weights: jnp.ndarray
+    samples: jnp.ndarray
+    target_means: jnp.ndarray
+    target_squares: jnp.ndarray
+    ratios: jnp.ndarray | None = None
+
+
+jax.tree_util.register_dataclass(
+    _Entries,
+    data_fields=[
+        "masks",
+        "weights",
+        "samples",
+        "target_means",
+        "target_squares",
+        "ratios",
+    ],
+    meta_fields=[],
+)
+
+
+def _mmd_entries(
+    encoders: Encoder,
+    targets: jnp.ndarray,
+    key: jax.Array,
+    *,
+    bank: OperatorBank | None,
+    sigmas: tuple[float, ...] | None,
+    n_ops: int | None,
+    n_samples: int,
+    shared_samples: bool,
+    cache_ratios: bool = False,
+) -> tuple[_Entries, ...]:
+    """Draw every parameter-independent input of :func:`mmd`, per bandwidth.
+
+    Fresh masks use one key per (bandwidth, condition) entry; a bank supplies
+    its own entries.  Reference samples come from one key per entry, or with
+    ``shared_samples`` from one key per condition reused by every bandwidth.
+    """
+    rows = _condition_rows(encoders)
+    n_conditions, _, n_visible = targets.shape
+    n_ancillas = encoders.n_qubits - n_visible
+    if bank is None:
+        assert sigmas is not None and n_ops is not None
+        n_bandwidths = len(sigmas)
+        if shared_samples:
+            keys = jax.random.split(key, n_bandwidths * n_conditions + n_conditions)
+            mask_keys = jnp.swapaxes(
+                keys[: n_bandwidths * n_conditions].reshape(
+                    (n_conditions, n_bandwidths, *keys.shape[1:]),
+                ),
+                0,
+                1,
+            )
+            sample_keys = keys[n_bandwidths * n_conditions :]
+        else:
+            keys = jax.random.split(key, max(n_bandwidths * n_conditions * 2, 1))
+            keys = keys.reshape((n_bandwidths, n_conditions, 2, *keys.shape[1:]))
+            mask_keys, sample_keys = keys[:, :, 0], keys[:, :, 1]
+        mask_sets = [
+            jax.vmap(
+                lambda mask_key, sigma=sigma: sample_nonidentity_masks_jax(
+                    mask_key,
+                    n_ops,
+                    n_visible,
+                    sigma,
+                ),
+            )(mask_keys[bandwidth])
+            for bandwidth, sigma in enumerate(sigmas)
+        ]
+    else:
+        n_bandwidths = bank.n_bandwidths
+        if shared_samples:
+            sample_keys = jax.vmap(jax.random.fold_in, in_axes=(None, 0))(
+                key,
+                jnp.arange(n_conditions),
+            )
+        else:
+            keys = jax.random.split(key, n_bandwidths * n_conditions)
+            sample_keys = keys.reshape((n_bandwidths, n_conditions, *keys.shape[1:]))
+        mask_sets = [
+            (
+                bank.masks[bandwidth, :, : bank.width(bandwidth)],
+                bank.weights[bandwidth, :, : bank.width(bandwidth)],
+            )
+            for bandwidth in range(n_bandwidths)
+        ]
+
+    def draw(keys: jax.Array) -> jnp.ndarray:
+        return jax.vmap(lambda encoder, k: encoder.sample(k, n_samples))(rows, keys)
+
+    if shared_samples:
+        samples = draw(sample_keys)
+        sample_sets = [samples] * n_bandwidths
+    else:
+        sample_sets = [draw(keys) for keys in sample_keys]
+
+    entries = []
+    for (visible_masks, weights), samples in zip(mask_sets, sample_sets, strict=True):
+        target_means, target_squares = jax.vmap(target_moments)(
+            targets[:, None],
+            visible_masks,
+        )
+        masks = jnp.pad(visible_masks, ((0, 0), (0, 0), (0, n_ancillas)))
+        ratios = (
+            jax.vmap(lambda encoder, s, m: encoder.amplitude_ratios(s, m))(
+                rows,
+                samples,
+                masks,
+            )
+            if cache_ratios
+            else None
+        )
+        entries.append(
+            _Entries(
+                masks,
+                weights,
+                samples,
+                target_means[:, 0],
+                target_squares[:, 0],
+                ratios,
+            ),
+        )
+    return tuple(entries)
+
+
+def _mmd_from_entries(
     params: jnp.ndarray,
     generators: jnp.ndarray,
-    encoder: Encoder,
-    target_condition: jnp.ndarray,
-    visible_masks: jnp.ndarray,
-    weights: jnp.ndarray,
-    n_ancillas: int,
-    samples: jnp.ndarray,
-    gemm_dtype: jnp.dtype | None,
-    estimator_dtype: jnp.dtype | None,
-    sample_chunk: int | None,
-) -> jnp.ndarray:
-    """Weighted sum of per-mask squared moment differences for one condition.
+    encoders: Encoder,
+    entries: tuple[_Entries, ...],
+    *,
+    gemm_dtype: jnp.dtype | None = None,
+    estimator_dtype: jnp.dtype | None = None,
+    sample_chunk: int | None = None,
+) -> ConditionalMMDResult:
+    """Evaluate drawn entries at ``params``; only the phases depend on them.
 
-    ``target_condition`` has shape ``(1, n_targets, n_visible)`` and
-    ``visible_masks`` ``(n_masks, n_visible)``; the U-statistic corrections for
-    both the model and target terms use the unbiased finite-sample estimator.
-    ``sample_chunk`` streams the sample axis and accumulates the per-mask
-    moments, bounding the live ``(samples, masks, qubits)`` ratio tensor.
+    Each bandwidth vectorizes its conditions.  ``sample_chunk`` streams the
+    sample axis and accumulates the per-mask moments, bounding the live
+    ``(samples, masks)`` buffers; both model and target terms use the unbiased
+    finite-sample estimator.
     """
-    n_samples = samples.shape[1]
-    model_masks = pad_visible_masks(visible_masks, n_ancillas)
-    if sample_chunk is not None and 0 < sample_chunk < n_samples:
-        sums = None
-        square_sums = None
-        for start in range(0, n_samples, sample_chunk):
-            chunk = estimate_pauli_z_unchecked(
+    params = jnp.asarray(params, dtype=jnp.float64)
+    generators = jnp.asarray(generators, dtype=jnp.float64)
+    resolved_dtype = resolve_estimator_dtype(gemm_dtype, estimator_dtype)
+    rows = _condition_rows(encoders)
+
+    def condition_value(encoder: Encoder, entry: _Entries) -> jnp.ndarray:
+        n_samples = entry.samples.shape[1]
+        chunk = n_samples if sample_chunk is None else min(sample_chunk, n_samples)
+        sums = square_sums = 0.0
+        for start in range(0, n_samples, chunk):
+            samples = entry.samples[:, start : start + chunk]
+            ratios = (
+                encoder.amplitude_ratios(samples, entry.masks)
+                if entry.ratios is None
+                else entry.ratios[:, start : start + chunk]
+            )
+            phases = _phase_differences(
                 params,
                 generators,
-                encoder,
-                model_masks,
-                samples=samples[:, start : start + sample_chunk],
-                gemm_dtype=gemm_dtype,
-                estimator_dtype=estimator_dtype,
-                return_samples=True,
-            ).sample_values
-            assert chunk is not None
-            chunk_sums = jnp.sum(chunk, axis=1)
-            chunk_squares = jnp.sum(chunk**2, axis=1)
-            sums = chunk_sums if sums is None else sums + chunk_sums
-            square_sums = (
-                chunk_squares if square_sums is None else square_sums + chunk_squares
+                entry.masks,
+                samples,
+                gemm_dtype,
+                resolved_dtype,
             )
-        assert sums is not None
-        assert square_sums is not None
-        values = sums / n_samples
-    else:
-        model = estimate_pauli_z_unchecked(
-            params,
-            generators,
-            encoder,
-            model_masks,
-            samples=samples,
-            gemm_dtype=gemm_dtype,
-            estimator_dtype=estimator_dtype,
-            return_samples=True,
+            values = _sample_values(ratios, phases, resolved_dtype)[0]
+            sums = sums + jnp.sum(values, axis=0)
+            square_sums = square_sums + jnp.sum(values**2, axis=0)
+        model_squares = (sums**2 - square_sums) / (n_samples * (n_samples - 1))
+        per_mask = (
+            model_squares
+            - 2.0 * (sums / n_samples) * entry.target_means
+            + entry.target_squares
         )
-        assert model.sample_values is not None
-        values = model.values
-        sums = jnp.sum(model.sample_values, axis=1)
-        square_sums = jnp.sum(model.sample_values**2, axis=1)
-    target_means, target_squares = target_moments(target_condition, visible_masks)
-    model_squares = (sums**2 - square_sums) / (n_samples * (n_samples - 1))
-    per_mask = model_squares - 2.0 * values * target_means + target_squares
-    return jnp.sum(per_mask[0] * weights)
+        return jnp.sum(per_mask * entry.weights)
+
+    return _result(
+        jnp.stack([jax.vmap(condition_value)(rows, entry) for entry in entries]),
+    )
 
 
 def mmd(
@@ -227,9 +371,8 @@ def mmd(
     ``key`` always supplies the reference-state randomness.  Pass ``sigmas``
     and ``n_ops`` to draw fresh nonidentity masks from that key, or pass
     ``bank`` to evaluate a prebuilt compressed bank instead; the two mask
-    sources are exclusive.  The function evaluates one condition at a time, so
-    the sample/mask buffer covers a single condition instead of the whole
-    batch.
+    sources are exclusive.  ``encoders`` must be a JAX pytree whose array
+    leaves share a leading condition axis; the conditions are vectorized.
 
     With ``shared_samples=True`` each condition draws one reference sample set
     and evaluates every bandwidth's masks on it, whatever the mask source.
@@ -243,7 +386,7 @@ def mmd(
     params = jnp.asarray(params, dtype=jnp.float64)
     generators = jnp.asarray(generators, dtype=jnp.float64)
     targets = jnp.asarray(targets, dtype=jnp.float64)
-    estimator_dtype = resolve_estimator_dtype(gemm_dtype, estimator_dtype)
+    resolve_estimator_dtype(gemm_dtype, estimator_dtype)
     if sample_chunk is not None and sample_chunk < 1:
         raise ValueError("sample_chunk must be positive")
     if bank is None:
@@ -262,440 +405,36 @@ def mmd(
         encoders,
         n_samples,
     )
-    n_conditions = targets.shape[0]
-    n_ancillas = encoders.n_qubits - n_data_qubits
-
     if bank is not None:
-        if bank.n_conditions != n_conditions:
+        if bank.n_conditions != targets.shape[0]:
             raise ValueError(
                 f"operator bank covers {bank.n_conditions} conditions but targets "
-                f"have {n_conditions}",
+                f"have {targets.shape[0]}",
             )
         if bank.n_visible != n_data_qubits:
             raise ValueError(
                 f"operator bank is built for {bank.n_visible} visible qubits but "
                 f"targets have {n_data_qubits}",
             )
-        return _mmd_from_bank(
-            params,
-            generators,
-            encoders,
-            targets,
-            bank,
-            key,
-            n_samples,
-            shared_samples,
-            gemm_dtype,
-            estimator_dtype,
-            sample_chunk,
-        )
-
-    assert sigmas is not None and n_ops is not None
-    n_bandwidths = len(sigmas)
-
-    def condition_values(
-        encoder: Encoder,
-        target: jnp.ndarray,
-        samples: jnp.ndarray,
-        masks_and_weights: tuple[jnp.ndarray, jnp.ndarray],
-    ) -> jnp.ndarray:
-        visible_masks, weights = masks_and_weights
-        return _condition_value(
-            params,
-            generators,
-            encoder,
-            target[None],
-            visible_masks,
-            weights,
-            n_ancillas,
-            samples,
-            gemm_dtype,
-            estimator_dtype,
-            sample_chunk,
-        )
-
-    def fresh_masks(mask_key: jax.Array, sigma: float | jax.Array):
-        return sample_nonidentity_masks_jax(mask_key, n_ops, n_data_qubits, sigma)
-
-    if shared_samples:
-        # One reference draw per condition covers every bandwidth's masks.
-        keys = jax.random.split(key, n_bandwidths * n_conditions + n_conditions)
-        mask_keys = keys[: n_bandwidths * n_conditions].reshape(
-            (n_conditions, n_bandwidths, *keys.shape[1:]),
-        )
-        sample_keys = keys[n_bandwidths * n_conditions :]
-
-        def shared_condition(
-            encoder: Encoder,
-            target: jnp.ndarray,
-            condition_mask_keys: jax.Array,
-            sample_key: jax.Array,
-        ) -> jnp.ndarray:
-            samples = encoder.sample(sample_key, n_samples)
-            return jnp.stack(
-                [
-                    condition_values(
-                        encoder,
-                        target,
-                        samples,
-                        fresh_masks(condition_mask_keys[bandwidth], sigma),
-                    )
-                    for bandwidth, sigma in enumerate(sigmas)
-                ],
-            )
-
-        per_condition = _per_condition(
-            encoders,
-            shared_condition,
-            targets,
-            mask_keys,
-            sample_keys,
-        )
-        return _result(per_condition.T)
-
-    keys = jax.random.split(key, max(n_bandwidths * n_conditions * 2, 1))
-    keys = keys.reshape((n_bandwidths, n_conditions, 2, *keys.shape[1:]))
-    bandwidth_values = []
-    for bandwidth, sigma in enumerate(sigmas):
-
-        def fresh_condition(
-            encoder: Encoder,
-            target: jnp.ndarray,
-            entry_keys: jax.Array,
-            sigma: float | jax.Array = sigma,
-        ) -> jnp.ndarray:
-            masks_and_weights = fresh_masks(entry_keys[0], sigma)
-            samples = encoder.sample(entry_keys[1], n_samples)
-            return condition_values(encoder, target, samples, masks_and_weights)
-
-        bandwidth_values.append(
-            _per_condition(encoders, fresh_condition, targets, keys[bandwidth]),
-        )
-    return _result(jnp.stack(bandwidth_values))
-
-
-def _mmd_from_bank(
-    params: jnp.ndarray,
-    generators: jnp.ndarray,
-    encoders: Encoder,
-    targets: jnp.ndarray,
-    bank: OperatorBank,
-    key: jax.Array,
-    n_samples: int,
-    shared_samples: bool,
-    gemm_dtype: jnp.dtype | None,
-    estimator_dtype: jnp.dtype | None,
-    sample_chunk: int | None,
-) -> ConditionalMMDResult:
-    n_data_qubits = targets.shape[2]
-    n_conditions = targets.shape[0]
-    n_ancillas = encoders.n_qubits - n_data_qubits
-    # Condition-major copies, so the per-condition map slices one bank entry
-    # row per condition.
-    condition_masks = jnp.swapaxes(bank.masks, 0, 1)
-    condition_weights = jnp.swapaxes(bank.weights, 0, 1)
-
-    def entry_value(
-        encoder: Encoder,
-        target: jnp.ndarray,
-        samples: jnp.ndarray,
-        masks: jnp.ndarray,
-        weights: jnp.ndarray,
-        bandwidth: int,
-    ) -> jnp.ndarray:
-        width = bank.width(bandwidth)
-        return _condition_value(
-            params,
-            generators,
-            encoder,
-            target[None],
-            masks[bandwidth, :width],
-            weights[bandwidth, :width],
-            n_ancillas,
-            samples,
-            gemm_dtype,
-            estimator_dtype,
-            sample_chunk,
-        )
-
-    if shared_samples:
-        sample_keys = jnp.stack(
-            [jax.random.fold_in(key, condition) for condition in range(n_conditions)],
-        )
-
-        def shared_condition(
-            encoder: Encoder,
-            target: jnp.ndarray,
-            masks: jnp.ndarray,
-            weights: jnp.ndarray,
-            sample_key: jax.Array,
-        ) -> jnp.ndarray:
-            samples = encoder.sample(sample_key, n_samples)
-            return jnp.stack(
-                [
-                    entry_value(encoder, target, samples, masks, weights, bandwidth)
-                    for bandwidth in range(bank.n_bandwidths)
-                ],
-            )
-
-        per_condition = _per_condition(
-            encoders,
-            shared_condition,
-            targets,
-            condition_masks,
-            condition_weights,
-            sample_keys,
-        )
-        return _result(per_condition.T)
-
-    keys = jax.random.split(key, bank.n_bandwidths * n_conditions)
-    keys = keys.reshape((bank.n_bandwidths, n_conditions, *keys.shape[1:]))
-    bandwidth_values = []
-    for bandwidth in range(bank.n_bandwidths):
-
-        def bank_condition(
-            encoder: Encoder,
-            target: jnp.ndarray,
-            masks: jnp.ndarray,
-            weights: jnp.ndarray,
-            sample_key: jax.Array,
-            bandwidth: int = bandwidth,
-        ) -> jnp.ndarray:
-            samples = encoder.sample(sample_key, n_samples)
-            return entry_value(encoder, target, samples, masks, weights, bandwidth)
-
-        bandwidth_values.append(
-            _per_condition(
-                encoders,
-                bank_condition,
-                targets,
-                condition_masks,
-                condition_weights,
-                keys[bandwidth],
-            ),
-        )
-    return _result(jnp.stack(bandwidth_values))
-
-
-# Largest cached ratio tensor a fixed-randomness plan may hold on the device.
-_FIXED_PLAN_BYTES = 1 << 30
-
-
-@dataclass(frozen=True)
-class _FixedMMDPlan:
-    """Parameter-independent inputs of :func:`mmd` for one fixed key.
-
-    Each array has a leading entry axis that runs bandwidth-major over the
-    ``(bandwidth, condition)`` entries.  Masks are model-width, samples and
-    ratios keep the encoder's size-1 condition axis, and the target moments
-    are evaluated once on the visible masks.
-    """
-
-    masks: jnp.ndarray
-    weights: jnp.ndarray
-    samples: jnp.ndarray
-    ratios: jnp.ndarray
-    target_means: jnp.ndarray
-    target_squares: jnp.ndarray
-    n_bandwidths: int
-    n_conditions: int
-
-
-jax.tree_util.register_dataclass(
-    _FixedMMDPlan,
-    data_fields=[
-        "masks",
-        "weights",
-        "samples",
-        "ratios",
-        "target_means",
-        "target_squares",
-    ],
-    meta_fields=["n_bandwidths", "n_conditions"],
-)
-
-
-def _fixed_mmd_plan(
-    encoders: Encoder,
-    targets: jnp.ndarray,
-    key: jax.Array,
-    *,
-    sigmas: tuple[float, ...],
-    n_ops: int,
-    n_samples: int,
-) -> _FixedMMDPlan | None:
-    """Precompute every parameter-independent input of a fresh-mask ``mmd``.
-
-    With a fixed key, :func:`mmd` redraws the same masks and reference samples
-    and recomputes the same amplitude ratios and target moments on every call;
-    only the phases depend on the parameters.  The plan reproduces the
-    fresh-mask, per-entry key layout of :func:`mmd`, so :func:`_fixed_mmd`
-    estimates the same quantity.  It returns ``None`` when the cached ratios
-    would exceed ``_FIXED_PLAN_BYTES``.
-    """
-    targets = jnp.asarray(targets, dtype=jnp.float64)
-    n_conditions, _, n_visible = targets.shape
-    n_ancillas = encoders.n_qubits - n_visible
-    n_bandwidths = len(sigmas)
-    ratio_bytes = n_bandwidths * n_conditions * n_samples * n_ops * 16
-    if ratio_bytes > _FIXED_PLAN_BYTES:
-        return None
-    keys = jax.random.split(key, max(n_bandwidths * n_conditions * 2, 1))
-    keys = keys.reshape((n_bandwidths, n_conditions, 2, *keys.shape[1:]))
-    entries = []
-    for bandwidth, sigma in enumerate(sigmas):
-        for condition in range(n_conditions):
-            visible_masks, weights = sample_nonidentity_masks_jax(
-                keys[bandwidth, condition, 0],
-                n_ops,
-                n_visible,
-                float(sigma),
-            )
-            encoder = encoders.select(condition)
-            samples = encoder.sample(keys[bandwidth, condition, 1], n_samples)
-            masks = pad_visible_masks(visible_masks, n_ancillas)
-            target_means, target_squares = target_moments(
-                targets[condition : condition + 1],
-                visible_masks,
-            )
-            entries.append(
-                (
-                    masks,
-                    weights,
-                    samples,
-                    encoder.amplitude_ratios(samples, masks),
-                    target_means[0],
-                    target_squares[0],
-                ),
-            )
-    stacked = [jnp.stack(column) for column in zip(*entries, strict=True)]
-    return _FixedMMDPlan(*stacked, n_bandwidths, n_conditions)
-
-
-def _fixed_mmd(
-    plan: _FixedMMDPlan,
-    params: jnp.ndarray,
-    generators: jnp.ndarray,
-    *,
-    gemm_dtype: jnp.dtype | None = None,
-    estimator_dtype: jnp.dtype | None = None,
-) -> ConditionalMMDResult:
-    """Evaluate a :class:`_FixedMMDPlan` at ``params``.
-
-    Bandwidths run one at a time and their conditions are vectorized, so the
-    live phase tensor covers one bandwidth's conditions.
-    """
-    params = jnp.asarray(params, dtype=jnp.float64)
-    generators = jnp.asarray(generators, dtype=jnp.float64)
-    resolved_dtype = resolve_estimator_dtype(gemm_dtype, estimator_dtype)
-
-    def entry_value(
-        inputs: tuple[jnp.ndarray, ...],
-    ) -> jnp.ndarray:
-        masks, weights, samples, ratios, target_means, target_squares = inputs
-        phases = _phase_differences(
-            params,
-            generators,
-            masks,
-            samples,
-            gemm_dtype,
-            resolved_dtype,
-        )
-        sample_values = _sample_values(ratios, phases, resolved_dtype)
-        n_samples = samples.shape[1]
-        values = jnp.mean(sample_values, axis=1)[0]
-        sums = jnp.sum(sample_values, axis=1)[0]
-        square_sums = jnp.sum(sample_values**2, axis=1)[0]
-        model_squares = (sums**2 - square_sums) / (n_samples * (n_samples - 1))
-        per_mask = model_squares - 2.0 * values * target_means + target_squares
-        return jnp.sum(per_mask * weights)
-
-    entries = (
-        plan.masks,
-        plan.weights,
-        plan.samples,
-        plan.ratios,
-        plan.target_means,
-        plan.target_squares,
+    entries = _mmd_entries(
+        encoders,
+        targets,
+        key,
+        bank=bank,
+        sigmas=sigmas,
+        n_ops=n_ops,
+        n_samples=n_samples,
+        shared_samples=shared_samples,
     )
-    by_bandwidth = [
-        entry.reshape(plan.n_bandwidths, plan.n_conditions, *entry.shape[1:])
-        for entry in entries
-    ]
-    values = jnp.stack(
-        [
-            jax.vmap(lambda *inputs: entry_value(inputs))(
-                *(entry[bandwidth] for entry in by_bandwidth),
-            )
-            for bandwidth in range(plan.n_bandwidths)
-        ],
+    return _mmd_from_entries(
+        params,
+        generators,
+        encoders,
+        entries,
+        gemm_dtype=gemm_dtype,
+        estimator_dtype=estimator_dtype,
+        sample_chunk=sample_chunk,
     )
-    return _result(values)
-
-
-def _pytree_encoder_signature(
-    encoder: object,
-) -> tuple[object, tuple[tuple[tuple[int, ...], str], ...]] | None:
-    """Return a stable JAX signature, or ``None`` for opaque encoders.
-
-    Only array leaves are accepted, because passing an arbitrary Python object
-    through a JAX transformation would fail during tracing.  The fallback
-    matters for user-defined encoders that are deliberately not registered as
-    pytrees.
-    """
-    leaves, structure = jax.tree_util.tree_flatten(encoder)
-    if not leaves:
-        return None
-    signatures = []
-    for leaf in leaves:
-        if not isinstance(leaf, (jax.Array, np.ndarray)):
-            return None
-        signatures.append((tuple(leaf.shape), np.dtype(leaf.dtype).str))
-    return structure, tuple(signatures)
-
-
-def _dynamic_encoder_support(encoders: Encoder) -> bool:
-    """Whether every selected encoder shares one pytree signature.
-
-    Such encoders can be stacked and traced once for all conditions instead
-    of once per condition.
-    """
-    signatures = [
-        _pytree_encoder_signature(encoders.select(i))
-        for i in range(encoders.n_conditions)
-    ]
-    return signatures[0] is not None and all(
-        signature == signatures[0] for signature in signatures[1:]
-    )
-
-
-def _per_condition(
-    encoders: Encoder,
-    body: Callable[..., jnp.ndarray],
-    *per_condition_inputs: jnp.ndarray,
-) -> jnp.ndarray:
-    """Stack ``body(encoder_c, *inputs[c])`` over the conditions.
-
-    Encoders whose selections share one pytree signature are stacked and
-    vectorized with ``vmap``, so the program is traced once whatever the
-    condition count and the conditions run in parallel.  The product
-    encoder's ratio contraction keeps one condition's live buffer at
-    ``(samples, masks)``, so the batch stays below the former
-    ``(samples, masks, qubits)`` buffer of a single condition whenever the
-    conditions do not outnumber the qubits.  Opaque encoders fall back to a
-    Python loop.
-    """
-    n_conditions = encoders.n_conditions
-    selected = [encoders.select(condition) for condition in range(n_conditions)]
-    if n_conditions == 1 or not _dynamic_encoder_support(encoders):
-        return jnp.stack(
-            [
-                body(encoder, *(values[condition] for values in per_condition_inputs))
-                for condition, encoder in enumerate(selected)
-            ],
-        )
-    stacked = jax.tree_util.tree_map(lambda *leaves: jnp.stack(leaves), *selected)
-    return jax.vmap(body)(stacked, *per_condition_inputs)
 
 
 def _result(per_bandwidth_condition: jnp.ndarray) -> ConditionalMMDResult:

@@ -236,24 +236,26 @@ class _TrainingObserver:
 
     def jit(self, fn, *args, **kwargs):
         wrapped = jax.jit(fn, *args, **kwargs)
-        if fn.__name__ not in {"training_step", "validation_loss"}:
+        if fn.__name__ not in {"training_steps", "validation_loss"}:
             return wrapped
-        executable = None
+        # A shorter final validation interval compiles a second scan length.
+        executables = {}
 
         def execute(*values):
-            nonlocal executable
             start = time.perf_counter()
+            signature = str(jax.tree_util.tree_map(np.shape, values))
+            executable = executables.get(signature)
             if executable is None:
                 lowered = wrapped.lower(*values)
                 middle = time.perf_counter()
-                executable = lowered.compile()
+                executable = executables[signature] = lowered.compile()
                 end = time.perf_counter()
                 self.lowering_seconds += middle - start
                 self.compilation_seconds += end - middle
                 self.compilation_count += 1
-                if fn.__name__ == "training_step" and self.loop_start is not None:
+                if fn.__name__ == "training_steps" and self.loop_start is not None:
                     self.loop_compile_seconds += end - start
-            if fn.__name__ == "training_step":
+            if fn.__name__ == "training_steps":
                 if self.loop_start is None:
                     self.loop_start = time.perf_counter()
                 return executable(*values)
