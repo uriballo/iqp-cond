@@ -298,11 +298,10 @@ def _train_true_fp32(
     sigmas_jax = jnp.asarray(sigmas, dtype=jnp.float32)
 
     @jax.jit
-    def training_step(params: jnp.ndarray, opt_state: optax.OptState, step: int, condition: int, bandwidth: int, key: jax.Array) -> tuple[jnp.ndarray, jnp.ndarray, optax.OptState]:
+    def training_step(params: jnp.ndarray, opt_state: optax.OptState, step: int, condition: int, bandwidth: int, key: jax.Array, selected_encoder: object) -> tuple[jnp.ndarray, jnp.ndarray, optax.OptState]:
         indices = device_batch_indices[step, condition]
         target_batch = device_targets[condition, indices][None]
         sigma = sigmas_jax[bandwidth]
-        selected_encoder = model.encoder.select(condition)
 
         def loss_fn(p: jnp.ndarray) -> jnp.ndarray:
             return mmd_fp32(
@@ -335,6 +334,9 @@ def _train_true_fp32(
     validation_losses = [best_validation]
     selection_scores = [best_selection]
 
+    # Pre-select encoders for each condition
+    selected_encoders = tuple(model.encoder.select(c) for c in range(n_conditions))
+
     key = jax.random.PRNGKey(seed)
 
     for step in range(config.steps):
@@ -343,7 +345,8 @@ def _train_true_fp32(
         step_key = jax.random.fold_in(key, step)
 
         loss, params, optimizer_state = training_step(
-            params, optimizer_state, step, condition, bandwidth, step_key
+            params, optimizer_state, step, condition, bandwidth, step_key,
+            selected_encoders[condition]
         )
         train_losses.append(float(loss))
 
