@@ -110,20 +110,21 @@ def _phase_differences(
         generators = generators.astype(resolved_dtype)
         masks = masks.astype(resolved_dtype)
         params = params.astype(resolved_dtype)
-    sample_parities = jnp.einsum("bsn,mn->bsm", samples, generators)
+    # Flattening the leading (condition, sample) axes keeps both contractions
+    # plain matrix products; under the loss's condition vmap, batched einsums
+    # with the unit condition axis measured about a quarter slower on CPU.
+    leading = samples.shape[:-1]
+    sample_parities = samples.reshape(-1, samples.shape[-1]) @ generators.T
     sample_characters = 1.0 - 2.0 * jnp.mod(sample_parities, 2.0)
-    op_parities = jnp.mod(jnp.einsum("rn,mn->rm", masks, generators), 2.0)
+    op_parities = jnp.mod(masks @ generators.T, 2.0)
     weighted_flips = -2.0 * op_parities * params[None, :]
-    if resolved_dtype is not None:
-        return jnp.einsum("bsm,rm->bsr", sample_characters, weighted_flips)
     if gemm_dtype is not None:
-        phases = jnp.einsum(
-            "bsm,rm->bsr",
-            sample_characters.astype(gemm_dtype),
-            weighted_flips.astype(gemm_dtype),
-        )
-        return phases.astype(jnp.float64)
-    return jnp.einsum("bsm,rm->bsr", sample_characters, weighted_flips)
+        characters = sample_characters.astype(gemm_dtype)
+        flips = weighted_flips.astype(gemm_dtype)
+        phases = (characters @ flips.T).astype(jnp.float64)
+    else:
+        phases = sample_characters @ weighted_flips.T
+    return phases.reshape(*leading, masks.shape[0])
 
 
 def _sample_values(
