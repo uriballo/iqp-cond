@@ -302,13 +302,14 @@ def _train_true_fp32(
         indices = device_batch_indices[step, condition]
         target_batch = device_targets[condition, indices][None]
         sigma = sigmas_jax[bandwidth]
+        selected_encoder = model.encoder.select(condition)
 
         def loss_fn(p: jnp.ndarray) -> jnp.ndarray:
             return mmd_fp32(
-                p, model.generators.astype(jnp.float32), model.encoder,
+                p, model.generators.astype(jnp.float32), selected_encoder,
                 target_batch, key,
                 sigmas=(sigma,), n_ops=config.n_ops, n_samples=config.mc_samples,
-                shared_samples=True, sample_chunk=config.sample_chunk,
+                shared_samples=False, sample_chunk=config.sample_chunk,
             ).loss
 
         loss, grad = jax.value_and_grad(loss_fn)(params)
