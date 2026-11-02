@@ -314,7 +314,7 @@ def _fp32_mmd(
     targets: jnp.ndarray,
     key: jax.Array,
     *,
-    sigmas: tuple[float, ...],
+    sigmas: tuple[float | jax.Array, ...],
     n_ops: int,
     n_samples: int,
     shared_samples: bool,
@@ -434,7 +434,7 @@ def _train_true_fp32(
             return _fp32_mmd(
                 p, model.generators.astype(jnp.float32), model.encoder,
                 target_batch, key,
-                sigmas=(float(sigma),), n_ops=config.n_ops, n_samples=config.mc_samples,
+                sigmas=(sigma,), n_ops=config.n_ops, n_samples=config.mc_samples,
                 shared_samples=True, sample_chunk=config.sample_chunk,
                 n_conditions=1, n_data_qubits=n_data_qubits, n_ancillas=n_ancillas,
             )
