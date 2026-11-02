@@ -107,7 +107,7 @@ class TrainingConfig:
     validation_mc_samples: int = 1_000
     gemm_dtype: jnp.dtype | None = None
     estimator_dtype: jnp.dtype | None = None
-    precision_mode: PrecisionMode = "full_fp32"
+    precision_mode: PrecisionMode = "fp64"
     sample_chunk: int | None = None
     mask_refresh: MaskRefresh = STEP
 
