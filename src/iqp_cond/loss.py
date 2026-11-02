@@ -31,10 +31,10 @@ from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 from ._precision import resolve_estimator_dtype
 from .encoders import Encoder
+from .encoders.base import _condition_rows
 from .estimator import _phase_differences, _sample_values
 from .operators import OperatorBank, sample_nonidentity_masks_jax
 
@@ -130,29 +130,6 @@ def _validate_loss_inputs(
     if n_samples < 2:
         raise ValueError("n_samples must be at least two")
     return n_data_qubits
-
-
-def _condition_rows(encoders: Encoder) -> Encoder:
-    """Return ``encoders`` with a size-1 axis after the leading condition axis.
-
-    Mapping over the leading axis then hands every condition an encoder with
-    the ``(1, ...)`` leaves its methods expect, so the conditions run as one
-    vectorized program.  That requires a JAX pytree whose array leaves all
-    carry the leading condition axis; a single-condition encoder may have no
-    leaves at all.
-    """
-    leaves = jax.tree_util.tree_leaves(encoders)
-    if (not leaves and encoders.n_conditions != 1) or any(
-        not isinstance(leaf, (jax.Array, np.ndarray))
-        or leaf.ndim == 0
-        or leaf.shape[0] != encoders.n_conditions
-        for leaf in leaves
-    ):
-        raise TypeError(
-            f"{type(encoders).__name__} must be a JAX pytree whose array leaves "
-            "share a leading condition axis",
-        )
-    return jax.tree_util.tree_map(lambda leaf: leaf[:, None], encoders)
 
 
 @dataclass(frozen=True)

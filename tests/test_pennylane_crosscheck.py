@@ -583,11 +583,6 @@ class _BellPreparation:
 
         return queue
 
-    def select(self, condition: int) -> _BellPreparation:
-        if condition != 0:
-            raise IndexError(f"condition {condition} outside the batch")
-        return self
-
 
 def test_nonproduct_preparation_matches_pennylane() -> None:
     """A CNOT preparation compiles to the same circuit PennyLane runs."""
@@ -634,11 +629,6 @@ class _StatePrepEncoder:
             qml.CZ(wires=(0, 1))
 
         return queue
-
-    def select(self, condition: int) -> _StatePrepEncoder:
-        if condition != 0:
-            raise IndexError(f"condition {condition} outside the batch")
-        return self
 
 
 def test_preparation_may_use_any_pennylane_gate() -> None:

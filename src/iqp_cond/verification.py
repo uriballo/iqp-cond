@@ -22,6 +22,7 @@ import jax
 import numpy as np
 
 from .encoders import Encoder
+from .encoders.base import _check_condition_pytree, _select_condition
 
 __all__ = ["EncoderCheck", "check_encoder"]
 
@@ -208,49 +209,14 @@ def _reference_states(
 
 
 def _tape_signature(encoder: Encoder, condition: int) -> tuple:
-    """Structural summary of the operations a condition's preparation queues.
-
-    Parameters are kept as arrays so gate kinds with vector parameters, such as
-    state preparations and templates, compare without special cases.
-    """
+    """Names and wires of the operations a condition's preparation queues."""
     import pennylane as qml
 
     operations = qml.tape.make_qscript(encoder.preparation(condition))().operations
     return tuple(
-        (
-            operation.name,
-            tuple(int(wire) for wire in operation.wires),
-            tuple(
-                np.asarray(parameter, dtype=np.complex128).ravel()
-                for parameter in operation.parameters
-            ),
-        )
+        (operation.name, tuple(int(wire) for wire in operation.wires))
         for operation in operations
     )
-
-
-def _signatures_match(first: tuple, second: tuple) -> bool:
-    """Compare two tape signatures, allowing float slack in the parameters."""
-    if len(first) != len(second):
-        return False
-    for (name, wires, params), (other_name, other_wires, other_params) in zip(
-        first,
-        second,
-        strict=True,
-    ):
-        if name != other_name or wires != other_wires:
-            return False
-        if len(params) != len(other_params):
-            return False
-        for value, other in zip(params, other_params, strict=True):
-            if value.shape != other.shape or not np.allclose(
-                value,
-                other,
-                rtol=1e-12,
-                atol=0.0,
-            ):
-                return False
-    return True
 
 
 def _probe_rows(
@@ -564,7 +530,7 @@ def check_encoder(
                     )
 
     failures.extend(
-        _selection_report(
+        _restriction_report(
             encoder,
             states,
             probes,
@@ -615,7 +581,7 @@ def check_encoder(
     )
 
 
-def _selection_report(
+def _restriction_report(
     encoder: Encoder,
     states: np.ndarray,
     probes: np.ndarray,
@@ -625,33 +591,39 @@ def _selection_report(
     n_samples: int,
     seed: int,
 ) -> list[str]:
-    """Check that ``select`` restricts ratios, preparation, and sampling.
+    """Check that row ``c`` of the leaves restricts the encoder to condition ``c``.
 
-    Training evaluates one condition at a time through ``select``, so a
-    selection that disagrees with the batched call silently changes the
-    objective.  Realized samples are not comparable across the two call shapes,
-    because the draws are independent; the selected sampling law is checked
-    against the reference instead.
+    Training restricts the encoder by indexing its leaves, so a leaf whose
+    leading axis is not the condition axis silently changes the objective.
+    Training calls only ``sample`` and ``amplitude_ratios`` on a restriction,
+    so the restricted ratios must match the batched ones for that condition.
+    Realized samples are not comparable across the two call shapes, because
+    the draws are independent; the restricted sampling law is checked against
+    the reference instead.
     """
+    try:
+        _check_condition_pytree(encoder)
+    except TypeError as error:
+        return [f"{error}; training rejects it"]
     failures: list[str] = []
 
     if ratios_available:
         try:
             batched = np.asarray(encoder.amplitude_ratios(probes, masks))
         except Exception as error:
-            failures.append(f"select: the batched ratios failed: {error!r}")
+            failures.append(f"restriction: the batched ratios failed: {error!r}")
             batched = None
     else:
         batched = None
 
     for condition in range(states.shape[0]):
         try:
-            selected = encoder.select(condition)
+            selected = _select_condition(encoder, condition)
             selected_ratios = np.asarray(
                 selected.amplitude_ratios(probes[condition : condition + 1], masks),
             )
         except Exception as error:
-            failures.append(f"select({condition}): {error!r}")
+            failures.append(f"condition {condition} restriction: {error!r}")
             continue
         if batched is not None:
             row = batched[condition : condition + 1]
@@ -662,31 +634,24 @@ def _selection_report(
                 atol=1e-9,
             ):
                 failures.append(
-                    f"select({condition}) disagrees with the batched ratios",
+                    f"condition {condition} restriction disagrees with the "
+                    "batched ratios",
                 )
-        try:
-            batched_signature = _tape_signature(encoder, condition)
-            selected_signature = _tape_signature(selected, 0)
-        except Exception as error:
-            failures.append(f"select({condition}) preparation: {error!r}")
-            continue
-        if not _signatures_match(batched_signature, selected_signature):
-            failures.append(
-                f"select({condition}) queues a different preparation than the "
-                "batched encoder does for that condition",
-            )
 
     try:
         selected_samples = np.asarray(
-            encoder.select(0).sample(jax.random.PRNGKey(seed + 1), n_samples),
+            _select_condition(encoder, 0).sample(
+                jax.random.PRNGKey(seed + 1),
+                n_samples,
+            ),
         )
     except Exception as error:
-        failures.append(f"select(0).sample: {error!r}")
+        failures.append(f"condition 0 restriction sample: {error!r}")
         return failures
     if selected_samples.shape != (1, n_samples, n_qubits):
         failures.append(
-            f"select(0).sample returned shape {selected_samples.shape}; expected "
-            f"{(1, n_samples, n_qubits)}",
+            "condition 0 restriction sample returned shape "
+            f"{selected_samples.shape}; expected {(1, n_samples, n_qubits)}",
         )
         return failures
 
@@ -699,7 +664,8 @@ def _selection_report(
     p_value = min(_law_p_values(counts, law, n_samples, n_qubits))
     if p_value < 1e-6:
         failures.append(
-            "select(0).sample does not follow the preparation's Born law: worst "
+            "condition 0 restriction sample does not follow the preparation's "
+            "Born law: worst "
             f"chi-square p-value {p_value:.3e}",
         )
     return failures

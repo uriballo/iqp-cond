@@ -55,9 +55,6 @@ class WrappedEncoder:
     def preparation(self, condition: int) -> Callable[[], None]:
         return self.inner.preparation(condition)
 
-    def select(self, condition: int) -> WrappedEncoder:
-        return WrappedEncoder(self.inner.select(condition))
-
 
 @pytest.fixture
 def targets() -> tuple[np.ndarray, np.ndarray]:

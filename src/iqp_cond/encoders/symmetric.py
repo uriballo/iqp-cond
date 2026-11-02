@@ -40,7 +40,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .base import _safe_ratio
+from .base import _safe_ratio, _select_condition
 
 __all__ = [
     "CollectivePhaseEncoder",
@@ -176,11 +176,7 @@ class _ConditionBatch:
     def select(self, condition: int) -> _ConditionBatch:
         """Return this encoder restricted to one condition."""
         self._check_condition(condition)
-        selection = slice(condition, condition + 1)
-        return self._from_fields(
-            **{name: getattr(self, name)[selection] for name in self._data_fields},
-            **{name: getattr(self, name) for name in self._meta_fields},
-        )
+        return _select_condition(self, condition)
 
 
 @jax.tree_util.register_pytree_node_class

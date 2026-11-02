@@ -15,7 +15,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .base import _safe_ratio
+from .base import _safe_ratio, _select_condition
 
 __all__ = ["AngleEncoder", "layered_amplitudes"]
 
@@ -336,13 +336,7 @@ class AngleEncoder(_ProductEncoder):
         """Return this encoder restricted to one condition."""
         if not 0 <= condition < self.n_conditions:
             raise IndexError(f"condition {condition} outside the batch")
-        selection = slice(condition, condition + 1)
-        return self._from_components(
-            self.angles[selection],
-            self.amp_zero[selection],
-            self.amp_one[selection],
-            self.axes,
-        )
+        return _select_condition(self, condition)
 
     def preparation(self, condition: int) -> Callable[[], None]:
         """Return a callable queuing this condition's rotation layers.

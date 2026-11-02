@@ -24,6 +24,7 @@ import numpy as np
 import optax
 
 from ._precision import resolve_estimator_dtype
+from .encoders.base import _select_condition
 from .initialization import parameters_from_data
 from .loss import _Entries, _mmd_entries, _mmd_from_entries, mmd
 from .model import ConditionalModel
@@ -296,7 +297,7 @@ def _make_training_steps(
         condition: jax.Array,
         bandwidth: jax.Array,
     ) -> jnp.ndarray:
-        encoder = jax.tree_util.tree_map(lambda leaf: leaf[condition][None], encoders)
+        encoder = _select_condition(encoders, condition)
         target_batch = training_targets[condition, batch_indices[step, condition]][None]
 
         def loss(**mask_source: object) -> jnp.ndarray:

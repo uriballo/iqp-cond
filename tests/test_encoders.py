@@ -176,11 +176,6 @@ class UniformBits:
         # |+>^n is the image of |0>^n under the first Hadamard layer.
         return lambda: None
 
-    def select(self, condition: int) -> UniformBits:
-        if not 0 <= condition < self.n_conditions:
-            raise IndexError(f"condition {condition} outside the batch")
-        return UniformBits(self.angles[condition : condition + 1])
-
 
 jax.tree_util.register_dataclass(UniformBits, data_fields=["angles"], meta_fields=[])
 

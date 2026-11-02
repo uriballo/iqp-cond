@@ -1,7 +1,7 @@
 """Encoders: the interface and the built-in encoder families.
 
 A conditional IQP model applies one shared diagonal unitary ``U_theta`` to a
-condition-dependent input state ``|phi(c)>``.  An encoder provides four
+condition-dependent input state ``|phi(c)>``.  An encoder provides three
 capabilities:
 
 ``sample``
@@ -13,14 +13,12 @@ capabilities:
     Return a callable that queues ``|phi(c)>`` in the active PennyLane queuing
     context, so the model can be compiled to a circuit and sampled on a
     simulator or backend.
-``select``
-    Restrict the condition batch to one condition for memory-bounded loss
-    evaluation.
 
 The first two operations make training classically tractable and keep the
 trainer independent of any circuit simulator.  Only :mod:`iqp_cond.simulation`
-uses the third.  Encoder families are ordinary Python objects, so a custom
-implementation needs no registration and is used directly::
+uses the third.  Training also needs a JAX pytree whose array leaves carry the
+leading condition axis, so a custom dataclass is registered with
+:func:`jax.tree_util.register_dataclass` and then used directly::
 
     import iqp_cond as ciqp
 

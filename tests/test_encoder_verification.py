@@ -12,7 +12,7 @@ it belongs to.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 
 import jax
 import jax.numpy as jnp
@@ -131,7 +131,10 @@ class LayeredEncoder:
     scaled_ratios: bool = False
     doubled_empty_mask: bool = False
     prep_mode: str = "normal"
-    lying_select: bool = False
+    # Stores angles as (layers, conditions, qubits), so with as many layers as
+    # conditions the leading axis passes the shape check but is not the
+    # condition axis.
+    layer_major: bool = False
     psi: np.ndarray = field(init=False, repr=False, compare=False)
     calls: list = field(default_factory=list, repr=False, compare=False)
 
@@ -139,6 +142,7 @@ class LayeredEncoder:
         values = np.asarray(self.angles, dtype=np.float64)
         if values.ndim == 2:
             values = values[:, None, :]
+        rows = np.swapaxes(values, 0, 1) if self.layer_major else values
         states = [
             entangled_post_hadamard(
                 row,
@@ -146,18 +150,23 @@ class LayeredEncoder:
                 native_gates=self.native_gates,
                 big_endian=self.big_endian,
             )
-            for row in values
+            for row in rows
         ]
         object.__setattr__(self, "angles", values)
         object.__setattr__(self, "psi", np.stack(states))
 
     @property
+    def rows(self) -> np.ndarray:
+        """Angles as ``(conditions, layers, qubits)``."""
+        return np.swapaxes(self.angles, 0, 1) if self.layer_major else self.angles
+
+    @property
     def n_conditions(self) -> int:
-        return int(self.angles.shape[0])
+        return int(self.rows.shape[0])
 
     @property
     def n_qubits(self) -> int:
-        return int(self.angles.shape[2])
+        return int(self.rows.shape[2])
 
     def sample(self, key: jax.Array, n_samples: int) -> jnp.ndarray:
         probs = np.abs(self.psi) ** 2
@@ -198,7 +207,7 @@ class LayeredEncoder:
             for layer, labels in enumerate(self.axes):
                 for qubit, label in enumerate(labels):
                     gate = {"X": qml.RX, "Y": qml.RY, "Z": qml.RZ}[label]
-                    gate(float(self.angles[condition, layer, qubit]), wires=qubit)
+                    gate(float(self.rows[condition, layer, qubit]), wires=qubit)
 
         def queue_entangler() -> None:
             if self.native_gates:
@@ -225,21 +234,24 @@ class LayeredEncoder:
 
         return queue
 
-    def select(self, condition: int) -> LayeredEncoder:
-        index = 0 if self.lying_select else condition
-        return LayeredEncoder(
-            self.angles[index : index + 1],
-            self.axes,
-            self.native_gates,
-            self.big_endian,
-            self.flip_sampling,
-            self.conjugate_ratios,
-            self.inverse_ratios,
-            self.scaled_ratios,
-            self.doubled_empty_mask,
-            self.prep_mode,
-            self.lying_select,
-        )
+
+jax.tree_util.register_dataclass(
+    LayeredEncoder,
+    data_fields=["angles"],
+    meta_fields=[
+        "axes",
+        "native_gates",
+        "big_endian",
+        "flip_sampling",
+        "conjugate_ratios",
+        "inverse_ratios",
+        "scaled_ratios",
+        "doubled_empty_mask",
+        "prep_mode",
+        "layer_major",
+        "calls",
+    ],
+)
 
 
 @pytest.fixture
@@ -353,8 +365,10 @@ class StatePrepEncoder:
 
         return queue
 
-    def select(self, condition: int) -> StatePrepEncoder:
-        return StatePrepEncoder(self.amplitudes[condition : condition + 1])
+
+jax.tree_util.register_dataclass(
+    StatePrepEncoder, data_fields=["amplitudes"], meta_fields=[]
+)
 
 
 def test_state_preparation_encoder_passes() -> None:
@@ -432,8 +446,10 @@ class TemplateEncoder:
             wires=range(self.n_qubits),
         )
 
-    def select(self, condition: int) -> TemplateEncoder:
-        return TemplateEncoder(self.weights[condition : condition + 1])
+
+jax.tree_util.register_dataclass(
+    TemplateEncoder, data_fields=["weights"], meta_fields=[]
+)
 
 
 def test_template_preparation_passes() -> None:
@@ -463,6 +479,14 @@ def test_cached_operator_preparation_passes(angles: np.ndarray) -> None:
             if not 0 <= condition < self.n_conditions:
                 raise IndexError(f"condition {condition} outside the batch")
             return lambda: [qml.apply(operator) for operator in cached[condition]]
+
+    jax.tree_util.register_dataclass(
+        CachedEncoder,
+        data_fields=["angles"],
+        meta_fields=[
+            f.name for f in fields(CachedEncoder) if f.init and f.name != "angles"
+        ],
+    )
 
     report = report_for(CachedEncoder(angles))
     assert report.ok, report.summary()
@@ -497,8 +521,8 @@ class TrivialEncoder:
     def preparation(self, condition: int):
         return lambda: None
 
-    def select(self, condition: int) -> TrivialEncoder:
-        return TrivialEncoder(self.angles[condition : condition + 1])
+
+jax.tree_util.register_dataclass(TrivialEncoder, data_fields=["angles"], meta_fields=[])
 
 
 def test_trivial_encoder_passes_with_notes() -> None:
@@ -535,7 +559,7 @@ def test_sparse_preparation_passes_with_skipped_entries() -> None:
         ({"prep_mode": "empty"}, "Born law"),
         ({"prep_mode": "double"}, "disagrees with the preparation"),
         ({"prep_mode": "accumulating"}, "not reproducible"),
-        ({"lying_select": True}, "select(1)"),
+        ({"layer_major": True}, "condition 0 restriction"),
     ],
 )
 def test_knockouts_fail_with_the_intended_check(

@@ -126,9 +126,6 @@ class _BadEncoder:
         # Returns operations instead of the required callable.
         return (qml.RY(0.3, wires=0),)
 
-    def select(self, condition: int) -> _BadEncoder:
-        return self
-
 
 def test_simulation_validates_the_setup() -> None:
     model = _model(("Y",))
