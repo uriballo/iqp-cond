@@ -155,13 +155,23 @@ def layered_amplitudes(
 
 
 @jax.jit
-def _product_ratios(
+def _product_log_ratios(
     amp_zero: jnp.ndarray,
     amp_one: jnp.ndarray,
     samples: jnp.ndarray,
     masks: jnp.ndarray,
-) -> jnp.ndarray:
-    """Product-state ratio kernel, compiled once so eager calls dispatch once."""
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Return ``(C, S, R)`` log-magnitudes and arguments of the product ratios.
+
+    A product-state ratio factorizes over the flipped qubits, so its logarithm
+    is a contraction of the per-sample local log-ratios with the masks.
+    Running that contraction as one matrix product avoids the ``(samples,
+    masks, qubits)`` intermediate of the direct product.  The magnitudes, the
+    arguments and the vanishing factors contract separately, so a zero local
+    factor gives an exact ``-inf`` log-magnitude.  For real amplitudes the
+    argument is the count of negative factors, whose parity is the exact sign.
+    Compiled once so eager calls dispatch once.
+    """
     zero_to_one = _safe_ratio(amp_one, amp_zero)[:, None, :]
     one_to_zero = _safe_ratio(amp_zero, amp_one)[:, None, :]
     local = jnp.where(samples == 0.0, zero_to_one, one_to_zero)
@@ -175,11 +185,7 @@ def _product_ratios(
         [log_magnitude, angle.astype(jnp.float64), vanishing.astype(jnp.float64)],
     )
     totals = jnp.einsum("kcsn,rn->kcsr", features, masks.astype(jnp.float64))
-    if is_complex:
-        ratios = jnp.exp(totals[0] + 1j * totals[1])
-    else:
-        ratios = jnp.exp(totals[0]) * (1.0 - 2.0 * jnp.mod(totals[1], 2.0))
-    return jnp.where(totals[2] > 0.0, 0.0, ratios)
+    return jnp.where(totals[2] > 0.0, -jnp.inf, totals[0]), totals[1]
 
 
 @jax.tree_util.register_pytree_node_class
@@ -277,18 +283,30 @@ class AngleEncoder:
             shape=(self.n_conditions, n_samples, self.n_qubits),
         ).astype(jnp.float64)
 
+    @property
+    def _complex(self) -> bool:
+        """Whether an ``X`` or ``Z`` rotation makes the ratios complex."""
+        return any(label != "Y" for layer in self.axes for label in layer)
+
+    def _log_amplitude_ratios(
+        self,
+        samples: jnp.ndarray,
+        masks: jnp.ndarray,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """Return the log-magnitudes and arguments of :meth:`amplitude_ratios`."""
+        amp_zero, amp_one = layered_amplitudes(self.angles, self.axes)
+        return _product_log_ratios(amp_zero, amp_one, samples, masks)
+
     def amplitude_ratios(self, samples: jnp.ndarray, masks: jnp.ndarray) -> jnp.ndarray:
         """Return ``(n_conditions, n_samples, n_masks)`` product ratios.
 
-        A product-state ratio factorizes over the flipped qubits, so its
-        logarithm is a contraction of the per-sample local log-ratios with the
-        masks.  Running that contraction as one matrix product avoids the
-        ``(samples, masks, qubits)`` intermediate of the direct product.  The
-        magnitudes, the signs or phases, and the vanishing factors contract
-        separately, so a zero local factor still gives an exact zero ratio.
+        See :func:`_product_log_ratios`; a ``-inf`` log-magnitude gives an exact
+        zero ratio.
         """
-        amp_zero, amp_one = layered_amplitudes(self.angles, self.axes)
-        return _product_ratios(amp_zero, amp_one, samples, masks)
+        log_magnitude, argument = self._log_amplitude_ratios(samples, masks)
+        if self._complex:
+            return jnp.exp(log_magnitude + 1j * argument)
+        return jnp.exp(log_magnitude) * (1.0 - 2.0 * jnp.mod(argument, 2.0))
 
     def post_hadamard_amplitudes(self) -> jnp.ndarray:
         """Return ``(n_conditions, 2**n_qubits)`` little-endian amplitudes."""

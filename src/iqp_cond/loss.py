@@ -35,7 +35,7 @@ import jax.numpy as jnp
 from ._precision import resolve_estimator_dtype
 from .encoders import Encoder
 from .encoders.base import _condition_rows
-from .estimator import _phase_differences, _sample_values
+from .estimator import _phase_differences, _ratio_sample_values
 from .operators import OperatorBank, sample_nonidentity_masks_jax
 
 __all__ = [
@@ -282,7 +282,6 @@ def _mmd_from_entries(
         sums = square_sums = 0.0
         for start in range(0, n_samples, chunk):
             samples = entry.samples[:, start : start + chunk]
-            ratios = encoder.amplitude_ratios(samples, entry.masks)
             phases = _phase_differences(
                 params,
                 generators,
@@ -291,7 +290,13 @@ def _mmd_from_entries(
                 gemm_dtype,
                 resolved_dtype,
             )
-            values = _sample_values(ratios, phases, resolved_dtype)[0]
+            values = _ratio_sample_values(
+                encoder,
+                samples,
+                entry.masks,
+                phases,
+                resolved_dtype,
+            )[0]
             sums = sums + jnp.sum(values, axis=0)
             square_sums = square_sums + jnp.sum(values**2, axis=0)
         model_squares = (sums**2 - square_sums) / (n_samples * (n_samples - 1))

@@ -24,7 +24,7 @@ import jax.numpy as jnp
 
 from ._layout import pad_visible_masks
 from ._precision import resolve_estimator_dtype
-from .encoders import Encoder
+from .encoders import AngleEncoder, Encoder
 
 __all__ = [
     "ExpectationEstimate",
@@ -151,6 +151,36 @@ def _sample_values(
     return values.astype(jnp.float64)
 
 
+def _ratio_sample_values(
+    encoder: Encoder,
+    samples: jnp.ndarray,
+    masks: jnp.ndarray,
+    phases: jnp.ndarray,
+    resolved_dtype: jnp.dtype | None,
+) -> jnp.ndarray:
+    """Return the float64 per-sample values ``Re[R exp(i Delta f)]``.
+
+    Complex angle-encoder ratios are evaluated from their log-polar form as
+    ``|R| cos(arg R + Delta f)``, one exponential and one cosine per entry
+    instead of a complex exponential and complex product; that measured about
+    a third faster.  It was slower for real ratios and the parity encoder, so
+    every other encoder supplies ``R``.
+    """
+    if isinstance(encoder, AngleEncoder) and encoder._complex:
+        log_magnitudes, arguments = encoder._log_amplitude_ratios(samples, masks)
+        if resolved_dtype is not None:
+            log_magnitudes = log_magnitudes.astype(jnp.float32)
+            arguments = arguments.astype(jnp.float32)
+            phases = phases.astype(jnp.float32)
+        values = jnp.exp(log_magnitudes) * jnp.cos(arguments + phases)
+        return values.astype(jnp.float64)
+    return _sample_values(
+        encoder.amplitude_ratios(samples, masks),
+        phases,
+        resolved_dtype,
+    )
+
+
 def _estimate(
     params: jnp.ndarray,
     generators: jnp.ndarray,
@@ -162,7 +192,6 @@ def _estimate(
     return_samples: bool,
 ) -> ExpectationEstimate:
     resolved_dtype = resolve_estimator_dtype(gemm_dtype, estimator_dtype)
-    ratios = encoders.amplitude_ratios(samples, masks)
     phases = _phase_differences(
         params,
         generators,
@@ -171,7 +200,13 @@ def _estimate(
         gemm_dtype,
         resolved_dtype,
     )
-    sample_values = _sample_values(ratios, phases, resolved_dtype)
+    sample_values = _ratio_sample_values(
+        encoders,
+        samples,
+        masks,
+        phases,
+        resolved_dtype,
+    )
     values = jnp.mean(sample_values, axis=1)
     return ExpectationEstimate(
         values,
