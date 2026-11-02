@@ -605,6 +605,8 @@ def _restriction_report(
         _check_condition_pytree(encoder)
     except TypeError as error:
         return [f"{error}; training rejects it"]
+    except Exception as error:
+        return [f"condition 0 restriction: {error!r}"]
     failures: list[str] = []
 
     if ratios_available:

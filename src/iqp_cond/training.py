@@ -24,7 +24,8 @@ import numpy as np
 import optax
 
 from ._precision import resolve_precision
-from .encoders.base import _select_condition
+from .encoders import Encoder
+from .encoders.base import _check_condition_pytree, _select_condition
 from .initialization import parameters_from_data
 from .loss import _Entries, _mmd_entries, _mmd_from_entries, mmd
 from .model import ConditionalModel
@@ -222,6 +223,7 @@ def _validate_training_inputs(
             f"model declares {model.visible} visible qubits but validation "
             f"targets have {validation_targets.shape[2]}",
         )
+    _check_condition_pytree(model.encoder)
 
 
 def _initial_parameters(
@@ -287,7 +289,7 @@ def _make_training_steps(
 
     def cell_loss(
         params: jnp.ndarray,
-        encoders: object,
+        encoders: Encoder,
         bank: OperatorBank | None,
         step: jax.Array,
         condition: jax.Array,
@@ -305,6 +307,8 @@ def _make_training_steps(
                 jax.random.fold_in(random_key, step),
                 **mask_source,
                 n_samples=config.mc_samples,
+                # One cell has one condition and one bandwidth, so sharing only
+                # fixes the key layout of the cached-bank cell.
                 shared_samples=True,
                 precision=config.precision,
                 sample_chunk=config.sample_chunk,
@@ -324,7 +328,7 @@ def _make_training_steps(
     def training_steps(
         params: jnp.ndarray,
         optimizer_state: optax.OptState,
-        encoders: object,
+        encoders: Encoder,
         bank: OperatorBank | None,
         cells: tuple[jax.Array, jax.Array, jax.Array],
     ) -> tuple[jnp.ndarray, optax.OptState, jnp.ndarray]:
@@ -380,7 +384,7 @@ def _make_validation(
     @jax.jit
     def validation_loss(
         current_params: jnp.ndarray,
-        encoders: object,
+        encoders: Encoder,
         entries: tuple[_Entries, ...],
     ) -> jnp.ndarray:
         return _mmd_from_entries(
@@ -500,7 +504,6 @@ def train(
                 jnp.asarray(bandwidth_indices[start:stop]),
             ),
         )
-        # Defer the device sync so Python does not block on each interval.
         train_losses.append(losses)
         if stop % config.validation_interval == 0:
             current_validation, current_selection = score(params)

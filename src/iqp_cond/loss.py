@@ -34,7 +34,7 @@ import jax.numpy as jnp
 
 from ._precision import resolve_precision
 from .encoders import Encoder
-from .encoders.base import _condition_rows
+from .encoders.base import _check_condition_pytree, _condition_rows
 from .estimator import _phase_differences, _ratio_sample_values
 from .operators import OperatorBank, sample_nonidentity_masks_jax
 
@@ -305,8 +305,13 @@ def _mmd_from_entries(
         )
         return jnp.sum(per_mask * entry.weights.astype(policy.accumulate))
 
-    return _result(
-        jnp.stack([jax.vmap(condition_value)(rows, entry) for entry in entries]),
+    per_bandwidth_condition = jnp.stack(
+        [jax.vmap(condition_value)(rows, entry) for entry in entries],
+    )
+    return ConditionalMMDResult(
+        loss=jnp.mean(per_bandwidth_condition),
+        per_condition=jnp.mean(per_bandwidth_condition, axis=0),
+        per_bandwidth_condition=per_bandwidth_condition,
     )
 
 
@@ -362,6 +367,7 @@ def mmd(
         encoders,
         n_samples,
     )
+    _check_condition_pytree(encoders)
     if bank is not None:
         if bank.n_conditions != targets.shape[0]:
             raise ValueError(
@@ -390,12 +396,4 @@ def mmd(
         entries,
         precision=precision,
         sample_chunk=sample_chunk,
-    )
-
-
-def _result(per_bandwidth_condition: jnp.ndarray) -> ConditionalMMDResult:
-    return ConditionalMMDResult(
-        loss=jnp.mean(per_bandwidth_condition),
-        per_condition=jnp.mean(per_bandwidth_condition, axis=0),
-        per_bandwidth_condition=per_bandwidth_condition,
     )

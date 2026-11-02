@@ -8,6 +8,7 @@ from collections.abc import Callable
 import jax
 import jax.numpy as jnp
 import numpy as np
+import optax
 import pytest
 
 import iqp_cond as ciqp
@@ -310,6 +311,99 @@ def test_cached_cells_average_to_the_condition_objective(
         cell_gradient = jnp.mean(jnp.stack([gradient for _, gradient in cells]), axis=0)
         assert jnp.allclose(cell_loss, full_loss, atol=1e-15, rtol=0.0)
         assert jnp.allclose(cell_gradient, full_gradient, atol=1e-15, rtol=0.0)
+
+
+@dataclasses.dataclass(frozen=True)
+class StoredCountEncoder:
+    """A pytree encoder that stores its condition count instead of reading it."""
+
+    angles: jnp.ndarray
+    count: int
+
+    @property
+    def n_conditions(self) -> int:
+        return self.count
+
+    @property
+    def n_qubits(self) -> int:
+        return int(self.angles.shape[-1])
+
+    def sample(self, key: jax.Array, n_samples: int) -> jnp.ndarray:
+        return y_layer(self.angles).sample(key, n_samples)
+
+    def amplitude_ratios(self, samples: jnp.ndarray, masks: jnp.ndarray) -> jnp.ndarray:
+        return y_layer(self.angles).amplitude_ratios(samples, masks)
+
+    def preparation(self, condition: int) -> Callable[[], None]:
+        return y_layer(self.angles).preparation(condition)
+
+
+jax.tree_util.register_dataclass(
+    StoredCountEncoder,
+    data_fields=["angles"],
+    meta_fields=["count"],
+)
+
+
+def test_training_rejects_a_stored_condition_count(
+    angles: np.ndarray,
+    targets: tuple[np.ndarray, np.ndarray],
+    config: ciqp.TrainingConfig,
+) -> None:
+    """One leaf row must restrict the encoder to one condition."""
+    training, validation = targets
+    model = ciqp.ConditionalModel(
+        ciqp.Ansatz.complete(N_QUBITS),
+        StoredCountEncoder(jnp.asarray(angles), N_CONDITIONS),
+    )
+    with pytest.raises(TypeError, match="n_conditions must follow"):
+        ciqp.train(model, training, validation, seed=75, config=config)
+    check = ciqp.check_encoder(model.encoder, n_samples=2_000, probes_per_condition=64)
+    assert not check.ok
+    assert any("n_conditions must follow" in failure for failure in check.failures)
+
+
+def test_compiled_cell_matches_the_selected_condition_objective(
+    model: ciqp.ConditionalModel,
+    targets: tuple[np.ndarray, np.ndarray],
+) -> None:
+    """A traced condition index evaluates the same cell as an eager selection."""
+    training, _ = targets
+    config = ciqp.TrainingConfig(steps=4, batch_size=8, n_ops=8, mc_samples=32)
+    sigmas = jnp.asarray((0.8, 1.6))
+    key = jax.random.PRNGKey(91)
+    batch_indices = np.random.default_rng(92).integers(0, training.shape[1], (4, 2, 8))
+    optimizer = optax.adam(1e-2)
+    params = jnp.linspace(-0.2, 0.2, model.ansatz.n_parameters)
+    training_steps = training_module._make_training_steps(
+        model,
+        config,
+        optimizer,
+        key,
+        jnp.asarray(training),
+        jnp.asarray(batch_indices),
+        sigmas,
+    )
+    step, condition, bandwidth = 3, 1, 1
+    _, _, losses = training_steps(
+        params,
+        optimizer.init(params),
+        model.encoder,
+        None,
+        (jnp.asarray([step]), jnp.asarray([condition]), jnp.asarray([bandwidth])),
+    )
+    expected = mmd(
+        params,
+        model.generators,
+        model.encoder.select(condition),
+        training[condition, batch_indices[step, condition]][None],
+        jax.random.fold_in(key, step),
+        sigmas=(float(sigmas[bandwidth]),),
+        n_ops=config.n_ops,
+        n_samples=config.mc_samples,
+        shared_samples=True,
+    ).loss
+    assert jnp.allclose(losses[0], expected, atol=0.0, rtol=1e-12)
 
 
 def test_training_rejects_non_pytree_encoder(

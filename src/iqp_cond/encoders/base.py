@@ -27,9 +27,12 @@ class Encoder(Protocol):
     pytree whose array leaves all carry the leading condition axis: row ``c``
     of every leaf is condition ``c``.  Indexing those rows restricts the
     encoder to one condition, which vectorizes the loss over conditions and
-    picks the condition inside a compiled update.  A single-condition encoder
-    may have no array leaves.  The
-    preparation callable runs inside a PennyLane queuing context while a
+    picks the condition inside a compiled update.  ``n_conditions`` must
+    therefore follow the leaves' leading axis rather than a stored value, and
+    rebuilding the pytree from traced leaves must not check their values.  A
+    single-condition encoder may have no array leaves.
+
+    The preparation callable runs inside a PennyLane queuing context while a
     circuit is built and may queue any PennyLane operation; training never
     calls it.
     """
@@ -74,7 +77,8 @@ def _safe_ratio(numerator: jnp.ndarray, denominator: jnp.ndarray) -> jnp.ndarray
 
 
 def _check_condition_pytree(encoder: Encoder) -> None:
-    """Raise unless every array leaf of ``encoder`` has the condition axis."""
+    """Raise unless ``encoder`` restricts to one condition by its leaf rows."""
+    name = type(encoder).__name__
     leaves = jax.tree_util.tree_leaves(encoder)
     if (not leaves and encoder.n_conditions != 1) or any(
         not isinstance(leaf, (jax.Array, np.ndarray))
@@ -83,8 +87,13 @@ def _check_condition_pytree(encoder: Encoder) -> None:
         for leaf in leaves
     ):
         raise TypeError(
-            f"{type(encoder).__name__} must be a JAX pytree whose array leaves "
-            "share a leading condition axis",
+            f"{name} must be a JAX pytree whose array leaves share a leading "
+            "condition axis",
+        )
+    if _select_condition(encoder, 0).n_conditions != 1:
+        raise TypeError(
+            f"{name}.n_conditions must follow the leading axis of its array "
+            "leaves, so that one row restricts it to one condition",
         )
 
 
@@ -102,7 +111,7 @@ def _condition_rows(encoder: Encoder) -> Encoder:
 
     Mapping over the leading axis then hands every condition the encoder
     :func:`_select_condition` would return, so the conditions run as one
-    vectorized program.
+    vectorized program.  Callers validate the encoder at their boundary with
+    :func:`_check_condition_pytree`.
     """
-    _check_condition_pytree(encoder)
     return jax.tree_util.tree_map(lambda leaf: leaf[:, None], encoder)

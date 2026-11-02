@@ -264,19 +264,10 @@ class AngleEncoder:
         """Number of qubits the encoder state lives on."""
         return int(self.angles.shape[-1])
 
-    @property
-    def amp_zero(self) -> jnp.ndarray:
-        """``(n_conditions, n_qubits)`` post-Hadamard amplitudes of ``|0>``."""
-        return layered_amplitudes(self.angles, self.axes)[0]
-
-    @property
-    def amp_one(self) -> jnp.ndarray:
-        """``(n_conditions, n_qubits)`` post-Hadamard amplitudes of ``|1>``."""
-        return layered_amplitudes(self.angles, self.axes)[1]
-
     def sample(self, key: jax.Array, n_samples: int) -> jnp.ndarray:
         """Draw ``(n_conditions, n_samples, n_qubits)`` bitstrings."""
-        probabilities_one = jnp.abs(self.amp_one) ** 2
+        _, amp_one = layered_amplitudes(self.angles, self.axes)
+        probabilities_one = jnp.abs(amp_one) ** 2
         return jax.random.bernoulli(
             key,
             p=probabilities_one[:, None, :],

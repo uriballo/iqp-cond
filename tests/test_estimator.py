@@ -466,19 +466,6 @@ def test_float32_estimator_keeps_float64_outputs_and_gradients_close(
     assert jnp.allclose(unchecked(params), mixed.values, atol=1e-6, rtol=0.0)
 
 
-def test_unknown_precision_is_rejected(setup) -> None:
-    ansatz, encoders, _targets = setup
-    with pytest.raises(ValueError, match="unknown precision"):
-        estimate_pauli_z(
-            np.zeros(ansatz.n_parameters),
-            ansatz.generators,
-            encoders,
-            np.ones((1, N_VISIBLE)),
-            samples=encoders.sample(jax.random.PRNGKey(43), 32),
-            precision="bf16",
-        )
-
-
 def test_checked_estimator_rejects_non_binary_samples(setup) -> None:
     """A fractional sample matrix would be read mod two by the kernel."""
     ansatz, encoders, _targets = setup

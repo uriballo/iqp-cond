@@ -18,7 +18,9 @@ The first two operations make training classically tractable and keep the
 trainer independent of any circuit simulator.  Only :mod:`iqp_cond.simulation`
 uses the third.  Training also needs a JAX pytree whose array leaves carry the
 leading condition axis, so a custom dataclass is registered with
-:func:`jax.tree_util.register_dataclass` and then used directly::
+:func:`jax.tree_util.register_dataclass` and then used directly.  Its
+``n_conditions`` must read the leaves' leading axis, and its ``__init__`` must
+accept traced leaves, because JAX rebuilds it inside compiled code::
 
     import iqp_cond as ciqp
 

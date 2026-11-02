@@ -227,17 +227,10 @@ def test_angle_encoder_single_y_layer_matches_the_ry_formula() -> None:
     cosine = np.cos(angles / 2.0)
     sine = np.sin(angles / 2.0)
     assert states.axes == (("Y",) * N_QUBITS,)
-    assert np.asarray(states.amp_zero).dtype == np.float64
-    assert np.allclose(
-        np.asarray(states.amp_zero),
-        (cosine + sine) / np.sqrt(2.0),
-        atol=1e-15,
-    )
-    assert np.allclose(
-        np.asarray(states.amp_one),
-        (cosine - sine) / np.sqrt(2.0),
-        atol=1e-15,
-    )
+    amp_zero, amp_one = layered_amplitudes(states.angles, states.axes)
+    assert np.asarray(amp_zero).dtype == np.float64
+    assert np.allclose(np.asarray(amp_zero), (cosine + sine) / np.sqrt(2.0), atol=1e-15)
+    assert np.allclose(np.asarray(amp_one), (cosine - sine) / np.sqrt(2.0), atol=1e-15)
 
 
 def test_angle_encoder_ratios_match_post_hadamard_state() -> None:
@@ -249,7 +242,7 @@ def test_angle_encoder_ratios_match_post_hadamard_state() -> None:
     )
     axes = ("X" * N_QUBITS, "ZY" * (N_QUBITS // 2), "Y" * N_QUBITS)
     states = ciqp.AngleEncoder(angles, axes=axes)
-    assert np.asarray(states.amp_zero).dtype == np.complex128
+    assert np.asarray(layered_amplitudes(angles, axes)[0]).dtype == np.complex128
     samples = np.asarray(states.sample(jax.random.PRNGKey(12), 16))
     masks = (
         np.random.default_rng(13)
