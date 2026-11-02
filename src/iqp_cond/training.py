@@ -31,6 +31,7 @@ from .loss import (
     _fixed_mmd_plan,
     _FixedMMDPlan,
     target_moments,
+    mmd_fp32,
 )
 from .model import ConditionalModel
 from .operators import OperatorBank, expected_bodyness_sigmas, operator_bank, sample_nonidentity_masks_jax
@@ -245,134 +246,6 @@ def _select_condition(bank: OperatorBank, condition: int) -> OperatorBank:
     )
 
 
-def _fp32_condition_value(
-    params: jnp.ndarray,
-    generators: jnp.ndarray,
-    encoder: object,
-    target_condition: jnp.ndarray,
-    visible_masks: jnp.ndarray,
-    weights: jnp.ndarray,
-    n_ancillas: int,
-    samples: jnp.ndarray,
-    sample_chunk: int | None,
-) -> jnp.ndarray:
-    """Compute weighted sum of per-mask squared moment differences for one condition in FP32."""
-    n_samples_local = samples.shape[1]
-    if n_ancillas > 0:
-        model_masks = jnp.concatenate([
-            visible_masks,
-            jnp.zeros((visible_masks.shape[0], n_ancillas), dtype=visible_masks.dtype)
-        ], axis=1)
-    else:
-        model_masks = visible_masks
-    
-    if sample_chunk is not None and 0 < sample_chunk < n_samples_local:
-        sums = None
-        square_sums = None
-        for start in range(0, n_samples_local, sample_chunk):
-            chunk = estimate_pauli_z_unchecked(
-                params,
-                generators,
-                encoder,
-                model_masks,
-                samples=samples[:, start : start + sample_chunk],
-                estimator_dtype=jnp.float32,
-                return_samples=True,
-            ).sample_values
-            assert chunk is not None
-            chunk_sums = jnp.sum(chunk, axis=1)
-            chunk_squares = jnp.sum(chunk**2, axis=1)
-            sums = chunk_sums if sums is None else sums + chunk_sums
-            square_sums = chunk_squares if square_sums is None else square_sums + chunk_squares
-        assert sums is not None
-        assert square_sums is not None
-        values = sums / n_samples_local
-    else:
-        model = estimate_pauli_z_unchecked(
-            params,
-            generators,
-            encoder,
-            model_masks,
-            samples=samples,
-            estimator_dtype=jnp.float32,
-            return_samples=True,
-        )
-        assert model.sample_values is not None
-        values = model.values
-        sums = jnp.sum(model.sample_values, axis=1)
-        square_sums = jnp.sum(model.sample_values**2, axis=1)
-    target_means, target_squares = target_moments(target_condition, visible_masks)
-    model_squares = (sums**2 - square_sums) / (n_samples_local * (n_samples_local - 1))
-    per_mask = model_squares - 2.0 * values * target_means + target_squares
-    return jnp.sum(per_mask[0] * weights)
-
-
-def _fp32_mmd(
-    params: jnp.ndarray,
-    generators: jnp.ndarray,
-    encoders: object,
-    targets: jnp.ndarray,
-    key: jax.Array,
-    *,
-    sigmas: tuple[float | jax.Array, ...],
-    n_ops: int,
-    n_samples: int,
-    shared_samples: bool,
-    sample_chunk: int | None,
-    n_conditions: int,
-    n_data_qubits: int,
-    n_ancillas: int,
-) -> jnp.ndarray:
-    """MMD loss computed entirely in FP32 (like iqp-gpu)."""
-    params_f32 = params.astype(jnp.float32)
-    generators_f32 = generators.astype(jnp.float32)
-    targets_f32 = targets.astype(jnp.float32)
-    n_bandwidths = len(sigmas)
-    
-    def fresh_masks(mask_key: jax.Array, sigma: float) -> tuple[jnp.ndarray, jnp.ndarray]:
-        return sample_nonidentity_masks_jax(mask_key, n_ops, n_data_qubits, sigma)
-    
-    if shared_samples:
-        keys = jax.random.split(key, n_bandwidths * n_conditions + n_conditions)
-        mask_keys = keys[:n_bandwidths * n_conditions].reshape((n_conditions, n_bandwidths, *keys.shape[1:]))
-        sample_keys = keys[n_bandwidths * n_conditions:]
-        
-        def shared_condition(encoder: object, target: jnp.ndarray, condition_mask_keys: jax.Array, sample_key: jax.Array) -> jnp.ndarray:
-            samples = encoder.sample(sample_key, n_samples).astype(jnp.float32)
-            return jnp.stack([
-                _fp32_condition_value(
-                    params_f32, generators_f32, encoder, target,
-                    *fresh_masks(condition_mask_keys[bandwidth], sigma),
-                    n_ancillas, samples, sample_chunk
-                )
-                for bandwidth, sigma in enumerate(sigmas)
-            ])
-        
-        per_condition = jnp.stack([
-            shared_condition(encoders.select(c), targets_f32[c:c+1], mask_keys[c], sample_keys[c])
-            for c in range(n_conditions)
-        ])
-        return jnp.mean(per_condition.T)
-    
-    keys = jax.random.split(key, max(n_bandwidths * n_conditions * 2, 1))
-    keys = keys.reshape((n_bandwidths, n_conditions, 2, *keys.shape[1:]))
-    bandwidth_values = []
-    for bandwidth, sigma in enumerate(sigmas):
-        def fresh_condition(encoder: object, target: jnp.ndarray, entry_keys: jax.Array, sigma: float = sigma) -> jnp.ndarray:
-            masks_and_weights = fresh_masks(entry_keys[0], sigma)
-            samples = encoder.sample(entry_keys[1], n_samples).astype(jnp.float32)
-            return _fp32_condition_value(
-                params_f32, generators_f32, encoder, target[None],
-                masks_and_weights[0], masks_and_weights[1],
-                n_ancillas, samples, sample_chunk
-            )
-        bandwidth_values.append(jnp.stack([
-            fresh_condition(encoders.select(c), targets_f32[c], keys[bandwidth, c])
-            for c in range(n_conditions)
-        ]))
-    return jnp.mean(jnp.stack(bandwidth_values))
-
-
 def _train_true_fp32(
     model: ConditionalModel,
     training_targets: np.ndarray,
@@ -386,13 +259,13 @@ def _train_true_fp32(
     """True FP32-mixed training loop (entire pipeline in FP32: params, optimizer, MMD, estimator)."""
     training_targets_f32 = np.asarray(training_targets, dtype=np.float32)
     validation_targets_f32 = np.asarray(validation_targets, dtype=np.float32)
-    
+
     n_conditions = model.encoder.n_conditions
     sigmas = config.resolved_sigmas(model.visible)
     n_bandwidths = len(sigmas)
     n_data_qubits = model.visible
     n_ancillas = model.n_ancillas
-    
+
     # Initial params in FP32
     if initial_params is None:
         params = jnp.asarray(
@@ -406,7 +279,7 @@ def _train_true_fp32(
         )
     else:
         params = jnp.asarray(initial_params, dtype=jnp.float32)
-    
+
     # FP32 optimizer
     schedule = optax.cosine_decay_schedule(
         init_value=config.learning_rate,
@@ -415,45 +288,43 @@ def _train_true_fp32(
     )
     optimizer = optax.adam(schedule)
     optimizer_state = optimizer.init(params)
-    
+
     batch_indices = _batch_schedule(n_conditions, training_targets.shape[1], config, seed)
     bandwidth_indices = _bandwidth_schedule(n_bandwidths, config.steps, seed)
     condition_indices = _condition_schedule(n_conditions, config.steps, seed)
-    
+
     device_targets = jnp.asarray(training_targets_f32)
     device_batch_indices = jnp.asarray(batch_indices)
     sigmas_jax = jnp.asarray(sigmas, dtype=jnp.float32)
-    
+
     @jax.jit
     def training_step(params: jnp.ndarray, opt_state: optax.OptState, step: int, condition: int, bandwidth: int, key: jax.Array) -> tuple[jnp.ndarray, jnp.ndarray, optax.OptState]:
         indices = device_batch_indices[step, condition]
         target_batch = device_targets[condition, indices][None]
         sigma = sigmas_jax[bandwidth]
-        
+
         def loss_fn(p: jnp.ndarray) -> jnp.ndarray:
-            return _fp32_mmd(
+            return mmd_fp32(
                 p, model.generators.astype(jnp.float32), model.encoder,
                 target_batch, key,
                 sigmas=(sigma,), n_ops=config.n_ops, n_samples=config.mc_samples,
                 shared_samples=True, sample_chunk=config.sample_chunk,
-                n_conditions=1, n_data_qubits=n_data_qubits, n_ancillas=n_ancillas,
-            )
-        
+            ).loss
+
         loss, grad = jax.value_and_grad(loss_fn)(params)
         updates, new_opt_state = optimizer.update(grad, opt_state, params)
         new_params = optax.apply_updates(params, updates)
         return loss, new_params, new_opt_state
-    
+
     @jax.jit
     def validation_loss(params: jnp.ndarray) -> jnp.ndarray:
-        return _fp32_mmd(
+        return mmd_fp32(
             params, model.generators.astype(jnp.float32), model.encoder,
             jnp.asarray(validation_targets_f32), jax.random.PRNGKey(seed + 1_000_000),
             sigmas=sigmas, n_ops=config.validation_n_ops, n_samples=config.validation_mc_samples,
             shared_samples=True, sample_chunk=config.sample_chunk,
-            n_conditions=n_conditions, n_data_qubits=n_data_qubits, n_ancillas=n_ancillas,
-        )
-    
+        ).loss
+
     train_losses = []
     best_params = params
     best_step = 0
@@ -462,19 +333,19 @@ def _train_true_fp32(
     validation_steps = [0]
     validation_losses = [best_validation]
     selection_scores = [best_selection]
-    
+
     key = jax.random.PRNGKey(seed)
-    
+
     for step in range(config.steps):
         bandwidth = int(bandwidth_indices[step])
         condition = int(condition_indices[step])
         step_key = jax.random.fold_in(key, step)
-        
+
         loss, params, optimizer_state = training_step(
             params, optimizer_state, step, condition, bandwidth, step_key
         )
         train_losses.append(float(loss))
-        
+
         completed_step = step + 1
         if completed_step % config.validation_interval == 0:
             current_validation = float(validation_loss(params))
@@ -490,7 +361,7 @@ def _train_true_fp32(
                 best_selection = current_selection
                 best_params = params
                 best_step = completed_step
-    
+
     return TrainingResult(
         seed=seed,
         best_params=np.asarray(best_params, dtype=np.float64),

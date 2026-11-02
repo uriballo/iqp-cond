@@ -48,6 +48,7 @@ __all__ = [
     "ConditionalMMDResult",
     "hamming_rbf",
     "mmd",
+    "mmd_fp32",
     "target_moments",
 ]
 
@@ -370,6 +371,304 @@ def mmd(
 
         bandwidth_values.append(
             _per_condition(encoders, fresh_condition, targets, keys[bandwidth]),
+        )
+    return _result(jnp.stack(bandwidth_values))
+
+
+def mmd_fp32(
+    params: jnp.ndarray,
+    generators: jnp.ndarray,
+    encoders: Encoder,
+    targets: jnp.ndarray,
+    key: jax.Array,
+    *,
+    bank: OperatorBank | None = None,
+    sigmas: tuple[float, ...] | None = None,
+    n_ops: int | None = None,
+    n_samples: int,
+    shared_samples: bool = False,
+    sample_chunk: int | None = None,
+) -> ConditionalMMDResult:
+    """Estimate the condition-balanced multiscale squared MMD entirely in FP32.
+
+    Like :func:`mmd` but runs the full pipeline (params, estimator, MMD statistics)
+    in float32. Only the final loss is returned as float32.
+    """
+    params_f32 = params.astype(jnp.float32)
+    generators_f32 = generators.astype(jnp.float32)
+    targets_f32 = targets.astype(jnp.float32)
+
+    if sample_chunk is not None and sample_chunk < 1:
+        raise ValueError("sample_chunk must be positive")
+    if bank is None:
+        if not sigmas:
+            raise ValueError(
+                "pass sigmas and n_ops for fresh masks, or a prebuilt bank",
+            )
+        if n_ops is None or n_ops < 1:
+            raise ValueError("n_ops must be positive")
+    elif sigmas is not None or n_ops is not None:
+        raise ValueError("sigmas and n_ops belong to the key mask source only")
+
+    n_data_qubits = targets_f32.shape[2]
+    n_conditions = targets_f32.shape[0]
+    n_ancillas = encoders.n_qubits - n_data_qubits
+
+    if bank is not None:
+        if bank.n_conditions != n_conditions:
+            raise ValueError(
+                f"operator bank covers {bank.n_conditions} conditions but targets "
+                f"have {n_conditions}",
+            )
+        if bank.n_visible != n_data_qubits:
+            raise ValueError(
+                f"operator bank is built for {bank.n_visible} visible qubits but "
+                f"targets have {n_data_qubits}",
+            )
+        return _mmd_from_bank_fp32(
+            params_f32,
+            generators_f32,
+            encoders,
+            targets_f32,
+            bank,
+            key,
+            n_samples,
+            shared_samples,
+            sample_chunk,
+        )
+
+    assert sigmas is not None and n_ops is not None
+    n_bandwidths = len(sigmas)
+
+    def condition_values_fp32(
+        encoder: Encoder,
+        target: jnp.ndarray,
+        samples: jnp.ndarray,
+        masks_and_weights: tuple[jnp.ndarray, jnp.ndarray],
+    ) -> jnp.ndarray:
+        visible_masks, weights = masks_and_weights
+        return _condition_value_fp32(
+            params_f32,
+            generators_f32,
+            encoder,
+            target[None],
+            visible_masks,
+            weights,
+            n_ancillas,
+            samples,
+            sample_chunk,
+        )
+
+    def fresh_masks(mask_key: jax.Array, sigma: float | jax.Array):
+        return sample_nonidentity_masks_jax(mask_key, n_ops, n_data_qubits, sigma)
+
+    if shared_samples:
+        keys = jax.random.split(key, n_bandwidths * n_conditions + n_conditions)
+        mask_keys = keys[: n_bandwidths * n_conditions].reshape(
+            (n_conditions, n_bandwidths, *keys.shape[1:]),
+        )
+        sample_keys = keys[n_bandwidths * n_conditions :]
+
+        def shared_condition(
+            encoder: Encoder,
+            target: jnp.ndarray,
+            condition_mask_keys: jax.Array,
+            sample_key: jax.Array,
+        ) -> jnp.ndarray:
+            samples = encoder.sample(sample_key, n_samples).astype(jnp.float32)
+            return jnp.stack(
+                [
+                    condition_values_fp32(
+                        encoder,
+                        target,
+                        samples,
+                        fresh_masks(condition_mask_keys[bandwidth], sigma),
+                    )
+                    for bandwidth, sigma in enumerate(sigmas)
+                ],
+            )
+
+        per_condition = _per_condition(
+            encoders,
+            shared_condition,
+            targets_f32,
+            mask_keys,
+            sample_keys,
+        )
+        return _result(per_condition.T)
+
+    keys = jax.random.split(key, max(n_bandwidths * n_conditions * 2, 1))
+    keys = keys.reshape((n_bandwidths, n_conditions, 2, *keys.shape[1:]))
+    bandwidth_values = []
+    for bandwidth, sigma in enumerate(sigmas):
+
+        def fresh_condition(
+            encoder: Encoder,
+            target: jnp.ndarray,
+            entry_keys: jax.Array,
+            sigma: float | jax.Array = sigma,
+        ) -> jnp.ndarray:
+            masks_and_weights = fresh_masks(entry_keys[0], sigma)
+            samples = encoder.sample(entry_keys[1], n_samples).astype(jnp.float32)
+            return condition_values_fp32(encoder, target, samples, masks_and_weights)
+
+        bandwidth_values.append(
+            _per_condition(encoders, fresh_condition, targets_f32, keys[bandwidth]),
+        )
+    return _result(jnp.stack(bandwidth_values))
+
+
+def _condition_value_fp32(
+    params: jnp.ndarray,
+    generators: jnp.ndarray,
+    encoder: Encoder,
+    target_condition: jnp.ndarray,
+    visible_masks: jnp.ndarray,
+    weights: jnp.ndarray,
+    n_ancillas: int,
+    samples: jnp.ndarray,
+    sample_chunk: int | None,
+) -> jnp.ndarray:
+    """Weighted sum of per-mask squared moment differences for one condition (FP32)."""
+    n_samples = samples.shape[1]
+    model_masks = pad_visible_masks(visible_masks, n_ancillas)
+    if sample_chunk is not None and 0 < sample_chunk < n_samples:
+        sums = None
+        square_sums = None
+        for start in range(0, n_samples, sample_chunk):
+            chunk = estimate_pauli_z_unchecked(
+                params,
+                generators,
+                encoder,
+                model_masks,
+                samples=samples[:, start : start + sample_chunk],
+                estimator_dtype=jnp.float32,
+                return_samples=True,
+            ).sample_values
+            assert chunk is not None
+            chunk_sums = jnp.sum(chunk, axis=1)
+            chunk_squares = jnp.sum(chunk**2, axis=1)
+            sums = chunk_sums if sums is None else sums + chunk_sums
+            square_sums = (
+                chunk_squares if square_sums is None else square_sums + chunk_squares
+            )
+        assert sums is not None
+        assert square_sums is not None
+        values = sums / n_samples
+    else:
+        model = estimate_pauli_z_unchecked(
+            params,
+            generators,
+            encoder,
+            model_masks,
+            samples=samples,
+            estimator_dtype=jnp.float32,
+            return_samples=True,
+        )
+        assert model.sample_values is not None
+        values = model.values
+        sums = jnp.sum(model.sample_values, axis=1)
+        square_sums = jnp.sum(model.sample_values**2, axis=1)
+    target_means, target_squares = target_moments(target_condition, visible_masks)
+    model_squares = (sums**2 - square_sums) / (n_samples * (n_samples - 1))
+    per_mask = model_squares - 2.0 * values * target_means + target_squares
+    return jnp.sum(per_mask[0] * weights)
+
+
+def _mmd_from_bank_fp32(
+    params: jnp.ndarray,
+    generators: jnp.ndarray,
+    encoders: Encoder,
+    targets: jnp.ndarray,
+    bank: OperatorBank,
+    key: jax.Array,
+    n_samples: int,
+    shared_samples: bool,
+    sample_chunk: int | None,
+) -> ConditionalMMDResult:
+    """FP32 version of _mmd_from_bank."""
+    n_data_qubits = targets.shape[2]
+    n_conditions = targets.shape[0]
+    n_ancillas = encoders.n_qubits - n_data_qubits
+    condition_masks = jnp.swapaxes(bank.masks, 0, 1)
+    condition_weights = jnp.swapaxes(bank.weights, 0, 1)
+
+    def entry_value_fp32(
+        encoder: Encoder,
+        target: jnp.ndarray,
+        samples: jnp.ndarray,
+        masks: jnp.ndarray,
+        weights: jnp.ndarray,
+        bandwidth: int,
+    ) -> jnp.ndarray:
+        width = bank.width(bandwidth)
+        return _condition_value_fp32(
+            params,
+            generators,
+            encoder,
+            target[None],
+            masks[bandwidth, :width],
+            weights[bandwidth, :width],
+            n_ancillas,
+            samples,
+            sample_chunk,
+        )
+
+    if shared_samples:
+        sample_keys = jnp.stack(
+            [jax.random.fold_in(key, condition) for condition in range(n_conditions)],
+        )
+
+        def shared_condition(
+            encoder: Encoder,
+            target: jnp.ndarray,
+            masks: jnp.ndarray,
+            weights: jnp.ndarray,
+            sample_key: jax.Array,
+        ) -> jnp.ndarray:
+            samples = encoder.sample(sample_key, n_samples).astype(jnp.float32)
+            return jnp.stack(
+                [
+                    entry_value_fp32(encoder, target, samples, masks, weights, bandwidth)
+                    for bandwidth in range(bank.n_bandwidths)
+                ],
+            )
+
+        per_condition = _per_condition(
+            encoders,
+            shared_condition,
+            targets,
+            condition_masks,
+            condition_weights,
+            sample_keys,
+        )
+        return _result(per_condition.T)
+
+    keys = jax.random.split(key, bank.n_bandwidths * n_conditions)
+    keys = keys.reshape((bank.n_bandwidths, n_conditions, *keys.shape[1:]))
+    bandwidth_values = []
+    for bandwidth in range(bank.n_bandwidths):
+
+        def bank_condition(
+            encoder: Encoder,
+            target: jnp.ndarray,
+            masks: jnp.ndarray,
+            weights: jnp.ndarray,
+            sample_key: jax.Array,
+            bandwidth: int = bandwidth,
+        ) -> jnp.ndarray:
+            samples = encoder.sample(sample_key, n_samples).astype(jnp.float32)
+            return entry_value_fp32(encoder, target, samples, masks, weights, bandwidth)
+
+        bandwidth_values.append(
+            _per_condition(
+                encoders,
+                bank_condition,
+                targets,
+                condition_masks,
+                condition_weights,
+                keys[bandwidth],
+            ),
         )
     return _result(jnp.stack(bandwidth_values))
 
