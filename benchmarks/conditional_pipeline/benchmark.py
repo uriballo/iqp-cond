@@ -1277,7 +1277,7 @@ def main(argv=None):
     parser.add_argument("--steps", "--n-epochs", type=int, dest="steps")
     parser.add_argument(
         "--training-precision",
-        choices=("fp64", "gemm_f32", "estimator_f32", "full_fp32"),
+        choices=("fp64", "gemm_f32", "estimator_f32", "full_fp32", "true_fp32"),
         default="full_fp32",
     )
     args = parser.parse_args(argv)

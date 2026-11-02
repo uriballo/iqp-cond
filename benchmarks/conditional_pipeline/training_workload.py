@@ -78,6 +78,8 @@ def resolve_training_config(
         out.update(gemm_dtype="float32", estimator_dtype=None)
     elif out.get("precision_policy") == "full_fp32":
         out.update(gemm_dtype=None, estimator_dtype="float32")
+    elif out.get("precision_policy") == "true_fp32":
+        out.update(gemm_dtype=None, estimator_dtype="float32")
     for k in (
         "n_qubits",
         "steps",
@@ -122,7 +124,7 @@ def resolve_training_config(
             raise ValueError(f"{key} must be nonempty and finite")
     if out["validation_interval"] < 1:
         raise ValueError("validation_interval must be positive")
-    if out["precision_policy"] not in {"fp64", "gemm_f32", "estimator_f32", "full_fp32"}:
+    if out["precision_policy"] not in {"fp64", "gemm_f32", "estimator_f32", "full_fp32", "true_fp32"}:
         raise ValueError("unknown precision policy")
     return out
 
