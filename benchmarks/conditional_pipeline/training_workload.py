@@ -30,10 +30,8 @@ _DEFAULT = {
     "validation_mc_samples": 16384,
     "validation_interval": 25,
     "sample_chunk": 256,
-    "gemm_dtype": "float32",
-    "estimator_dtype": None,
     "profile": "paper",
-    "precision_policy": "gemm_f32",
+    "precision_policy": "fp64",
     "betas": (0.6, 0.8, 1.2, 1.4),
     "development_betas": (0.7, 1.3),
     "evaluation_betas": (0.4, 1.0, 1.6),
@@ -70,12 +68,6 @@ def resolve_training_config(
                 "sample_chunk": 8,
             }
         )
-    if out.get("precision_policy") == "fp64":
-        out.update(gemm_dtype=None, estimator_dtype=None)
-    elif out.get("precision_policy") == "estimator_f32":
-        out.update(gemm_dtype=None, estimator_dtype="float32")
-    elif out.get("precision_policy") == "gemm_f32":
-        out.update(gemm_dtype="float32", estimator_dtype=None)
     for k in (
         "n_qubits",
         "steps",
@@ -120,7 +112,7 @@ def resolve_training_config(
             raise ValueError(f"{key} must be nonempty and finite")
     if out["validation_interval"] < 1:
         raise ValueError("validation_interval must be positive")
-    if out["precision_policy"] not in {"fp64", "gemm_f32", "estimator_f32"}:
+    if out["precision_policy"] not in ciqp.PRECISIONS:
         raise ValueError("unknown precision policy")
     return out
 
@@ -399,8 +391,7 @@ def run_training_cell(
                 mc_samples=c["mc_samples"],
                 validation_n_ops=c["validation_n_ops"],
                 validation_mc_samples=c["validation_mc_samples"],
-                gemm_dtype=jnp.float32 if c["gemm_dtype"] else None,
-                estimator_dtype=jnp.float32 if c["estimator_dtype"] else None,
+                precision=c["precision_policy"],
                 sample_chunk=c["sample_chunk"],
                 mask_refresh="step",
             )

@@ -584,7 +584,12 @@ def test_parameter_gradient_matches_finite_differences() -> None:
 @pytest.mark.parametrize("axes", ["Y", "YZ"])
 @pytest.mark.parametrize(
     "precision",
-    [{}, {"estimator_dtype": jnp.float32}, {"gemm_dtype": jnp.float32}],
+    [
+        {},
+        {"precision": "gemm_f32"},
+        {"precision": "estimator_f32"},
+        {"precision": "fp32"},
+    ],
 )
 def test_drawn_entries_match_the_fresh_mask_objective(axes, precision) -> None:
     """Entries drawn once reproduce the fresh-mask MMD at any parameters."""
@@ -619,7 +624,8 @@ def test_drawn_entries_match_the_fresh_mask_objective(axes, precision) -> None:
 
     # The float32 estimator agrees to single precision between the eager
     # reference and the compiled evaluation, which may fuse differently.
-    rtol = 1e-5 if "estimator_dtype" in precision else 1e-12
+    single = precision.get("precision") in ("estimator_f32", "fp32")
+    rtol = 1e-5 if single else 1e-12
     np.testing.assert_allclose(
         planned.per_bandwidth_condition,
         sampled.per_bandwidth_condition,

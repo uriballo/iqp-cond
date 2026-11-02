@@ -32,7 +32,7 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 
-from ._precision import resolve_estimator_dtype
+from ._precision import resolve_precision
 from .encoders import Encoder
 from .encoders.base import _condition_rows
 from .estimator import _phase_differences, _ratio_sample_values
@@ -260,8 +260,7 @@ def _mmd_from_entries(
     encoders: Encoder,
     entries: tuple[_Entries, ...],
     *,
-    gemm_dtype: jnp.dtype | None = None,
-    estimator_dtype: jnp.dtype | None = None,
+    precision: str = "fp64",
     sample_chunk: int | None = None,
 ) -> ConditionalMMDResult:
     """Evaluate drawn entries at ``params``; only the phases depend on them.
@@ -269,11 +268,11 @@ def _mmd_from_entries(
     Each bandwidth vectorizes its conditions.  ``sample_chunk`` streams the
     sample axis and accumulates the per-mask moments, bounding the live
     ``(samples, masks)`` buffers; both model and target terms use the unbiased
-    finite-sample estimator.
+    finite-sample estimator, accumulated in the policy's ``accumulate`` dtype.
     """
-    params = jnp.asarray(params, dtype=jnp.float64)
+    policy = resolve_precision(precision)
+    params = jnp.asarray(params, dtype=policy.accumulate)
     generators = jnp.asarray(generators, dtype=jnp.float64)
-    resolved_dtype = resolve_estimator_dtype(gemm_dtype, estimator_dtype)
     rows = _condition_rows(encoders)
 
     def condition_value(encoder: Encoder, entry: _Entries) -> jnp.ndarray:
@@ -287,25 +286,24 @@ def _mmd_from_entries(
                 generators,
                 entry.masks,
                 samples,
-                gemm_dtype,
-                resolved_dtype,
+                policy,
             )
             values = _ratio_sample_values(
                 encoder,
                 samples,
                 entry.masks,
                 phases,
-                resolved_dtype,
+                policy,
             )[0]
             sums = sums + jnp.sum(values, axis=0)
             square_sums = square_sums + jnp.sum(values**2, axis=0)
         model_squares = (sums**2 - square_sums) / (n_samples * (n_samples - 1))
         per_mask = (
             model_squares
-            - 2.0 * (sums / n_samples) * entry.target_means
-            + entry.target_squares
+            - 2.0 * (sums / n_samples) * entry.target_means.astype(policy.accumulate)
+            + entry.target_squares.astype(policy.accumulate)
         )
-        return jnp.sum(per_mask * entry.weights)
+        return jnp.sum(per_mask * entry.weights.astype(policy.accumulate))
 
     return _result(
         jnp.stack([jax.vmap(condition_value)(rows, entry) for entry in entries]),
@@ -324,8 +322,7 @@ def mmd(
     n_ops: int | None = None,
     n_samples: int,
     shared_samples: bool = False,
-    gemm_dtype: jnp.dtype | None = None,
-    estimator_dtype: jnp.dtype | None = None,
+    precision: str = "fp64",
     sample_chunk: int | None = None,
 ) -> ConditionalMMDResult:
     """Estimate the condition-balanced multiscale squared MMD.
@@ -341,14 +338,12 @@ def mmd(
     This avoids resampling once per bandwidth.  The default resamples once per
     (bandwidth, condition) entry.
 
-    ``estimator_dtype=jnp.float32`` selects the wider mixed-precision estimator
-    and returns to float64 before the MMD reductions. It is mutually exclusive
-    with the narrower ``gemm_dtype`` option.
+    ``precision`` names a policy from :data:`iqp_cond.PRECISIONS`; the loss
+    comes back in the policy's ``accumulate`` dtype.
     """
-    params = jnp.asarray(params, dtype=jnp.float64)
+    params = jnp.asarray(params, dtype=resolve_precision(precision).accumulate)
     generators = jnp.asarray(generators, dtype=jnp.float64)
     targets = jnp.asarray(targets, dtype=jnp.float64)
-    resolve_estimator_dtype(gemm_dtype, estimator_dtype)
     if sample_chunk is not None and sample_chunk < 1:
         raise ValueError("sample_chunk must be positive")
     if bank is None:
@@ -393,8 +388,7 @@ def mmd(
         generators,
         encoders,
         entries,
-        gemm_dtype=gemm_dtype,
-        estimator_dtype=estimator_dtype,
+        precision=precision,
         sample_chunk=sample_chunk,
     )
 

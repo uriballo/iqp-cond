@@ -342,16 +342,15 @@ def test_training_comparison_rejects_changed_contract(tmp_path, field, value):
 
 def test_training_comparison_allows_precision_and_chunking(tmp_path):
     ref, candidate = _training_pair(tmp_path)
-    candidate["config"].update(precision_policy="fp64", gemm_dtype=None, sample_chunk=4)
+    candidate["config"].update(precision_policy="gemm_f32", sample_chunk=4)
     b.compare_records([ref], [candidate])
     comparison = candidate["reference_comparison"]
     assert comparison["configuration_match"]
     assert comparison["status"] == "compared"
     assert comparison["speedups"]["total_training"] == 2.0
-    assert comparison["reference_precision"] == "gemm_f32"
+    assert comparison["reference_precision"] == "fp64"
     assert set(comparison["implementation_changes"]) == {
         "precision_policy",
-        "gemm_dtype",
         "sample_chunk",
     }
 

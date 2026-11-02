@@ -59,7 +59,7 @@ Read [`USER_GUIDE.md`](USER_GUIDE.md) for shapes, training, inference, and custo
 
 Importing `iqp_cond` enables JAX float64, which the estimator, loss, and trainer use internally. Create JAX arrays after importing the package.
 
-For an opt-in mixed-precision estimator, set `TrainingConfig(estimator_dtype=jnp.float32)`. This computes parities and phases in float32, evaluates the ratio-phase product in single precision, and returns to float64 before statistics and MMD accumulation. The default remains the existing float64 path. The narrower `gemm_dtype=jnp.float32` option still changes only the final phase contraction; do not set both options.
+Precision is one named policy, `TrainingConfig(precision=...)` or the `precision=` argument of the estimator and the loss, chosen from `ciqp.PRECISIONS`. The default `"fp64"` runs everything in float64. `"gemm_f32"` runs only the final phase contraction in float32, `"estimator_f32"` also builds parities and phases and evaluates the ratio-phase product in float32 before returning to float64 for the statistics, and `"fp32"` keeps the statistics, the loss, the parameters and the optimizer state in float32 too.
 
 ## Benchmark the library
 

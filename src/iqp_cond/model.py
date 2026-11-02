@@ -156,8 +156,7 @@ class ConditionalModel:
         key: jax.Array | None = None,
         samples: jnp.ndarray | None = None,
         n_samples: int | None = None,
-        gemm_dtype: jnp.dtype | None = None,
-        estimator_dtype: jnp.dtype | None = None,
+        precision: str = "fp64",
         return_samples: bool = False,
     ) -> ExpectationEstimate:
         """Estimate visible Pauli-Z moments for every condition and mask."""
@@ -169,8 +168,7 @@ class ConditionalModel:
             key=key,
             samples=samples,
             n_samples=n_samples,
-            gemm_dtype=gemm_dtype,
-            estimator_dtype=estimator_dtype,
+            precision=precision,
             return_samples=return_samples,
         )
 
@@ -185,8 +183,7 @@ class ConditionalModel:
         n_ops: int | None = None,
         n_samples: int,
         shared_samples: bool = False,
-        gemm_dtype: jnp.dtype | None = None,
-        estimator_dtype: jnp.dtype | None = None,
+        precision: str = "fp64",
         sample_chunk: int | None = None,
     ) -> ConditionalMMDResult:
         """Condition-balanced multiscale MMD against visible-width targets."""
@@ -206,8 +203,7 @@ class ConditionalModel:
             n_ops=n_ops,
             n_samples=n_samples,
             shared_samples=shared_samples,
-            gemm_dtype=gemm_dtype,
-            estimator_dtype=estimator_dtype,
+            precision=precision,
             sample_chunk=sample_chunk,
         )
 

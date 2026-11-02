@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from iqp_cond._precision import resolve_precision
 from iqp_cond.encoders import AngleEncoder
 from iqp_cond.estimator import _phase_differences, estimate_pauli_z_unchecked
 from iqp_cond.loss import _Entries, _mmd_from_entries, mmd, target_moments
@@ -24,7 +25,15 @@ def encoder_from_fixture(config, fixture):
 
 
 def prepared_mmd(
-    params, generators, encoder, targets, samples, masks, weights, config, dtype=None
+    params,
+    generators,
+    encoder,
+    targets,
+    samples,
+    masks,
+    weights,
+    config,
+    precision="fp64",
 ):
     """Compute the per-condition U-statistic from stored random draws."""
     means, squares = jax.vmap(target_moments)(targets[:, None], masks)
@@ -34,13 +43,14 @@ def prepared_mmd(
         generators,
         encoder,
         entries,
-        estimator_dtype=dtype,
+        precision=precision,
         sample_chunk=config["sample_chunk"],
     ).loss
 
 
 def build_kernels(config: dict[str, Any]):
-    dtype = jnp.float32 if config["dtype"] == "estimator_f32" else None
+    precision = config["dtype"]
+    policy = resolve_precision(precision)
 
     def sampling(p, g, e, t, s, a, w, k):
         return e.sample(k, config["n_samples"])
@@ -56,7 +66,7 @@ def build_kernels(config: dict[str, Any]):
     def phase(p, g, e, t, s, a, w, k):
         return jnp.stack(
             [
-                _phase_differences(p, g, a[c], s[c : c + 1], None, dtype)[0]
+                _phase_differences(p, g, a[c], s[c : c + 1], policy)[0]
                 for c in range(config["n_conditions"])
             ]
         )
@@ -70,7 +80,7 @@ def build_kernels(config: dict[str, Any]):
                     e.select(c),
                     a[c],
                     samples=s[c : c + 1],
-                    estimator_dtype=dtype,
+                    precision=precision,
                 ).values[0]
                 for c in range(config["n_conditions"])
             ]
@@ -81,7 +91,7 @@ def build_kernels(config: dict[str, Any]):
         return estimate(p, g, e, t, drawn, a, w, k)
 
     def fixed_loss(p, g, e, t, s, a, w, k):
-        return prepared_mmd(p, g, e, t, s, a, w, config, dtype)
+        return prepared_mmd(p, g, e, t, s, a, w, config, precision)
 
     def fresh_loss(p, g, e, t, s, a, w, k):
         return mmd(
@@ -95,7 +105,7 @@ def build_kernels(config: dict[str, Any]):
             n_samples=config["n_samples"],
             shared_samples=True,
             sample_chunk=config["sample_chunk"],
-            estimator_dtype=dtype,
+            precision=precision,
         ).loss
 
     def scalar_phase(*args):
@@ -154,7 +164,7 @@ def measure(fn, args, repeats=10, warmups=2, trace_dir=None, *, return_result=Fa
 
 def numerical_outputs(config, args):
     p, g, e, _t, s, a, _w, _k = args
-    dtype = jnp.float32 if config["dtype"] == "estimator_f32" else None
+    precision = config["dtype"]
     moments, errors = [], []
     for c in range(config["n_conditions"]):
         result = estimate_pauli_z_unchecked(
@@ -163,7 +173,7 @@ def numerical_outputs(config, args):
             e.select(c),
             a[c],
             samples=s[c : c + 1],
-            estimator_dtype=dtype,
+            precision=precision,
             return_samples=True,
         )
         moments.append(result.values[0])

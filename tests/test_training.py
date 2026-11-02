@@ -383,13 +383,8 @@ def test_training_config_validates_its_fields() -> None:
         ciqp.TrainingConfig(validation_interval=0)
     with pytest.raises(ValueError, match="unknown mask_refresh"):
         ciqp.TrainingConfig(mask_refresh="sometimes")
-    with pytest.raises(ValueError, match="mutually exclusive"):
-        ciqp.TrainingConfig(
-            gemm_dtype=jnp.float32,
-            estimator_dtype=jnp.float32,
-        )
-    with pytest.raises(ValueError, match="must be float32, float64, or None"):
-        ciqp.TrainingConfig(estimator_dtype=jnp.bfloat16)
+    with pytest.raises(ValueError, match="unknown precision"):
+        ciqp.TrainingConfig(precision="bf16")
 
 
 def test_training_config_defaults_follow_the_library_protocol() -> None:
@@ -400,8 +395,7 @@ def test_training_config_defaults_follow_the_library_protocol() -> None:
     assert config.validation_n_ops == 512
     assert config.mc_samples == 1000
     assert config.validation_mc_samples == 1000
-    assert config.gemm_dtype is None
-    assert config.estimator_dtype is None
+    assert config.precision == "fp64"
     assert config.mask_refresh == STEP
     assert config.sigmas is None
     n_visible = 12
@@ -651,7 +645,7 @@ def test_mixed_precision_and_chunked_training_run(
         mc_samples=17,
         validation_n_ops=8,
         validation_mc_samples=19,
-        gemm_dtype=jnp.float32,
+        precision="gemm_f32",
         sample_chunk=8,
     )
     result = ciqp.train(model, training, validation, seed=31, config=config)
@@ -660,11 +654,17 @@ def test_mixed_precision_and_chunked_training_run(
     assert result.best_params.shape == (model.ansatz.n_parameters,)
 
 
-def test_float32_estimator_training_stays_close_to_default(
+@pytest.mark.parametrize(
+    ("precision", "dtype"),
+    [("estimator_f32", np.float64), ("fp32", np.float32)],
+)
+def test_float32_training_stays_close_to_default(
     model: ciqp.ConditionalModel,
     targets: tuple[np.ndarray, np.ndarray],
+    precision: str,
+    dtype: type,
 ) -> None:
-    """Training and validation both receive the estimator dtype option."""
+    """Training and validation both receive the precision policy."""
     training, validation = targets
     base = ciqp.TrainingConfig(
         steps=6,
@@ -693,12 +693,13 @@ def test_float32_estimator_training_stays_close_to_default(
         training,
         validation,
         seed=31,
-        config=dataclasses.replace(base, estimator_dtype=jnp.float32),
+        config=dataclasses.replace(base, precision=precision),
         initial_params=initial,
     )
     assert np.max(np.abs(mixed.final_params - reference.final_params)) < 2e-6
     assert np.max(np.abs(mixed.validation_losses - reference.validation_losses)) < 1e-7
-    assert mixed.final_params.dtype == np.float64
+    assert mixed.final_params.dtype == dtype
+    assert mixed.train_losses.dtype == dtype
 
 
 def test_float32_estimator_chunking_matches_full_samples(
@@ -714,19 +715,19 @@ def test_float32_estimator_chunking_matches_full_samples(
         bank=bank,
         n_samples=32,
         shared_samples=True,
-        estimator_dtype=jnp.float32,
+        precision="estimator_f32",
     )
     chunked = model.mmd(
         *arguments,
         bank=bank,
         n_samples=32,
         shared_samples=True,
-        estimator_dtype=jnp.float32,
+        precision="estimator_f32",
         sample_chunk=8,
     )
     assert jnp.allclose(chunked.loss, full.loss, atol=1e-14, rtol=0.0)
 
-    def objective(current_params, estimator_dtype=None):
+    def objective(current_params, precision="fp64"):
         return model.mmd(
             current_params,
             arguments[1],
@@ -734,11 +735,13 @@ def test_float32_estimator_chunking_matches_full_samples(
             bank=bank,
             n_samples=32,
             shared_samples=True,
-            estimator_dtype=estimator_dtype,
+            precision=precision,
         ).loss
 
     reference_gradient = jax.grad(objective)(params)
-    mixed_gradient = jax.grad(lambda current: objective(current, jnp.float32))(params)
+    mixed_gradient = jax.grad(lambda current: objective(current, "estimator_f32"))(
+        params,
+    )
     relative_error = float(
         jnp.linalg.norm(mixed_gradient - reference_gradient)
         / jnp.linalg.norm(reference_gradient)

@@ -23,7 +23,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from ._precision import resolve_estimator_dtype
+from ._precision import resolve_precision
 from .encoders.base import _select_condition
 from .initialization import parameters_from_data
 from .loss import _Entries, _mmd_entries, _mmd_from_entries, mmd
@@ -72,15 +72,12 @@ class TrainingConfig:
     retained bank. In expectation both estimate the same condition-balanced
     arithmetic-mean multiscale objective.
 
-    ``gemm_dtype`` runs the phase contraction in a reduced dtype such as
-    ``jnp.float32`` and casts the result back to float64.  This mixed precision
-    mode helps on GPUs; the reductions stay float64.
-
-    ``estimator_dtype=jnp.float32`` also runs parity and phase construction in
-    single precision and evaluates the ratio-phase product there, in complex64
-    only for complex ratios. It returns to float64 before statistics and MMD
-    accumulation. It is mutually exclusive with ``gemm_dtype``. ``None``
-    retains the default float64 estimator.
+    ``precision`` names a policy from :data:`iqp_cond.PRECISIONS`.  ``"fp64"``
+    is the default.  ``"gemm_f32"`` runs only the final phase contraction in
+    float32.  ``"estimator_f32"`` also builds parities and phases and evaluates
+    the ratio-phase product in float32, returning to float64 for the statistics.
+    ``"fp32"`` keeps the statistics, the loss, the parameters and the optimizer
+    state in float32 as well.
 
     ``sample_chunk`` streams the Monte Carlo samples in slices, bounding the live
     ``(samples, masks, qubits)`` ratio tensor.  It is faster at large sample
@@ -97,8 +94,7 @@ class TrainingConfig:
     mc_samples: int = 1_000
     validation_n_ops: int = 512
     validation_mc_samples: int = 1_000
-    gemm_dtype: jnp.dtype | None = None
-    estimator_dtype: jnp.dtype | None = None
+    precision: str = "fp64"
     sample_chunk: int | None = None
     mask_refresh: MaskRefresh = STEP
 
@@ -136,7 +132,7 @@ class TrainingConfig:
             raise ValueError(
                 "mc_samples and validation_mc_samples must be at least two",
             )
-        resolve_estimator_dtype(self.gemm_dtype, self.estimator_dtype)
+        resolve_precision(self.precision)
         if self.sample_chunk is not None and self.sample_chunk < 1:
             raise ValueError("sample_chunk must be positive")
         if self.mask_refresh not in (STEP, CACHE):
@@ -310,8 +306,7 @@ def _make_training_steps(
                 **mask_source,
                 n_samples=config.mc_samples,
                 shared_samples=True,
-                gemm_dtype=config.gemm_dtype,
-                estimator_dtype=config.estimator_dtype,
+                precision=config.precision,
                 sample_chunk=config.sample_chunk,
             ).loss
 
@@ -393,8 +388,7 @@ def _make_validation(
             model.generators,
             encoders,
             entries,
-            gemm_dtype=config.gemm_dtype,
-            estimator_dtype=config.estimator_dtype,
+            precision=config.precision,
         ).loss
 
     return lambda current_params: validation_loss(
@@ -439,7 +433,10 @@ def train(
     encoders = model.encoder
     n_conditions = encoders.n_conditions
     sigmas = config.resolved_sigmas(model.visible)
+    # The parameters, and with them the optimizer state, live in the policy's
+    # accumulation dtype.
     params = _initial_parameters(model, training_targets, initial_params, seed)
+    params = params.astype(resolve_precision(config.precision).accumulate)
     schedule = optax.cosine_decay_schedule(
         init_value=config.learning_rate,
         decay_steps=config.steps,

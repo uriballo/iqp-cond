@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import jax
-import jax.numpy as jnp
 import numpy as np
 import pytest
 
@@ -16,6 +15,7 @@ from iqp_cond.verification import EncoderCheck, check_encoder
 
 def test_package_root_is_the_compact_workflow_api() -> None:
     assert ciqp.__all__ == [
+        "PRECISIONS",
         "AngleEncoder",
         "Ansatz",
         "CollectivePhaseEncoder",
@@ -167,14 +167,14 @@ def test_model_estimate_pauli_z_delegates_to_the_estimator() -> None:
         masks,
         key=key,
         n_samples=64,
-        estimator_dtype=jnp.float32,
+        precision="estimator_f32",
     )
     via_model = model.estimate_pauli_z(
         params,
         masks,
         key=key,
         n_samples=64,
-        estimator_dtype=jnp.float32,
+        precision="estimator_f32",
     )
     assert np.array_equal(np.asarray(via_model.values), np.asarray(direct.values))
 
@@ -196,7 +196,7 @@ def test_model_mmd_delegates_and_validates_the_target_width() -> None:
         sigmas=(1.0,),
         n_ops=8,
         n_samples=16,
-        estimator_dtype=jnp.float32,
+        precision="estimator_f32",
     )
     via_model = model.mmd(
         params,
@@ -205,7 +205,7 @@ def test_model_mmd_delegates_and_validates_the_target_width() -> None:
         sigmas=(1.0,),
         n_ops=8,
         n_samples=16,
-        estimator_dtype=jnp.float32,
+        precision="estimator_f32",
     )
     assert float(via_model.loss) == float(direct.loss)
 

@@ -384,7 +384,7 @@ def test_mixed_precision_gemm_stays_close_to_float64(setup) -> None:
         masks,
         key=key,
         n_samples=4096,
-        gemm_dtype=jnp.float32,
+        precision="gemm_f32",
     )
     deviation = float(
         np.max(np.abs(np.asarray(mixed.values) - np.asarray(reference.values))),
@@ -410,14 +410,14 @@ def test_float32_estimator_keeps_float64_outputs_and_gradients_close(
     masks = jnp.asarray([[1.0, 0.0, 1.0], [0.0, 1.0, 1.0], [1.0, 1.0, 0.0]])
     samples = encoder.sample(jax.random.PRNGKey(42), 1_024)
 
-    def objective(current_params, estimator_dtype=None):
+    def objective(current_params, precision="fp64"):
         result = estimate_pauli_z(
             current_params,
             ansatz.generators,
             encoder,
             masks,
             samples=samples,
-            estimator_dtype=estimator_dtype,
+            precision=precision,
             return_samples=True,
         )
         assert result.sample_values is not None
@@ -427,10 +427,10 @@ def test_float32_estimator_keeps_float64_outputs_and_gradients_close(
         lambda current: objective(current)[0]
     )(params)
     mixed_loss, mixed_gradient = jax.value_and_grad(
-        lambda current: objective(current, jnp.float32)[0]
+        lambda current: objective(current, "estimator_f32")[0]
     )(params)
-    _, mixed = objective(params, jnp.float32)
-    _, explicit_float64 = objective(params, jnp.float64)
+    _, mixed = objective(params, "estimator_f32")
+    _, single = objective(params, "fp32")
 
     relative_error = float(
         jnp.linalg.norm(mixed_gradient - reference_gradient)
@@ -444,7 +444,9 @@ def test_float32_estimator_keeps_float64_outputs_and_gradients_close(
     # test below applies the tighter relative gate to the training objective.
     assert 0.0 < relative_error < 2e-5
     assert abs(float(mixed_loss - reference_loss)) < 1e-6
-    assert jnp.array_equal(explicit_float64.values, objective(params)[1].values)
+    # The end-to-end policy differs only in returning float32 statistics.
+    assert single.values.dtype == jnp.float32
+    assert jnp.allclose(single.values, mixed.values, atol=1e-6, rtol=0.0)
 
     model_masks = pad_visible_masks(masks, N_ANCILLAS)
 
@@ -456,7 +458,7 @@ def test_float32_estimator_keeps_float64_outputs_and_gradients_close(
             encoder,
             model_masks,
             samples=samples,
-            estimator_dtype=jnp.float32,
+            precision="estimator_f32",
         ).values
 
     # Compiled and eager evaluation may fuse the ratio contraction differently,
@@ -464,27 +466,16 @@ def test_float32_estimator_keeps_float64_outputs_and_gradients_close(
     assert jnp.allclose(unchecked(params), mixed.values, atol=1e-6, rtol=0.0)
 
 
-def test_estimator_dtype_validation(setup) -> None:
+def test_unknown_precision_is_rejected(setup) -> None:
     ansatz, encoders, _targets = setup
-    samples = encoders.sample(jax.random.PRNGKey(43), 32)
-    arguments = (
-        np.zeros(ansatz.n_parameters),
-        ansatz.generators,
-        encoders,
-        np.ones((1, N_VISIBLE)),
-    )
-    with pytest.raises(ValueError, match="mutually exclusive"):
+    with pytest.raises(ValueError, match="unknown precision"):
         estimate_pauli_z(
-            *arguments,
-            samples=samples,
-            gemm_dtype=jnp.float32,
-            estimator_dtype=jnp.float32,
-        )
-    with pytest.raises(ValueError, match="must be float32, float64, or None"):
-        estimate_pauli_z(
-            *arguments,
-            samples=samples,
-            estimator_dtype=jnp.bfloat16,
+            np.zeros(ansatz.n_parameters),
+            ansatz.generators,
+            encoders,
+            np.ones((1, N_VISIBLE)),
+            samples=encoders.sample(jax.random.PRNGKey(43), 32),
+            precision="bf16",
         )
 
 

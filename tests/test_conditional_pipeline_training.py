@@ -32,7 +32,6 @@ def test_smoke_cpu_training_persists_outputs(tmp_path):
 
 
 def test_training_observer_preserves_trainer_results(tmp_path):
-    import jax.numpy as jnp
 
     import iqp_cond as ciqp
     from benchmarks.conditional_pipeline.training_workload import _diagnostics
@@ -55,7 +54,6 @@ def test_training_observer_preserves_trainer_results(tmp_path):
         validation_mc_samples=16,
         validation_interval=1,
         sample_chunk=8,
-        gemm_dtype=jnp.float32,
         sigmas=expected_bodyness_sigmas(4)[:2],
     )
     result = ciqp.train(

@@ -14,14 +14,17 @@ blocks remain available from their expert submodules.
 
 Importing this package turns on JAX float64
 (``jax.config.update("jax_enable_x64", True)``).  The estimator, the loss, and
-the trainer assume float64 throughout, so enable it before you create JAX
-arrays.  Disable it only if you know the precision change is acceptable.
+the trainer default to the ``"fp64"`` policy; :data:`PRECISIONS` lists the
+reduced-precision policies, which are chosen per call or through
+:class:`TrainingConfig`.  Keep float64 enabled, because the encoders and the
+float64 policies depend on it.
 """
 
 import jax
 
 jax.config.update("jax_enable_x64", True)
 
+from ._precision import PRECISIONS
 from .encoders import (
     AngleEncoder,
     CollectivePhaseEncoder,
@@ -33,6 +36,7 @@ from .model import Ansatz, ConditionalModel
 from .training import TrainingConfig, train
 
 __all__ = [
+    "PRECISIONS",
     "AngleEncoder",
     "Ansatz",
     "CollectivePhaseEncoder",

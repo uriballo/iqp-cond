@@ -885,8 +885,6 @@ _TRAINING_REQUIRED_FIELDS = tuple(
 )
 _TRAINING_IMPLEMENTATION_FIELDS = {
     "precision_policy",
-    "gemm_dtype",
-    "estimator_dtype",
     "sample_chunk",
     "profile",
     "benchmark_kind",
@@ -1277,8 +1275,9 @@ def main(argv=None):
     parser.add_argument("--steps", "--n-epochs", type=int, dest="steps")
     parser.add_argument(
         "--training-precision",
-        choices=("fp64", "gemm_f32", "estimator_f32"),
-        default="gemm_f32",
+        # iqp_cond.PRECISIONS; listed here so the CLI does not import JAX.
+        choices=("fp64", "gemm_f32", "estimator_f32", "fp32"),
+        default="fp64",
     )
     args = parser.parse_args(argv)
     result_path = args.input if args.summary and args.input else args.output

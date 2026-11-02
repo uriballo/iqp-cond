@@ -71,7 +71,7 @@ result = ciqp.train(
 params = result.best_params
 ```
 
-`TrainingConfig` controls optimizer and Monte Carlo budgets. Defaults are 2000 updates, batch size 256, learning rates from `1e-2` to `1e-3`, validation every 25 steps, 512 operator draws, and 1000 reference samples for both training and validation. The default bandwidth schedule is derived from visible width. `mask_refresh="step"` draws `n_ops` nonidentity masks directly for each selected objective cell; use `mask_refresh="cache"` to retain a compressed bank for the fit. Reduced precision and streamed samples (`sample_chunk`) are optional memory/performance controls. `gemm_dtype=jnp.float32` reduces only the final phase contraction. `estimator_dtype=jnp.float32` also computes parities and phases in float32 and evaluates the ratio-phase product in single precision before returning to float64 for statistics and loss accumulation. The two dtype options are mutually exclusive.
+`TrainingConfig` controls optimizer and Monte Carlo budgets. Defaults are 2000 updates, batch size 256, learning rates from `1e-2` to `1e-3`, validation every 25 steps, 512 operator draws, and 1000 reference samples for both training and validation. The default bandwidth schedule is derived from visible width. `mask_refresh="step"` draws `n_ops` nonidentity masks directly for each selected objective cell; use `mask_refresh="cache"` to retain a compressed bank for the fit. Reduced precision (`precision`) and streamed samples (`sample_chunk`) are optional memory/performance controls; the precision policies are listed under "Ancillas, precision, and common limits" below.
 
 If `initial_params` is omitted, initialization uses pooled training data and a mean-covariance prescription, with seeded noise for generator rows involving ancillas. Otherwise provide a finite vector of shape `(n_parameters,)`.
 
@@ -99,7 +99,16 @@ All three operations must describe the same reference state. Run `ciqp.check_enc
 
 Set `n_visible` on `ConditionalModel` when the register includes ancillas. The visible qubits come first; ancillas come last. Targets and measured outputs contain only visible bits. Expectation masks are visible-width and are padded with identity on ancillas.
 
-The library enables float64 at import because its numerical routines rely on that precision. Leave both dtype options unset for the default path. Use `TrainingConfig(gemm_dtype=jnp.float32)` for the conservative phase-contraction option, or `TrainingConfig(estimator_dtype=jnp.float32)` for the wider and faster mixed-precision estimator. Both modes retain float64 outputs and loss accumulation. The wider mode supports only float32 or an explicit float64 spelling; it rejects float16 and bfloat16.
+The library enables float64 at import because its numerical routines rely on that precision. Precision is a single named policy from `ciqp.PRECISIONS`, set with `TrainingConfig(precision=...)` or the `precision=` argument of `estimate_pauli_z`, `mmd` and the model methods. Each policy fixes the dtype of the parities, phases and ratio-phase products, of the final phase contraction, and of the statistics, loss, parameters and optimizer state:
+
+| Policy | Parities, phases, products | Phase contraction | Statistics, loss, parameters |
+|---|---|---|---|
+| `"fp64"` (default) | float64 | float64 | float64 |
+| `"gemm_f32"` | float64 | float32 | float64 |
+| `"estimator_f32"` | float32 | float32 | float64 |
+| `"fp32"` | float32 | float32 | float32 |
+
+The encoders' sampling and amplitude-ratio queries keep their own precision, float64 for the built-in encoders, and are cast where they enter the estimator. Under `"fp32"`, `TrainingResult` parameters and losses are float32.
 
 Exact probabilities and `check_encoder` allocate statevector-scale memory, which grows exponentially with the total model qubit count. Use shot-based sampling for larger registers. Training also forms ratio intermediates over samples, masks, and qubits; lower `mc_samples` or set `sample_chunk` if memory is limited.
 
