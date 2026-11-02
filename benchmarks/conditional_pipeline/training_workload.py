@@ -30,10 +30,10 @@ _DEFAULT = {
     "validation_mc_samples": 16384,
     "validation_interval": 25,
     "sample_chunk": 256,
-    "gemm_dtype": "float32",
-    "estimator_dtype": None,
+    "gemm_dtype": None,
+    "estimator_dtype": "float32",
     "profile": "paper",
-    "precision_policy": "gemm_f32",
+    "precision_policy": "full_fp32",
     "betas": (0.6, 0.8, 1.2, 1.4),
     "development_betas": (0.7, 1.3),
     "evaluation_betas": (0.4, 1.0, 1.6),
@@ -76,6 +76,8 @@ def resolve_training_config(
         out.update(gemm_dtype=None, estimator_dtype="float32")
     elif out.get("precision_policy") == "gemm_f32":
         out.update(gemm_dtype="float32", estimator_dtype=None)
+    elif out.get("precision_policy") == "full_fp32":
+        out.update(gemm_dtype=None, estimator_dtype="float32")
     for k in (
         "n_qubits",
         "steps",

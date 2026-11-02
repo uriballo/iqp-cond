@@ -45,6 +45,7 @@ __all__ = [
 STEP = "step"
 CACHE = "cache"
 MaskRefresh = Literal["step", "cache"]
+PrecisionMode = Literal["fp64", "gemm_f32", "estimator_f32", "full_fp32"]
 
 _BANDWIDTH_SEED_OFFSET = 83_001
 _CONDITION_SEED_OFFSET = 191_003
@@ -103,6 +104,7 @@ class TrainingConfig:
     validation_mc_samples: int = 1_000
     gemm_dtype: jnp.dtype | None = None
     estimator_dtype: jnp.dtype | None = None
+    precision_mode: PrecisionMode = "full_fp32"
     sample_chunk: int | None = None
     mask_refresh: MaskRefresh = STEP
 
@@ -140,7 +142,24 @@ class TrainingConfig:
             raise ValueError(
                 "mc_samples and validation_mc_samples must be at least two",
             )
-        resolve_estimator_dtype(self.gemm_dtype, self.estimator_dtype)
+        if self.precision_mode not in ("fp64", "gemm_f32", "estimator_f32", "full_fp32"):
+            raise ValueError(f"unknown precision_mode: {self.precision_mode!r}")
+        if self.precision_mode == "full_fp32":
+            # full_fp32 maps to estimator_f32 for backward compatibility
+            # (runs estimator in fp32, returns to fp64 for MMD/optimizer)
+            object.__setattr__(self, "estimator_dtype", jnp.float32)
+            object.__setattr__(self, "gemm_dtype", None)
+        elif self.precision_mode == "fp64":
+            object.__setattr__(self, "estimator_dtype", None)
+            object.__setattr__(self, "gemm_dtype", None)
+        elif self.precision_mode == "gemm_f32":
+            object.__setattr__(self, "gemm_dtype", jnp.float32)
+            object.__setattr__(self, "estimator_dtype", None)
+        elif self.precision_mode == "estimator_f32":
+            object.__setattr__(self, "estimator_dtype", jnp.float32)
+            object.__setattr__(self, "gemm_dtype", None)
+        else:
+            resolve_estimator_dtype(self.gemm_dtype, self.estimator_dtype)
         if self.sample_chunk is not None and self.sample_chunk < 1:
             raise ValueError("sample_chunk must be positive")
         if self.mask_refresh not in (STEP, CACHE):
