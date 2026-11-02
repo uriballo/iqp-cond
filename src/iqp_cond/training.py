@@ -358,10 +358,6 @@ def _make_training_steps(
     return training_steps
 
 
-# Largest ratio tensor validation may cache on the device for the whole fit.
-_VALIDATION_RATIO_BYTES = 1 << 30
-
-
 def _make_validation(
     model: ConditionalModel,
     config: TrainingConfig,
@@ -372,17 +368,9 @@ def _make_validation(
     """Return the fixed-randomness validation MMD as a function of parameters.
 
     Every checkpoint would redraw the same masks and samples, so they are drawn
-    once for the fit and only the phases are recomputed.  The amplitude ratios
-    are cached too when they fit in ``_VALIDATION_RATIO_BYTES``.
+    once for the fit; the ratios and phases are recomputed at each checkpoint.
     """
     targets = jnp.asarray(validation_targets)
-    ratio_bytes = (
-        len(sigmas)
-        * targets.shape[0]
-        * config.validation_mc_samples
-        * config.validation_n_ops
-        * 16
-    )
     entries = _mmd_entries(
         model.encoder,
         targets,
@@ -392,7 +380,6 @@ def _make_validation(
         n_ops=config.validation_n_ops,
         n_samples=config.validation_mc_samples,
         shared_samples=False,
-        cache_ratios=ratio_bytes <= _VALIDATION_RATIO_BYTES,
     )
 
     @jax.jit

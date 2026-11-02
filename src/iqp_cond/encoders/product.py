@@ -182,78 +182,9 @@ def _product_ratios(
     return jnp.where(totals[2] > 0.0, 0.0, ratios)
 
 
-@dataclass(frozen=True)
-class _ProductEncoder:
-    """Batched product-state encoder with per-qubit local amplitudes.
-
-    Internal implementation shared by the public angle encoder methods.
-    """
-
-    angles: jnp.ndarray
-    amp_zero: jnp.ndarray
-    amp_one: jnp.ndarray
-
-    @property
-    def n_conditions(self) -> int:
-        """Number of conditions in the batch."""
-        return int(self.angles.shape[0])
-
-    @property
-    def n_qubits(self) -> int:
-        """Number of qubits the encoder state lives on."""
-        return int(self.angles.shape[1])
-
-    def sample(self, key: jax.Array, n_samples: int) -> jnp.ndarray:
-        """Draw ``(n_conditions, n_samples, n_qubits)`` bitstrings."""
-        probabilities_one = jnp.abs(self.amp_one) ** 2
-        return jax.random.bernoulli(
-            key,
-            p=probabilities_one[:, None, :],
-            shape=(self.n_conditions, n_samples, self.n_qubits),
-        ).astype(jnp.float64)
-
-    def amplitude_ratios(self, samples: jnp.ndarray, masks: jnp.ndarray) -> jnp.ndarray:
-        """Return ``(n_conditions, n_samples, n_masks)`` product ratios.
-
-        A product-state ratio factorizes over the flipped qubits, so its
-        logarithm is a contraction of the per-sample local log-ratios with the
-        masks.  Running that contraction as one matrix product avoids the
-        ``(samples, masks, qubits)`` intermediate of the direct product.  The
-        magnitudes, the signs or phases, and the vanishing factors contract
-        separately, so a zero local factor still gives an exact zero ratio.
-        """
-        return _product_ratios(self.amp_zero, self.amp_one, samples, masks)
-
-    def post_hadamard_amplitudes(self) -> jnp.ndarray:
-        """Return ``(n_conditions, 2**n_qubits)`` little-endian amplitudes."""
-        zero_reversed = np.asarray(self.amp_zero, dtype=np.complex128)[:, ::-1]
-        one_reversed = np.asarray(self.amp_one, dtype=np.complex128)[:, ::-1]
-        n_qubits = self.n_qubits
-        out = np.empty((self.n_conditions, 2**n_qubits), dtype=np.complex128)
-        for condition in range(self.n_conditions):
-            state = np.array(
-                [zero_reversed[condition, 0], one_reversed[condition, 0]],
-                dtype=np.complex128,
-            )
-            for qubit in range(1, n_qubits):
-                state = np.outer(
-                    state,
-                    [zero_reversed[condition, qubit], one_reversed[condition, qubit]],
-                ).ravel()
-            out[condition] = state
-        return out
-
-
-jax.tree_util.register_dataclass(
-    _ProductEncoder,
-    data_fields=["angles", "amp_zero", "amp_one"],
-    meta_fields=[],
-)
-
-
 @jax.tree_util.register_pytree_node_class
 @dataclass(frozen=True, init=False)
-class AngleEncoder(_ProductEncoder):
+class AngleEncoder:
     """Product-state encoder with stacked single-qubit rotation layers.
 
     ``angles`` is ``(n_conditions, n_layers, n_qubits)`` and ``axes`` the
@@ -261,10 +192,11 @@ class AngleEncoder(_ProductEncoder):
     first.  A single all-``Y`` layer is the plain ``RY`` product state.
     Anything else composes rotations, which makes the local amplitudes complex
     as soon as ``X`` or ``Z`` appears, because only ``Y`` keeps the
-    single-qubit matrices real.  Construction validates the axes and caches the
-    local post-Hadamard amplitudes used by sampling and ratio queries.
+    single-qubit matrices real.  The local post-Hadamard amplitudes are
+    derived from the angles wherever sampling and ratio queries need them.
     """
 
+    angles: jnp.ndarray
     axes: tuple[tuple[str, ...], ...]
 
     def __init__(
@@ -287,50 +219,96 @@ class AngleEncoder(_ProductEncoder):
             int(values.shape[1]),
             int(values.shape[2]),
         )
-        amp_zero, amp_one = layered_amplitudes(values, normalized)
         object.__setattr__(self, "angles", values)
-        object.__setattr__(self, "amp_zero", jnp.asarray(amp_zero))
-        object.__setattr__(self, "amp_one", jnp.asarray(amp_one))
         object.__setattr__(self, "axes", normalized)
 
     @classmethod
     def _from_components(
         cls,
         angles: jnp.ndarray,
-        amp_zero: jnp.ndarray,
-        amp_one: jnp.ndarray,
         axes: tuple[tuple[str, ...], ...],
     ) -> AngleEncoder:
         instance = object.__new__(cls)
         object.__setattr__(instance, "angles", angles)
-        object.__setattr__(instance, "amp_zero", amp_zero)
-        object.__setattr__(instance, "amp_one", amp_one)
         object.__setattr__(instance, "axes", axes)
         return instance
 
     def tree_flatten(
         self,
-    ) -> tuple[
-        tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray],
-        tuple[tuple[str, ...], ...],
-    ]:
-        """Return dynamic arrays and static axes for JAX transformations."""
-        return (self.angles, self.amp_zero, self.amp_one), self.axes
+    ) -> tuple[tuple[jnp.ndarray], tuple[tuple[str, ...], ...]]:
+        """Return the dynamic angles and static axes for JAX transformations."""
+        return (self.angles,), self.axes
 
     @classmethod
     def tree_unflatten(
         cls,
         axes: tuple[tuple[str, ...], ...],
-        values: tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray],
+        values: tuple[jnp.ndarray],
     ) -> AngleEncoder:
-        """Rebuild a traced encoder without recomputing its amplitudes."""
-        angles, amp_zero, amp_one = values
-        return cls._from_components(angles, amp_zero, amp_one, axes)
+        """Rebuild a traced encoder without revalidating its angles."""
+        return cls._from_components(values[0], axes)
+
+    @property
+    def n_conditions(self) -> int:
+        """Number of conditions in the batch."""
+        return int(self.angles.shape[0])
 
     @property
     def n_qubits(self) -> int:
         """Number of qubits the encoder state lives on."""
         return int(self.angles.shape[-1])
+
+    @property
+    def amp_zero(self) -> jnp.ndarray:
+        """``(n_conditions, n_qubits)`` post-Hadamard amplitudes of ``|0>``."""
+        return layered_amplitudes(self.angles, self.axes)[0]
+
+    @property
+    def amp_one(self) -> jnp.ndarray:
+        """``(n_conditions, n_qubits)`` post-Hadamard amplitudes of ``|1>``."""
+        return layered_amplitudes(self.angles, self.axes)[1]
+
+    def sample(self, key: jax.Array, n_samples: int) -> jnp.ndarray:
+        """Draw ``(n_conditions, n_samples, n_qubits)`` bitstrings."""
+        probabilities_one = jnp.abs(self.amp_one) ** 2
+        return jax.random.bernoulli(
+            key,
+            p=probabilities_one[:, None, :],
+            shape=(self.n_conditions, n_samples, self.n_qubits),
+        ).astype(jnp.float64)
+
+    def amplitude_ratios(self, samples: jnp.ndarray, masks: jnp.ndarray) -> jnp.ndarray:
+        """Return ``(n_conditions, n_samples, n_masks)`` product ratios.
+
+        A product-state ratio factorizes over the flipped qubits, so its
+        logarithm is a contraction of the per-sample local log-ratios with the
+        masks.  Running that contraction as one matrix product avoids the
+        ``(samples, masks, qubits)`` intermediate of the direct product.  The
+        magnitudes, the signs or phases, and the vanishing factors contract
+        separately, so a zero local factor still gives an exact zero ratio.
+        """
+        amp_zero, amp_one = layered_amplitudes(self.angles, self.axes)
+        return _product_ratios(amp_zero, amp_one, samples, masks)
+
+    def post_hadamard_amplitudes(self) -> jnp.ndarray:
+        """Return ``(n_conditions, 2**n_qubits)`` little-endian amplitudes."""
+        amp_zero, amp_one = layered_amplitudes(self.angles, self.axes)
+        zero_reversed = np.asarray(amp_zero, dtype=np.complex128)[:, ::-1]
+        one_reversed = np.asarray(amp_one, dtype=np.complex128)[:, ::-1]
+        n_qubits = self.n_qubits
+        out = np.empty((self.n_conditions, 2**n_qubits), dtype=np.complex128)
+        for condition in range(self.n_conditions):
+            state = np.array(
+                [zero_reversed[condition, 0], one_reversed[condition, 0]],
+                dtype=np.complex128,
+            )
+            for qubit in range(1, n_qubits):
+                state = np.outer(
+                    state,
+                    [zero_reversed[condition, qubit], one_reversed[condition, qubit]],
+                ).ravel()
+            out[condition] = state
+        return out
 
     def select(self, condition: int) -> AngleEncoder:
         """Return this encoder restricted to one condition."""

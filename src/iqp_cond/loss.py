@@ -138,9 +138,7 @@ class _Entries:
 
     ``masks`` are model-width ``(C, M, n)`` with matching ``(C, M)`` weights
     and target moments; ``samples`` are ``(C, 1, S, n)``, keeping the size-1
-    condition axis of each condition's encoder.  ``ratios`` ``(C, 1, S, M)``
-    is cached only when the same entries are evaluated repeatedly; otherwise
-    the evaluator computes it per sample chunk.
+    condition axis of each condition's encoder.
     """
 
     masks: jnp.ndarray
@@ -148,7 +146,6 @@ class _Entries:
     samples: jnp.ndarray
     target_means: jnp.ndarray
     target_squares: jnp.ndarray
-    ratios: jnp.ndarray | None = None
 
 
 jax.tree_util.register_dataclass(
@@ -159,7 +156,6 @@ jax.tree_util.register_dataclass(
         "samples",
         "target_means",
         "target_squares",
-        "ratios",
     ],
     meta_fields=[],
 )
@@ -175,7 +171,6 @@ def _mmd_entries(
     n_ops: int | None,
     n_samples: int,
     shared_samples: bool,
-    cache_ratios: bool = False,
 ) -> tuple[_Entries, ...]:
     """Draw every parameter-independent input of :func:`mmd`, per bandwidth.
 
@@ -247,24 +242,13 @@ def _mmd_entries(
             targets[:, None],
             visible_masks,
         )
-        masks = jnp.pad(visible_masks, ((0, 0), (0, 0), (0, n_ancillas)))
-        ratios = (
-            jax.vmap(lambda encoder, s, m: encoder.amplitude_ratios(s, m))(
-                rows,
-                samples,
-                masks,
-            )
-            if cache_ratios
-            else None
-        )
         entries.append(
             _Entries(
-                masks,
+                jnp.pad(visible_masks, ((0, 0), (0, 0), (0, n_ancillas))),
                 weights,
                 samples,
                 target_means[:, 0],
                 target_squares[:, 0],
-                ratios,
             ),
         )
     return tuple(entries)
@@ -298,11 +282,7 @@ def _mmd_from_entries(
         sums = square_sums = 0.0
         for start in range(0, n_samples, chunk):
             samples = entry.samples[:, start : start + chunk]
-            ratios = (
-                encoder.amplitude_ratios(samples, entry.masks)
-                if entry.ratios is None
-                else entry.ratios[:, start : start + chunk]
-            )
+            ratios = encoder.amplitude_ratios(samples, entry.masks)
             phases = _phase_differences(
                 params,
                 generators,

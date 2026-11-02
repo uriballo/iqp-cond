@@ -32,7 +32,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from functools import lru_cache
 from math import comb, lgamma
 from typing import ClassVar
 
@@ -75,7 +74,6 @@ def _register_size(n_qubits: object, minimum: int) -> int:
     return int(n_qubits)
 
 
-@lru_cache
 def _krawtchouk(n: int) -> np.ndarray:
     """Return ``K[w, k] = sum over |x| = k of (-1)**(x . z)`` for any ``|z| = w``.
 
@@ -96,7 +94,6 @@ def _krawtchouk(n: int) -> np.ndarray:
     )
 
 
-@lru_cache
 def _log_binomials(n: int) -> np.ndarray:
     """Return ``log C(n, w)`` for ``w = 0, ..., n``."""
     return np.asarray(

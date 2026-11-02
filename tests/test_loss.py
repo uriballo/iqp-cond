@@ -586,8 +586,8 @@ def test_parameter_gradient_matches_finite_differences() -> None:
     "precision",
     [{}, {"estimator_dtype": jnp.float32}, {"gemm_dtype": jnp.float32}],
 )
-def test_cached_entries_match_the_fresh_mask_objective(axes, precision) -> None:
-    """Entries drawn once with cached ratios reproduce the fresh-mask MMD."""
+def test_drawn_entries_match_the_fresh_mask_objective(axes, precision) -> None:
+    """Entries drawn once reproduce the fresh-mask MMD at any parameters."""
     rng = np.random.default_rng(83)
     n_qubits, n_visible, n_conditions = 6, 4, 3
     encoders = ciqp.AngleEncoder(
@@ -609,7 +609,6 @@ def test_cached_entries_match_the_fresh_mask_objective(axes, precision) -> None:
         key,
         bank=None,
         shared_samples=False,
-        cache_ratios=True,
         **options,
     )
     planned = jax.jit(
