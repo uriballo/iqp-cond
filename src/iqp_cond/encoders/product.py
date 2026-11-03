@@ -22,25 +22,38 @@ __all__ = ["AngleEncoder", "layered_amplitudes"]
 _ROTATION_AXES = ("X", "Y", "Z")
 
 
+def _real_angles(angles: jnp.ndarray) -> jnp.ndarray:
+    """Return ``angles`` as a JAX array, keeping float32 and promoting the rest.
+
+    Float32 angles come from the ``fp32`` precision policy, which casts the
+    encoder before its ratio query; anything else runs in float64.
+    """
+    angles = jnp.asarray(angles)
+    if angles.dtype == jnp.float32:
+        return angles
+    return angles.astype(jnp.float64)
+
+
 def _local_amplitudes(
     angles: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Return the post-Hadamard ``(amp_zero, amp_one)`` of ``RY(a)|0>``.
 
     Writing ``c = cos(a/2)`` and ``s = sin(a/2)`` the state is
-    ``(c + s)/sqrt(2) |0> + (c - s)/sqrt(2) |1>``.  The amplitudes are real, so
-    the function returns them in float64.  The ratio query then runs on real
+    ``(c + s)/sqrt(2) |0> + (c - s)/sqrt(2) |1>``.  The amplitudes are real and
+    keep the precision of ``angles``, so the ratio query runs on real
     arithmetic, which halves the memory traffic of its ``(samples, masks,
     qubits)`` intermediate.
     """
-    angles = jnp.asarray(angles, dtype=jnp.float64)
+    angles = _real_angles(angles)
+    complex_dtype = jnp.result_type(angles.dtype, jnp.complex64)
     cosine = jnp.cos(angles / 2.0)
     sine = jnp.sin(angles / 2.0)
-    zero = jnp.ones_like(angles, dtype=jnp.complex128)
-    one = jnp.zeros_like(angles, dtype=jnp.complex128)
+    zero = jnp.ones_like(angles, dtype=complex_dtype)
+    one = jnp.zeros_like(angles, dtype=complex_dtype)
     pre_zero = cosine * zero - sine * one
     pre_one = sine * zero + cosine * one
-    scale = jnp.sqrt(jnp.asarray(2.0, dtype=jnp.float64))
+    scale = jnp.sqrt(jnp.asarray(2.0, dtype=angles.dtype))
     # XLA divides complex by real differently from real by real, using a
     # reciprocal multiply, so the code takes the components from the complex
     # expression the regression fixtures pin instead of recomputing them in
@@ -105,9 +118,10 @@ def layered_amplitudes(
     matching rotation labels, layer 0 applied first.  The amplitudes are real
     when every layer is ``Y``, including the one-layer case, which uses the
     pinned ``RY`` expression, and complex whenever an ``X`` or ``Z`` rotation
-    is present.
+    is present.  The amplitudes keep the precision of float32 ``angles`` and are
+    float64 otherwise.
     """
-    values = jnp.asarray(angles, dtype=jnp.float64)
+    values = _real_angles(angles)
     if values.ndim != 3:
         raise ValueError(
             "angles must have shape (n_conditions, n_layers, n_qubits)",
@@ -120,7 +134,7 @@ def layered_amplitudes(
 
     cosine = jnp.cos(values / 2.0)
     sine = jnp.sin(values / 2.0)
-    dtype = jnp.float64 if all_y else jnp.complex128
+    dtype = values.dtype if all_y else jnp.result_type(values.dtype, jnp.complex64)
     zero_state = jnp.ones(values.shape[:1] + values.shape[2:], dtype=dtype)
     one_state = jnp.zeros_like(zero_state)
     for layer, labels in enumerate(normalized):
@@ -138,19 +152,19 @@ def layered_amplitudes(
             rotation_00 = jnp.where(z_mask, jnp.conj(phase), layer_cosine)
             rotation_01 = jnp.where(
                 z_mask,
-                jnp.asarray(0.0, dtype=jnp.complex128),
+                jnp.asarray(0.0, dtype=dtype),
                 jnp.where(x_mask, -1j * layer_sine, -layer_sine),
             )
             rotation_10 = jnp.where(
                 z_mask,
-                jnp.asarray(0.0, dtype=jnp.complex128),
+                jnp.asarray(0.0, dtype=dtype),
                 jnp.where(x_mask, -1j * layer_sine, layer_sine),
             )
             rotation_11 = jnp.where(z_mask, phase, layer_cosine)
             new_zero = rotation_00 * zero_state + rotation_01 * one_state
             new_one = rotation_10 * zero_state + rotation_11 * one_state
         zero_state, one_state = new_zero, new_one
-    scale = jnp.sqrt(jnp.asarray(2.0, dtype=jnp.float64))
+    scale = jnp.sqrt(jnp.asarray(2.0, dtype=values.dtype))
     return (zero_state + one_state) / scale, (zero_state - one_state) / scale
 
 
@@ -170,7 +184,8 @@ def _product_log_ratios(
     arguments and the vanishing factors contract separately, so a zero local
     factor gives an exact ``-inf`` log-magnitude.  For real amplitudes the
     argument is the count of negative factors, whose parity is the exact sign.
-    Compiled once so eager calls dispatch once.
+    The contraction runs in the real precision of the amplitudes.  Compiled once
+    so eager calls dispatch once.
     """
     zero_to_one = _safe_ratio(amp_one, amp_zero)[:, None, :]
     one_to_zero = _safe_ratio(amp_zero, amp_one)[:, None, :]
@@ -181,10 +196,9 @@ def _product_log_ratios(
     # Real ratios contract a negative-factor count, whose parity is the
     # exact sign; complex ratios contract their arguments.
     angle = jnp.angle(local) if is_complex else (local < 0.0)
-    features = jnp.stack(
-        [log_magnitude, angle.astype(jnp.float64), vanishing.astype(jnp.float64)],
-    )
-    totals = jnp.einsum("kcsn,rn->kcsr", features, masks.astype(jnp.float64))
+    real = log_magnitude.dtype
+    features = jnp.stack([log_magnitude, angle.astype(real), vanishing.astype(real)])
+    totals = jnp.einsum("kcsn,rn->kcsr", features, masks.astype(real))
     return jnp.where(totals[2] > 0.0, -jnp.inf, totals[0]), totals[1]
 
 

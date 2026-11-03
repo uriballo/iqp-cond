@@ -396,3 +396,14 @@ def test_model_requires_the_complete_encoder_contract() -> None:
 
     with pytest.raises(TypeError, match="Encoder protocol"):
         ciqp.ConditionalModel(ciqp.Ansatz.complete(2), TrainingOnly())
+
+
+@pytest.mark.parametrize("axes", [("YYYY",), ("YYYY", "ZXZX")])
+def test_layered_amplitudes_keep_single_precision(axes) -> None:
+    """Float32 angles give single-precision amplitudes close to float64."""
+    angles = np.random.default_rng(46).uniform(0.3, 2.4, size=(2, len(axes), 4))
+    single = layered_amplitudes(angles.astype(np.float32), axes)
+    double = layered_amplitudes(angles, axes)
+    for low, high in zip(single, double, strict=True):
+        assert low.dtype in (jnp.float32, jnp.complex64)
+        assert np.allclose(np.asarray(low), np.asarray(high), atol=1e-6)

@@ -481,3 +481,39 @@ def test_checked_estimator_rejects_non_binary_samples(setup) -> None:
             np.ones((1, N_VISIBLE)),
             samples=fractional,
         )
+
+
+@pytest.mark.parametrize(
+    "encoder",
+    [
+        ciqp.AngleEncoder(np.full((2, 1, 4), 0.7), axes=("YYYY",)),
+        ciqp.AngleEncoder(np.full((2, 2, 4), 0.7), axes=("YYYY", "ZXZX")),
+        ciqp.ParityEncoder(np.array([0.5, 1.1]), n_qubits=4),
+        ciqp.TwistedParityEncoder(
+            np.array([0.5, 1.1]), np.array([0.2, 0.7]), n_qubits=4
+        ),
+        ciqp.CollectivePhaseEncoder(
+            np.array([0.4, 0.9]), np.array([0.2, 0.5]), n_qubits=4
+        ),
+    ],
+    ids=["angle-real", "angle-complex", "parity", "twisted", "collective"],
+)
+def test_fp32_queries_every_built_in_encoder_in_single_precision(encoder) -> None:
+    """The fp32 policy reaches the encoder's ratio query and stays close."""
+    ansatz = ciqp.Ansatz.complete(4)
+    params = jnp.linspace(-0.3, 0.3, ansatz.n_parameters)
+    masks = np.random.default_rng(44).integers(0, 2, size=(6, 4)).astype(float)
+    samples = encoder.sample(jax.random.PRNGKey(45), 256)
+    values = {
+        precision: estimate_pauli_z(
+            params,
+            ansatz.generators,
+            encoder,
+            masks,
+            samples=samples,
+            precision=precision,
+        ).values
+        for precision in ("fp64", "fp32")
+    }
+    assert values["fp32"].dtype == jnp.float32
+    assert jnp.allclose(values["fp32"], values["fp64"], atol=1e-6, rtol=0.0)

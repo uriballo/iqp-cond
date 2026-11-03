@@ -77,8 +77,8 @@ class TrainingConfig:
     is the default.  ``"gemm_f32"`` runs only the final phase contraction in
     float32.  ``"estimator_f32"`` also builds parities and phases and evaluates
     the ratio-phase product in float32, returning to float64 for the statistics.
-    ``"fp32"`` keeps the statistics, the loss, the parameters and the optimizer
-    state in float32 as well.
+    ``"fp32"`` keeps the statistics, the loss, the parameters, the optimizer
+    state and the encoder's ratio queries in float32 as well.
 
     ``sample_chunk`` streams the Monte Carlo samples in slices, bounding the live
     ``(samples, masks, qubits)`` ratio tensor.  It is faster at large sample

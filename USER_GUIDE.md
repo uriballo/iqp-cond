@@ -99,16 +99,16 @@ All three operations must describe the same reference state. Run `ciqp.check_enc
 
 Set `n_visible` on `ConditionalModel` when the register includes ancillas. The visible qubits come first; ancillas come last. Targets and measured outputs contain only visible bits. Expectation masks are visible-width and are padded with identity on ancillas.
 
-The library enables float64 at import because its numerical routines rely on that precision. Precision is a single named policy from `ciqp.PRECISIONS`, set with `TrainingConfig(precision=...)` or the `precision=` argument of `estimate_pauli_z`, `mmd` and the model methods. Each policy fixes the dtype of the parities, phases and ratio-phase products, of the final phase contraction, and of the statistics, loss, parameters and optimizer state:
+The library enables float64 at import because its numerical routines rely on that precision. Precision is a single named policy from `ciqp.PRECISIONS`, set with `TrainingConfig(precision=...)` or the `precision=` argument of `estimate_pauli_z`, `mmd` and the model methods. Each policy fixes the dtype of the parities, phases and ratio-phase products, of the final phase contraction, of the statistics, loss, parameters and optimizer state, and of the encoder's amplitude-ratio queries:
 
-| Policy | Parities, phases, products | Phase contraction | Statistics, loss, parameters |
-|---|---|---|---|
-| `"fp64"` (default) | float64 | float64 | float64 |
-| `"gemm_f32"` | float64 | float32 | float64 |
-| `"estimator_f32"` | float32 | float32 | float64 |
-| `"fp32"` | float32 | float32 | float32 |
+| Policy | Parities, phases, products | Phase contraction | Statistics, loss, parameters | Encoder ratio queries |
+|---|---|---|---|---|
+| `"fp64"` (default) | float64 | float64 | float64 | float64 |
+| `"gemm_f32"` | float64 | float32 | float64 | float64 |
+| `"estimator_f32"` | float32 | float32 | float64 | float64 |
+| `"fp32"` | float32 | float32 | float32 | float32 |
 
-The encoders' sampling and amplitude-ratio queries keep their own precision, float64 for the built-in encoders, and are cast where they enter the estimator. Under `"fp32"`, `TrainingResult` parameters and losses are float32.
+Below float64, the estimator casts the encoder's floating leaves, the samples and the masks to the ratio dtype before each query, so the built-in encoders compute their ratios in that precision; a custom encoder whose methods respect their inputs' dtypes does too. Reference sampling, mask draws and the target moments stay float64 under every policy, so all policies see identical draws. Under `"fp32"`, `TrainingResult` parameters and losses are float32.
 
 Exact probabilities and `check_encoder` allocate statevector-scale memory, which grows exponentially with the total model qubit count. Use shot-based sampling for larger registers. Training also forms ratio intermediates over samples, masks, and qubits; lower `mc_samples` or set `sample_chunk` if memory is limited.
 

@@ -152,8 +152,22 @@ def _ratio_sample_values(
     ``|R| cos(arg R + Delta f)``, one exponential and one cosine per entry
     instead of a complex exponential and complex product; that measured about
     a third faster.  It was slower for real ratios and the parity encoder, so
-    every other encoder supplies ``R``.
+    every other encoder supplies ``R``.  Below float64 ``ratios``, the encoder's
+    floating leaves, the samples and the masks are cast first, so the query
+    runs in that precision.
     """
+    if jnp.dtype(precision.ratios) != jnp.dtype(jnp.float64):
+        real = jnp.dtype(precision.ratios)
+        complex_dtype = jnp.result_type(real, jnp.complex64)
+
+        def cast(leaf: jnp.ndarray) -> jnp.ndarray:
+            if not jnp.issubdtype(leaf.dtype, jnp.inexact):
+                return leaf
+            return leaf.astype(complex_dtype if jnp.iscomplexobj(leaf) else real)
+
+        encoder = jax.tree_util.tree_map(cast, encoder)
+        samples = samples.astype(real)
+        masks = masks.astype(real)
     if isinstance(encoder, AngleEncoder) and encoder._complex:
         log_magnitudes, arguments = encoder._log_amplitude_ratios(samples, masks)
         log_magnitudes = log_magnitudes.astype(precision.compute)
