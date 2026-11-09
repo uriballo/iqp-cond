@@ -24,7 +24,7 @@ import jax
 
 jax.config.update("jax_enable_x64", True)
 
-from ._precision import PRECISIONS
+from ._precision import _POLICIES as PRECISIONS
 from .encoders import (
     AngleEncoder,
     CollectivePhaseEncoder,

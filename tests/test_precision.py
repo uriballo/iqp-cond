@@ -7,7 +7,14 @@ import ml_dtypes
 import numpy as np
 import pytest
 
-from iqp_cond._precision import accumulate, quantize
+from iqp_cond._precision import (
+    PRECISIONS,
+    Precision,
+    accumulate,
+    precision,
+    quantize,
+    resolve_precision,
+)
 
 ELEMENT_DTYPES = {
     "bf16": ml_dtypes.bfloat16,
@@ -132,3 +139,67 @@ def test_nvfp4_scales_per_tensor_and_per_block_of_16():
 )
 def test_accumulation_rounds_block_partials_and_the_running_sum(name, count, expected):
     assert float(accumulate(jnp.ones(count), name)) == expected
+
+
+def test_shorthand_sets_every_knob_from_a_base_and_overrides_single_knobs():
+    recipe = precision("bf16", statistics="fp32", variant="split")
+    assert recipe == Precision(
+        gemm_inputs="bf16",
+        gemm_accumulate="bf16",
+        phases="bf16",
+        statistics="fp32",
+        ratios="bf16",
+        variant="split",
+    )
+    assert precision() == Precision()
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: Precision(phases="fp12"),
+        lambda: Precision(statistics="mxfp8"),
+        lambda: precision("nvfp4"),
+        lambda: Precision(variant="mixed"),
+    ],
+    ids=[
+        "unknown format",
+        "block format off the GEMM",
+        "block base",
+        "unknown variant",
+    ],
+)
+def test_invalid_configurations_are_rejected_when_built(build):
+    with pytest.raises(ValueError):
+        build()
+
+
+def test_block_formats_are_accepted_on_the_gemm_inputs():
+    assert precision("fp32", gemm_inputs="mxfp4").gemm_inputs == "mxfp4"
+
+
+@pytest.mark.parametrize(
+    ("recipe", "scaled"),
+    [
+        (precision("fp16"), True),
+        (precision("fp32", phases="fp16"), True),
+        (precision("fp16", variant="split"), False),
+        (precision("bf16"), False),
+        (precision(), False),
+    ],
+)
+def test_loss_scaling_follows_fp16_in_the_backward_pass(recipe, scaled):
+    assert recipe.loss_scaled is scaled
+
+
+def test_presets_are_uniform_recipes_named_after_their_format():
+    assert set(PRECISIONS) == {"fp64", "fp32", *ELEMENT_DTYPES, "tf32"}
+    assert resolve_precision("bf16") == precision("bf16")
+    recipe = precision("fp32", gemm_inputs="mxfp4")
+    assert resolve_precision(recipe) is recipe
+
+
+@pytest.mark.parametrize("name", ["gemm_f32", "mxfp4", "fp12"])
+def test_names_that_are_not_presets_are_rejected(name):
+    with pytest.raises(ValueError):
+        resolve_precision(name)

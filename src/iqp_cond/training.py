@@ -23,7 +23,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from ._precision import resolve_precision
+from ._precision import _resolve_policy
 from .encoders import Encoder
 from .encoders.base import _check_condition_pytree, _select_condition
 from .initialization import parameters_from_data
@@ -133,7 +133,7 @@ class TrainingConfig:
             raise ValueError(
                 "mc_samples and validation_mc_samples must be at least two",
             )
-        resolve_precision(self.precision)
+        _resolve_policy(self.precision)
         if self.sample_chunk is not None and self.sample_chunk < 1:
             raise ValueError("sample_chunk must be positive")
         if self.mask_refresh not in (STEP, CACHE):
@@ -440,7 +440,7 @@ def train(
     # The parameters, and with them the optimizer state, live in the policy's
     # accumulation dtype.
     params = _initial_parameters(model, training_targets, initial_params, seed)
-    params = params.astype(resolve_precision(config.precision).accumulate)
+    params = params.astype(_resolve_policy(config.precision).accumulate)
     schedule = optax.cosine_decay_schedule(
         init_value=config.learning_rate,
         decay_steps=config.steps,

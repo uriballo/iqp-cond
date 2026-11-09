@@ -32,7 +32,7 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 
-from ._precision import resolve_precision
+from ._precision import _resolve_policy
 from .encoders import Encoder
 from .encoders.base import _check_condition_pytree, _condition_rows
 from .estimator import _phase_differences, _ratio_sample_values
@@ -270,7 +270,7 @@ def _mmd_from_entries(
     ``(samples, masks)`` buffers; both model and target terms use the unbiased
     finite-sample estimator, accumulated in the policy's ``accumulate`` dtype.
     """
-    policy = resolve_precision(precision)
+    policy = _resolve_policy(precision)
     params = jnp.asarray(params, dtype=policy.accumulate)
     generators = jnp.asarray(generators, dtype=jnp.float64)
     rows = _condition_rows(encoders)
@@ -346,7 +346,7 @@ def mmd(
     ``precision`` names a policy from :data:`iqp_cond.PRECISIONS`; the loss
     comes back in the policy's ``accumulate`` dtype.
     """
-    params = jnp.asarray(params, dtype=resolve_precision(precision).accumulate)
+    params = jnp.asarray(params, dtype=_resolve_policy(precision).accumulate)
     generators = jnp.asarray(generators, dtype=jnp.float64)
     targets = jnp.asarray(targets, dtype=jnp.float64)
     if sample_chunk is not None and sample_chunk < 1:

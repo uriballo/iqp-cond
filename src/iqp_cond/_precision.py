@@ -1,13 +1,12 @@
-"""Named precision policies for the estimator, the loss and training.
+"""Number formats for the operations of the estimator, the loss and training.
 
-A policy fixes four dtypes: ``compute`` for the parities, the phases and the
-ratio-phase products; ``contraction`` for the final phase matrix product;
-``accumulate`` for the per-sample statistics, the loss, the parameters and the
-optimizer state; and ``ratios`` for the encoder's amplitude-ratio queries.
-Below float64, the estimator casts the encoder's floating leaves, the samples
-and the masks to ``ratios`` before the query, so the built-in encoders compute
-their ratios in that precision.  Reference sampling stays float64 under every
-policy, so every policy sees the same draws.
+:class:`Precision` names a format for each operation of a training step, and
+:data:`PRECISIONS` holds the uniform presets.  :func:`quantize` and
+:func:`accumulate` emulate the formats: they round values, and sum them, as
+hardware working in the format would, while computing in the input's dtype.
+
+The dtype policies at the top are the previous configuration, kept until the
+estimator, the loss and the trainer move to :class:`Precision`.
 """
 
 from __future__ import annotations
@@ -19,7 +18,7 @@ import jax.numpy as jnp
 
 
 @dataclass(frozen=True)
-class Precision:
+class _DtypePolicy:
     """The dtypes of one precision policy."""
 
     compute: jnp.dtype
@@ -28,11 +27,11 @@ class Precision:
     ratios: jnp.dtype
 
 
-PRECISIONS = {
-    "fp64": Precision(jnp.float64, jnp.float64, jnp.float64, jnp.float64),
-    "gemm_f32": Precision(jnp.float64, jnp.float32, jnp.float64, jnp.float64),
-    "estimator_f32": Precision(jnp.float32, jnp.float32, jnp.float64, jnp.float64),
-    "fp32": Precision(jnp.float32, jnp.float32, jnp.float32, jnp.float32),
+_POLICIES = {
+    "fp64": _DtypePolicy(jnp.float64, jnp.float64, jnp.float64, jnp.float64),
+    "gemm_f32": _DtypePolicy(jnp.float64, jnp.float32, jnp.float64, jnp.float64),
+    "estimator_f32": _DtypePolicy(jnp.float32, jnp.float32, jnp.float64, jnp.float64),
+    "fp32": _DtypePolicy(jnp.float32, jnp.float32, jnp.float32, jnp.float32),
 }
 
 
@@ -173,10 +172,85 @@ def accumulate(x: jnp.ndarray, name: str) -> jnp.ndarray:
     return total
 
 
-def resolve_precision(name: str) -> Precision:
-    """Return the dtypes of the named policy, or raise for an unknown name."""
-    if name not in PRECISIONS:
-        raise ValueError(
-            f"unknown precision {name!r}; expected one of {sorted(PRECISIONS)}",
+_KNOBS = ("gemm_inputs", "gemm_accumulate", "phases", "statistics", "ratios")
+_BLOCK_FORMATS = ("mxfp8", "mxfp4", "nvfp4")
+FORMATS = ("fp64", "fp32", *_ELEMENT_FORMATS, *_BLOCK_FORMATS)
+
+
+@dataclass(frozen=True)
+class Precision:
+    """The number format of each operation in a training step.
+
+    ``gemm_inputs`` rounds the parameters entering the phase contraction (the
+    other operand is exactly ``±1``); ``gemm_accumulate`` is the precision in
+    which that contraction sums and returns the phases; ``phases`` covers phase
+    storage and the cosine and sine; ``statistics`` covers the per-sample
+    values, their sums and the loss assembly; and ``ratios`` covers encoder
+    amplitude ratios.  ``variant="split"`` runs the forward computations in
+    these formats and the backward computations in fp32.
+    """
+
+    gemm_inputs: str = "fp64"
+    gemm_accumulate: str = "fp64"
+    phases: str = "fp64"
+    statistics: str = "fp64"
+    ratios: str = "fp64"
+    variant: str = "uniform"
+
+    def __post_init__(self) -> None:
+        for knob in _KNOBS:
+            name = getattr(self, knob)
+            if name not in FORMATS:
+                raise ValueError(
+                    f"unknown format {name!r} for {knob}; expected one of {FORMATS}"
+                )
+            if name in _BLOCK_FORMATS and knob != "gemm_inputs":
+                raise ValueError(
+                    f"block-scaled {name!r} applies only to gemm_inputs, not {knob}"
+                )
+        if self.variant not in ("uniform", "split"):
+            raise ValueError(
+                f"variant must be 'uniform' or 'split', not {self.variant!r}"
+            )
+
+    @property
+    def loss_scaled(self) -> bool:
+        """Whether training scales the loss to keep fp16 gradients in range.
+
+        Only the uniform variant differentiates in the knobs' formats; the
+        split variant's backward pass is fp32.
+        """
+        return self.variant == "uniform" and any(
+            getattr(self, knob) == "fp16" for knob in _KNOBS
         )
-    return PRECISIONS[name]
+
+
+def precision(
+    base: str = "fp64", *, variant: str = "uniform", **knobs: str
+) -> Precision:
+    """Return a ``Precision`` with every knob in ``base`` except ``knobs``."""
+    return Precision(**({knob: base for knob in _KNOBS} | knobs), variant=variant)
+
+
+PRECISIONS = {name: precision(name) for name in ("fp64", "fp32", *_ELEMENT_FORMATS)}
+
+
+def resolve_precision(value: str | Precision) -> Precision:
+    """Return ``value`` if it is a ``Precision``, else the named preset."""
+    if isinstance(value, Precision):
+        return value
+    if value not in PRECISIONS:
+        raise ValueError(
+            f"unknown precision {value!r}; expected a Precision or one of "
+            f"{sorted(PRECISIONS)}",
+        )
+    return PRECISIONS[value]
+
+
+def _resolve_policy(name: str) -> _DtypePolicy:
+    """Return the dtypes of the named policy, or raise for an unknown name."""
+    if name not in _POLICIES:
+        raise ValueError(
+            f"unknown precision {name!r}; expected one of {sorted(_POLICIES)}",
+        )
+    return _POLICIES[name]

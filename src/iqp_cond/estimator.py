@@ -23,7 +23,7 @@ import jax
 import jax.numpy as jnp
 
 from ._layout import pad_visible_masks
-from ._precision import Precision, resolve_precision
+from ._precision import _DtypePolicy, _resolve_policy
 from .encoders import AngleEncoder, Encoder
 
 __all__ = [
@@ -93,7 +93,7 @@ def _phase_differences(
     generators: jnp.ndarray,
     masks: jnp.ndarray,
     samples: jnp.ndarray,
-    precision: Precision,
+    precision: _DtypePolicy,
 ) -> jnp.ndarray:
     """Return ``Delta_a f_theta(z)`` for every sample and mask.
 
@@ -121,7 +121,7 @@ def _phase_differences(
 def _sample_values(
     ratios: jnp.ndarray,
     phases: jnp.ndarray,
-    precision: Precision,
+    precision: _DtypePolicy,
 ) -> jnp.ndarray:
     """Return the per-sample values ``Re[R exp(i Delta f)]``.
 
@@ -144,7 +144,7 @@ def _ratio_sample_values(
     samples: jnp.ndarray,
     masks: jnp.ndarray,
     phases: jnp.ndarray,
-    precision: Precision,
+    precision: _DtypePolicy,
 ) -> jnp.ndarray:
     """Return the per-sample values ``Re[R exp(i Delta f)]`` in ``accumulate``.
 
@@ -187,7 +187,7 @@ def _estimate(
     precision: str,
     return_samples: bool,
 ) -> ExpectationEstimate:
-    policy = resolve_precision(precision)
+    policy = _resolve_policy(precision)
     phases = _phase_differences(params, generators, masks, samples, policy)
     sample_values = _ratio_sample_values(encoders, samples, masks, phases, policy)
     values = jnp.mean(sample_values, axis=1)
@@ -270,7 +270,7 @@ def estimate_pauli_z(
     (float32 parities, phases and products, float64 statistics) or ``"fp32"``
     (float32 throughout, including the returned values).
     """
-    params = jnp.asarray(params, dtype=resolve_precision(precision).accumulate)
+    params = jnp.asarray(params, dtype=_resolve_policy(precision).accumulate)
     generators = jnp.asarray(generators, dtype=jnp.float64)
     masks = jnp.asarray(masks, dtype=jnp.float64)
     _validate_sources(key, samples, n_samples)
