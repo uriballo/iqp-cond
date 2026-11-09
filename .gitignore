@@ -27,3 +27,6 @@ prototypes/
 
 /docs/
 CONTEXT.md
+
+# Precision-study run outputs (parameters, traces, notes)
+experiments/precision_study/runs/
