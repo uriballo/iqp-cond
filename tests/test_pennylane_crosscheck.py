@@ -391,13 +391,29 @@ def test_layered_angle_encoder_state_matches_pennylane(axes) -> None:
 
 
 @pytest.mark.slow
+def empirical_moments(samples: np.ndarray, masks: np.ndarray) -> np.ndarray:
+    """Mean character of each mask over the target samples."""
+    return (1.0 - 2.0 * ((samples @ masks.T) % 2)).mean(axis=0)
+
+
+def expected_mask_term(mu_q: np.ndarray, mu_p: np.ndarray, n: int) -> np.ndarray:
+    """Expected per-mask MMD term for fixed target samples.
+
+    The loss estimates the target's squared moment without bias, as
+    ``(n^2 mu_p^2 - n) / (n (n - 1))``; against the exact model moment this
+    gives ``(mu_q - mu_p)^2 - (1 - mu_p^2) / (n - 1)``.
+    """
+    return (mu_q - mu_p) ** 2 - (1.0 - mu_p**2) / (n - 1)
+
+
 def test_mmd_expectation_matches_exact_pennylane_value() -> None:
     """The stochastic loss is unbiased for the exact PennyLane MMD.
 
-    The target is an analytic product law, so its character moments are exact;
-    the model moments come from PennyLane; the mask expectation is the exact
-    Hamming-RBF character sum.  The estimator's mean over independent keys must
-    match that value within Monte Carlo error.
+    The target enters through its samples' empirical moments, with the
+    loss's unbiased estimate of their square; the model moments come from
+    PennyLane; the mask expectation is the exact Hamming-RBF character sum.
+    The estimator's mean over independent keys must match that value within
+    Monte Carlo error.
     """
     sigma = 2.0
     n_ops, n_samples, n_keys = 32, 64, 240
@@ -423,11 +439,7 @@ def test_mmd_expectation_matches_exact_pennylane_value() -> None:
 
     exact = np.zeros(N_CONDITIONS)
     for condition in range(N_CONDITIONS):
-        target_mean = np.asarray(targets[condition]).mean(axis=0)
-        mu_p = np.prod(
-            np.where(masks == 1.0, 1.0 - 2.0 * target_mean, 1.0),
-            axis=1,
-        )
+        mu_p = empirical_moments(targets[condition], masks)
         mu_q = np.array(
             [
                 pl_expectation(
@@ -441,7 +453,9 @@ def test_mmd_expectation_matches_exact_pennylane_value() -> None:
                 for mask in masks
             ],
         )
-        exact[condition] = np.sum(weights * (mu_q - mu_p) ** 2)
+        exact[condition] = np.sum(
+            weights * expected_mask_term(mu_q, mu_p, targets.shape[1])
+        )
     exact_loss = float(exact.mean())
 
     encoders = y_layer(angles)
@@ -657,8 +671,8 @@ def test_preparation_may_use_any_pennylane_gate() -> None:
 def test_mmd_expectation_matches_exact_pennylane_value_with_bank() -> None:
     """The bank path with shared draws and two bandwidths is unbiased too.
 
-    The exact per-entry value sums the bank weights times the squared gap
-    between PennyLane's model moment and the target's empirical moment; the
+    The exact per-entry value sums the bank weights times the expected mask
+    term of PennyLane's model moment and the targets' empirical moment; the
     loss averages those entries over bandwidths and conditions.
     """
     sigmas = (1.5, 3.0)
@@ -685,11 +699,7 @@ def test_mmd_expectation_matches_exact_pennylane_value_with_bank() -> None:
             masks, weights = bank.entry(bandwidth, condition)
             masks = np.asarray(masks)
             weights = np.asarray(weights)
-            target_mean = targets[condition].mean(axis=0)
-            mu_p = np.prod(
-                np.where(masks == 1.0, 1.0 - 2.0 * target_mean, 1.0),
-                axis=1,
-            )
+            mu_p = empirical_moments(targets[condition], masks)
             mu_q = np.array(
                 [
                     pl_expectation(
@@ -703,7 +713,9 @@ def test_mmd_expectation_matches_exact_pennylane_value_with_bank() -> None:
                     for mask in masks
                 ],
             )
-            exact[bandwidth, condition] = np.sum(weights * (mu_q - mu_p) ** 2)
+            exact[bandwidth, condition] = np.sum(
+                weights * expected_mask_term(mu_q, mu_p, targets.shape[1])
+            )
     exact_loss = float(exact.mean())
 
     encoders = y_layer(angles)
