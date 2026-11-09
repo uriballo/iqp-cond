@@ -12,7 +12,11 @@ synced back):
     rsync -a --exclude __pycache__ --exclude .venv --exclude .git --exclude .claude \
         --exclude prototypes --exclude 'experiments/precision_study/runs' \
         --exclude 'experiments/precision_study/cache' \
+        --rsync-path="mkdir -p /data/cvcqml/scratch/oballo/iqp-precision && rsync" \
         <worktree>/ oballo@ui.pic.es:/data/cvcqml/scratch/oballo/iqp-precision/tree/
+
+The `--rsync-path` prefix creates the parent folder on a fresh scratch area;
+rsync itself only creates the last level of the destination.
 
 `GIT_SHA` records the synced commit in every run's provenance, since the tree
 at PIC is not a git checkout.
