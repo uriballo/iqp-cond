@@ -94,20 +94,17 @@ def target_moments(
 def _validate_loss_inputs(
     params: jnp.ndarray,
     generators: jnp.ndarray,
-    targets: jnp.ndarray,
+    n_conditions: int,
+    n_data_qubits: int,
     encoders: Encoder,
     n_samples: int,
-) -> int:
-    """Validate shared shapes and return the number of target visible qubits.
+) -> None:
+    """Validate the shapes shared by every target source.
 
     The checks read only static shapes, so they stay valid while the trainer
     traces ``mmd`` under ``jax.jit``.  The messages mirror the checked
     estimator's.
     """
-    if targets.ndim != 3:
-        raise ValueError(
-            "targets must have shape (n_conditions, n_targets, n_visible)",
-        )
     if generators.ndim != 2:
         raise ValueError("generators must have shape (n_generators, n_qubits)")
     if encoders.n_qubits != generators.shape[1]:
@@ -117,7 +114,6 @@ def _validate_loss_inputs(
         )
     if params.shape != (generators.shape[0],):
         raise ValueError("params must have shape (n_generators,)")
-    n_conditions, _, n_data_qubits = targets.shape
     if encoders.n_conditions != n_conditions:
         raise ValueError(
             f"encoder covers {encoders.n_conditions} conditions but targets "
@@ -129,7 +125,28 @@ def _validate_loss_inputs(
         )
     if n_samples < 2:
         raise ValueError("n_samples must be at least two")
-    return n_data_qubits
+
+
+@jax.tree_util.register_dataclass
+@dataclass(frozen=True)
+class TargetMoments:
+    """Target Pauli-Z moments on the masks of an operator bank.
+
+    ``moments`` has the bank's weight shape, ``(n_bandwidths, n_conditions,
+    n_masks)``, and holds the target's expectation of each mask's character.
+    The MMD then uses the exact squared moment where samples would give the
+    unbiased finite-sample estimate.
+    """
+
+    bank: OperatorBank
+    moments: jnp.ndarray
+
+    def __post_init__(self) -> None:
+        if self.moments.shape != self.bank.weights.shape:
+            raise ValueError(
+                f"moments must match the bank's weights, {self.bank.weights.shape}, "
+                f"not {self.moments.shape}",
+            )
 
 
 @dataclass(frozen=True)
@@ -163,7 +180,7 @@ jax.tree_util.register_dataclass(
 
 def _mmd_entries(
     encoders: Encoder,
-    targets: jnp.ndarray,
+    targets: jnp.ndarray | TargetMoments,
     key: jax.Array,
     *,
     bank: OperatorBank | None,
@@ -179,7 +196,10 @@ def _mmd_entries(
     ``shared_samples`` from one key per condition reused by every bandwidth.
     """
     rows = _condition_rows(encoders)
-    n_conditions, _, n_visible = targets.shape
+    if isinstance(targets, TargetMoments):
+        n_conditions, n_visible = targets.bank.n_conditions, targets.bank.n_visible
+    else:
+        n_conditions, _, n_visible = targets.shape
     n_ancillas = encoders.n_qubits - n_visible
     if bank is None:
         assert sigmas is not None and n_ops is not None
@@ -237,18 +257,22 @@ def _mmd_entries(
         sample_sets = [draw(keys) for keys in sample_keys]
 
     entries = []
-    for (visible_masks, weights), samples in zip(mask_sets, sample_sets, strict=True):
-        target_means, target_squares = jax.vmap(target_moments)(
-            targets[:, None],
-            visible_masks,
-        )
+    for bandwidth, ((visible_masks, weights), samples) in enumerate(
+        zip(mask_sets, sample_sets, strict=True)
+    ):
+        if isinstance(targets, TargetMoments):
+            means = targets.moments[bandwidth, :, : visible_masks.shape[1]]
+            squares = means**2
+        else:
+            means, squares = jax.vmap(target_moments)(targets[:, None], visible_masks)
+            means, squares = means[:, 0], squares[:, 0]
         entries.append(
             _Entries(
                 jnp.pad(visible_masks, ((0, 0), (0, 0), (0, n_ancillas))),
                 weights,
                 samples,
-                target_means[:, 0],
-                target_squares[:, 0],
+                means,
+                squares,
             ),
         )
     return tuple(entries)
@@ -323,7 +347,7 @@ def mmd(
     params: jnp.ndarray,
     generators: jnp.ndarray,
     encoders: Encoder,
-    targets: jnp.ndarray,
+    targets: jnp.ndarray | TargetMoments,
     key: jax.Array,
     *,
     bank: OperatorBank | None = None,
@@ -347,6 +371,10 @@ def mmd(
     This avoids resampling once per bandwidth.  The default resamples once per
     (bandwidth, condition) entry.
 
+    ``targets`` holds target samples, ``(n_conditions, n_targets, n_visible)``,
+    or :class:`TargetMoments`, which carries its own bank and replaces both
+    mask sources.
+
     ``precision`` is a :class:`iqp_cond.Precision` or a preset name from
     :data:`iqp_cond.PRECISIONS`; the parameters stay float64, and the loss
     comes back in float64 when the statistics are fp64 and in float32 otherwise.
@@ -354,7 +382,18 @@ def mmd(
     _Arithmetic(precision)
     params = jnp.asarray(params, dtype=jnp.float64)
     generators = jnp.asarray(generators, dtype=jnp.float64)
-    targets = jnp.asarray(targets, dtype=jnp.float64)
+    if isinstance(targets, TargetMoments):
+        if bank is not None or sigmas is not None or n_ops is not None:
+            raise ValueError("target moments carry their own bank")
+        bank = targets.bank
+        n_conditions, n_data_qubits = bank.n_conditions, bank.n_visible
+    else:
+        targets = jnp.asarray(targets, dtype=jnp.float64)
+        if targets.ndim != 3:
+            raise ValueError(
+                "targets must have shape (n_conditions, n_targets, n_visible)",
+            )
+        n_conditions, _, n_data_qubits = targets.shape
     if sample_chunk is not None and sample_chunk < 1:
         raise ValueError("sample_chunk must be positive")
     if bank is None:
@@ -366,19 +405,20 @@ def mmd(
             raise ValueError("n_ops must be positive")
     elif sigmas is not None or n_ops is not None:
         raise ValueError("sigmas and n_ops belong to the key mask source only")
-    n_data_qubits = _validate_loss_inputs(
+    _validate_loss_inputs(
         params,
         generators,
-        targets,
+        n_conditions,
+        n_data_qubits,
         encoders,
         n_samples,
     )
     _check_condition_pytree(encoders)
     if bank is not None:
-        if bank.n_conditions != targets.shape[0]:
+        if bank.n_conditions != n_conditions:
             raise ValueError(
                 f"operator bank covers {bank.n_conditions} conditions but targets "
-                f"have {targets.shape[0]}",
+                f"have {n_conditions}",
             )
         if bank.n_visible != n_data_qubits:
             raise ValueError(
