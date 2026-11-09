@@ -1,0 +1,23 @@
+# A minutes-long CPU check of the whole pipeline; not a study plan.
+name: cpu-check
+defaults:
+  teacher_seed: 1
+  steps: 20
+  validation_interval: 10
+  n_ops: 16
+  pool_draws: 128
+  eval_masks: 64
+  eval_samples: 256
+  teacher_samples: 100000
+  teacher_sample_count: 512
+grid:
+  n_qubits: [8]
+  mc_samples: [64]
+  mask_refresh: [step, cache]
+  init_seed: [1]
+recipes:
+  fp64: {}
+  bf16: {base: bf16}
+  fp16: {base: fp16}
+variants: [uniform, split]
+baselines: true
