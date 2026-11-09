@@ -38,6 +38,7 @@ dev = [
     "jupyterlab>=4.4",
     "nbconvert>=7.16",
     "pytest>=9.0.3",
+    "pyyaml>=6.0",
     "ruff>=0.15.17",
 ]
 

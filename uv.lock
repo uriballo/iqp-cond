@@ -706,6 +706,7 @@ dev = [
     { name = "jupyterlab" },
     { name = "nbconvert" },
     { name = "pytest" },
+    { name = "pyyaml" },
     { name = "ruff" },
 ]
 
@@ -722,6 +723,7 @@ dev = [
     { name = "jupyterlab", specifier = ">=4.4" },
     { name = "nbconvert", specifier = ">=7.16" },
     { name = "pytest", specifier = ">=9.0.3" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", specifier = ">=0.15.17" },
 ]
 

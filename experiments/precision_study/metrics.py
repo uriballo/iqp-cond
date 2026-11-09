@@ -21,13 +21,15 @@ def parameter_deviation(params: np.ndarray, reference: np.ndarray) -> np.ndarray
 
 
 def iteration_lag(
-    loss: np.ndarray, reference: np.ndarray, *, window: int
+    loss: np.ndarray, reference: np.ndarray, steps: np.ndarray, *, window: int
 ) -> np.ndarray:
-    """Return ``tau_p(t)`` in checkpoints, NaN where the reference stops falling.
+    """Return ``tau_p(t)`` in steps, NaN where the reference stops falling.
 
     Both losses are smoothed by a trailing moving average over ``window``
-    checkpoints; the lag at ``t`` is how many checkpoints later the smoothed
-    loss first reaches the smoothed reference value at ``t`` (NaN if never).
+    checkpoints, taken at the training ``steps``.  The lag at ``t`` is the step
+    at which the smoothed loss first reaches the smoothed reference value at
+    ``t``, minus the step of ``t``: negative for a run ahead of fp64, NaN if it
+    never gets there.
     """
 
     def smooth(values: np.ndarray) -> np.ndarray:
@@ -38,13 +40,14 @@ def iteration_lag(
         return out / counts
 
     loss, reference = smooth(loss), smooth(reference)
+    steps = np.asarray(steps)
     lag = np.full(len(reference), np.nan)
     for t in range(len(reference) - 1):
         if not reference[t + 1] < reference[t]:
             continue
-        reached = np.flatnonzero(loss[t:] <= reference[t])
+        reached = np.flatnonzero(loss <= reference[t])
         if reached.size:
-            lag[t] = reached[0]
+            lag[t] = steps[reached[0]] - steps[t]
     return lag
 
 
@@ -81,11 +84,15 @@ def noise_ratio(values: np.ndarray, reference: np.ndarray) -> NoiseRatio:
     """Return ``rho_p`` and its bias and spread parts over independent draws.
 
     ``values`` and ``reference`` hold one quantity in format ``p`` and in fp64
-    at the same draws.  ``sigma`` is the sample standard deviation of the fp64
-    values across draws; ``rho^2 = bias^2 + spread^2`` exactly.
+    at the same draws.  ``sigma``, the Monte Carlo noise, is the unbiased
+    (``ddof=1``) standard deviation of the fp64 values across draws; the bias,
+    spread and RMS describe the observed errors themselves (``ddof=0``), so
+    ``rho^2 = bias^2 + spread^2`` exactly.
     """
     error = np.asarray(values) - np.asarray(reference)
     sigma = np.std(reference, ddof=1)
+    if not sigma > 0:
+        raise ValueError("the fp64 reference shows no noise across draws")
     bias = float(np.mean(error) / sigma)
     spread = float(np.std(error) / sigma)
     rho = float(np.sqrt(np.mean(error**2)) / sigma)
