@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import csv
 import dataclasses
+import time
 from pathlib import Path
 
 import jax
@@ -33,7 +34,7 @@ import iqp_cond as ciqp
 from iqp_cond.loss import mmd
 
 from . import study
-from .metrics import noise_ratio
+from .metrics import NoiseRatio, noise_ratio
 
 KNOBS = ("gemm_inputs", "gemm_accumulate", "phases", "statistics", "ratios")
 BLOCK_FORMATS = ("mxfp8", "mxfp4", "nvfp4")
@@ -85,6 +86,7 @@ def screen(config, runs, samples, draws, out: Path) -> None:
     rows = []
     for point, params in parameter_points(config, runs):
         for n_samples in samples:
+            start = time.time()
             reference = loss_and_gradient(setup, "fp64", n_samples)
             ref_loss, ref_grad = zip(
                 *(reference(params, key) for key in keys), strict=True
@@ -94,14 +96,16 @@ def screen(config, runs, samples, draws, out: Path) -> None:
                 evaluate = loss_and_gradient(setup, recipe, n_samples)
                 loss, grad = zip(*(evaluate(params, key) for key in keys), strict=True)
                 loss, grad = np.array(loss, float), np.array(grad, float)
-                loss_ratio = noise_ratio(loss, ref_loss)
-                # Components whose fp64 gradient has no noise across draws are
-                # skipped; the others give one ratio each.
+                # A quantity without noise across the draws has no ratio; it is
+                # recorded as NaN so one such case cannot stop the screening.
+                nan = NoiseRatio(np.nan, np.nan, np.nan)
+                noisy_loss = np.std(ref_loss, ddof=1) > 0
+                loss_ratio = noise_ratio(loss, ref_loss) if noisy_loss else nan
                 noisy = np.std(ref_grad, axis=0, ddof=1) > 0
                 grad_ratios = [
                     noise_ratio(grad[:, j], ref_grad[:, j])
                     for j in np.flatnonzero(noisy)
-                ]
+                ] or [nan]
                 rows.append(
                     {
                         "point": point,
@@ -123,7 +127,10 @@ def screen(config, runs, samples, draws, out: Path) -> None:
                         ),
                     }
                 )
-        print(f"screened {point}", flush=True)
+            print(
+                f"screened {point} at S={n_samples} in {time.time() - start:.0f} s",
+                flush=True,
+            )
     out.mkdir(parents=True, exist_ok=True)
     with open(out / "screening.csv", "w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
@@ -150,12 +157,23 @@ def main() -> None:
         "--samples", type=int, nargs="+", default=[1000, 4000, 16000, 64000, 256000]
     )
     parser.add_argument("--draws", type=int, default=32)
+    parser.add_argument(
+        "--plan",
+        type=Path,
+        help="take the teacher and bank settings from this plan's defaults",
+    )
     args = parser.parse_args()
+    defaults = {}
+    if args.plan:
+        defaults = yaml.safe_load(args.plan.read_text()).get("defaults", {})
     config = study.RunConfig(
-        n_qubits=args.n_qubits,
-        teacher_seed=args.teacher_seed,
-        init_seed=args.init_seed,
-        seed=0,
+        **{
+            **defaults,
+            "n_qubits": args.n_qubits,
+            "teacher_seed": args.teacher_seed,
+            "init_seed": args.init_seed,
+            "seed": 0,
+        }
     )
     screen(config, args.run, args.samples, args.draws, args.out)
 

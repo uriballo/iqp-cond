@@ -8,9 +8,14 @@ rounding behaviour. Only the account holder submits jobs.
 From the laptop, sync the worktree (code only; results stay at PIC until
 synced back):
 
-    rsync -a --exclude __pycache__ --exclude .venv --exclude 'experiments/precision_study/runs' \
+    git -C <worktree> rev-parse HEAD > <worktree>/GIT_SHA
+    rsync -a --exclude __pycache__ --exclude .venv --exclude .git --exclude .claude \
+        --exclude prototypes --exclude 'experiments/precision_study/runs' \
         --exclude 'experiments/precision_study/cache' \
         <worktree>/ oballo@ui.pic.es:/data/cvcqml/scratch/oballo/iqp-precision/tree/
+
+`GIT_SHA` records the synced commit in every run's provenance, since the tree
+at PIC is not a git checkout.
 
 On ui.pic.es, the first time:
 

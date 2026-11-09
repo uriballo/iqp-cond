@@ -31,3 +31,4 @@ CONTEXT.md
 # Precision-study run outputs (parameters, traces, notes)
 experiments/precision_study/runs/
 experiments/precision_study/cache/
+GIT_SHA

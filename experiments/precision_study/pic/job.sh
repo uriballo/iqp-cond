@@ -32,9 +32,12 @@ SAMPLER=$!
 PLANS=experiments/precision_study/plans
 case $MODE in
 smoke)
+    echo "== $(date -Is) stage 1: prepare teacher caches" &&
     $PY -m experiments.precision_study.matrix $PLANS/smoke.yaml --prepare &&
+    echo "== $(date -Is) stage 2: screening at 12 qubits" &&
     $PY -m experiments.precision_study.screening $STUDY/runs/smoke-screening \
-        --n-qubits 12 --samples 1000 16000 --draws 16 &&
+        --n-qubits 12 --samples 1000 16000 --draws 16 --plan $PLANS/smoke.yaml &&
+    echo "== $(date -Is) stage 3: training matrix" &&
     $PY -m experiments.precision_study.matrix $PLANS/smoke.yaml --all ;;
 prepare) $PY -m experiments.precision_study.matrix "$1" --prepare ;;
 train) $PY -m experiments.precision_study.matrix "$1" --index "$2" ;;

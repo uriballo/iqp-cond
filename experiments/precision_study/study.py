@@ -292,13 +292,22 @@ def evaluate(config: RunConfig, params: np.ndarray) -> float:
 
 
 def _provenance() -> dict[str, str]:
-    root = Path(__file__).resolve().parents[2]
-    sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True
-    ).stdout.strip()
+    """The library version and commit; the commit comes from ``GIT_SHA``, which
+    the sync writes, where the tree is not a git checkout (as at PIC)."""
     from importlib.metadata import version
 
-    return {"iqp_cond": version("iqp-cond"), "git": sha}
+    root = Path(__file__).resolve().parents[2]
+    sha = ""
+    if (root / "GIT_SHA").exists():
+        sha = (root / "GIT_SHA").read_text().strip()
+    else:
+        try:
+            sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True
+            ).stdout.strip()
+        except OSError:
+            pass
+    return {"iqp_cond": version("iqp-cond"), "git": sha or "unknown"}
 
 
 def save(folder: Path, config: RunConfig, result) -> None:

@@ -24,7 +24,7 @@ import iqp_cond as ciqp
 from iqp_cond.exact import probabilities
 
 _CHUNK = 2**18  # Monte Carlo samples per mask and pass
-_BUDGET = 2**24  # array elements per compiled batch
+_BUDGET = 2**27  # array elements per compiled batch, about 1 GB in fp64
 
 
 def teacher(
