@@ -586,8 +586,6 @@ def test_parameter_gradient_matches_finite_differences() -> None:
     "precision",
     [
         {},
-        {"precision": "gemm_f32"},
-        {"precision": "estimator_f32"},
         {"precision": "fp32"},
     ],
 )
@@ -624,7 +622,7 @@ def test_drawn_entries_match_the_fresh_mask_objective(axes, precision) -> None:
 
     # The float32 estimator agrees to single precision between the eager
     # reference and the compiled evaluation, which may fuse differently.
-    single = precision.get("precision") in ("estimator_f32", "fp32")
+    single = precision.get("precision") == "fp32"
     rtol = 1e-5 if single else 1e-12
     np.testing.assert_allclose(
         planned.per_bandwidth_condition,

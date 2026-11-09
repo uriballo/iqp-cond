@@ -15,6 +15,7 @@ from iqp_cond.verification import EncoderCheck, check_encoder
 
 def test_package_root_is_the_compact_workflow_api() -> None:
     assert ciqp.__all__ == [
+        "FORMATS",
         "PRECISIONS",
         "AngleEncoder",
         "Ansatz",
@@ -23,9 +24,11 @@ def test_package_root_is_the_compact_workflow_api() -> None:
         "Encoder",
         "EncoderCheck",
         "ParityEncoder",
+        "Precision",
         "TrainingConfig",
         "TwistedParityEncoder",
         "check_encoder",
+        "precision",
         "train",
     ]
     # The verification helpers resolve lazily, without importing PennyLane.
@@ -167,14 +170,14 @@ def test_model_estimate_pauli_z_delegates_to_the_estimator() -> None:
         masks,
         key=key,
         n_samples=64,
-        precision="estimator_f32",
+        precision="bf16",
     )
     via_model = model.estimate_pauli_z(
         params,
         masks,
         key=key,
         n_samples=64,
-        precision="estimator_f32",
+        precision="bf16",
     )
     assert np.array_equal(np.asarray(via_model.values), np.asarray(direct.values))
 
@@ -196,7 +199,7 @@ def test_model_mmd_delegates_and_validates_the_target_width() -> None:
         sigmas=(1.0,),
         n_ops=8,
         n_samples=16,
-        precision="estimator_f32",
+        precision="bf16",
     )
     via_model = model.mmd(
         params,
@@ -205,7 +208,7 @@ def test_model_mmd_delegates_and_validates_the_target_width() -> None:
         sigmas=(1.0,),
         n_ops=8,
         n_samples=16,
-        precision="estimator_f32",
+        precision="bf16",
     )
     assert float(via_model.loss) == float(direct.loss)
 

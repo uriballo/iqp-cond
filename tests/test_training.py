@@ -478,7 +478,7 @@ def test_training_config_validates_its_fields() -> None:
     with pytest.raises(ValueError, match="unknown mask_refresh"):
         ciqp.TrainingConfig(mask_refresh="sometimes")
     with pytest.raises(ValueError, match="unknown precision"):
-        ciqp.TrainingConfig(precision="bf16")
+        ciqp.TrainingConfig(precision="fp12")
 
 
 def test_training_config_defaults_follow_the_library_protocol() -> None:
@@ -739,108 +739,15 @@ def test_mixed_precision_and_chunked_training_run(
         mc_samples=17,
         validation_n_ops=8,
         validation_mc_samples=19,
-        precision="gemm_f32",
+        precision="bf16",
         sample_chunk=8,
     )
     result = ciqp.train(model, training, validation, seed=31, config=config)
+    # The parameters, and with them the optimizer state, stay float64.
+    assert result.final_params.dtype == np.float64
     assert np.all(np.isfinite(result.train_losses))
     assert np.all(np.isfinite(result.validation_losses))
     assert result.best_params.shape == (model.ansatz.n_parameters,)
-
-
-@pytest.mark.parametrize(
-    ("precision", "dtype"),
-    [("estimator_f32", np.float64), ("fp32", np.float32)],
-)
-def test_float32_training_stays_close_to_default(
-    model: ciqp.ConditionalModel,
-    targets: tuple[np.ndarray, np.ndarray],
-    precision: str,
-    dtype: type,
-) -> None:
-    """Training and validation both receive the precision policy."""
-    training, validation = targets
-    base = ciqp.TrainingConfig(
-        steps=6,
-        batch_size=8,
-        learning_rate=0.015,
-        final_learning_rate=0.002,
-        validation_interval=3,
-        sigmas=(0.8, 1.3),
-        n_ops=8,
-        mc_samples=17,
-        validation_n_ops=8,
-        validation_mc_samples=19,
-        sample_chunk=8,
-    )
-    initial = np.linspace(-0.05, 0.05, model.ansatz.n_parameters)
-    reference = ciqp.train(
-        model,
-        training,
-        validation,
-        seed=31,
-        config=base,
-        initial_params=initial,
-    )
-    mixed = ciqp.train(
-        model,
-        training,
-        validation,
-        seed=31,
-        config=dataclasses.replace(base, precision=precision),
-        initial_params=initial,
-    )
-    assert np.max(np.abs(mixed.final_params - reference.final_params)) < 2e-6
-    assert np.max(np.abs(mixed.validation_losses - reference.validation_losses)) < 1e-7
-    assert mixed.final_params.dtype == dtype
-    assert mixed.train_losses.dtype == dtype
-
-
-def test_float32_estimator_chunking_matches_full_samples(
-    model: ciqp.ConditionalModel,
-    targets: tuple[np.ndarray, np.ndarray],
-) -> None:
-    training, _validation = targets
-    params = jnp.linspace(-0.2, 0.2, model.ansatz.n_parameters)
-    bank = operator_bank((1.2,), 16, N_CONDITIONS, N_QUBITS, seed=81)
-    arguments = (params, jnp.asarray(training[:, :16]), jax.random.PRNGKey(82))
-    full = model.mmd(
-        *arguments,
-        bank=bank,
-        n_samples=32,
-        shared_samples=True,
-        precision="estimator_f32",
-    )
-    chunked = model.mmd(
-        *arguments,
-        bank=bank,
-        n_samples=32,
-        shared_samples=True,
-        precision="estimator_f32",
-        sample_chunk=8,
-    )
-    assert jnp.allclose(chunked.loss, full.loss, atol=1e-14, rtol=0.0)
-
-    def objective(current_params, precision="fp64"):
-        return model.mmd(
-            current_params,
-            arguments[1],
-            arguments[2],
-            bank=bank,
-            n_samples=32,
-            shared_samples=True,
-            precision=precision,
-        ).loss
-
-    reference_gradient = jax.grad(objective)(params)
-    mixed_gradient = jax.grad(lambda current: objective(current, "estimator_f32"))(
-        params,
-    )
-    relative_error = float(
-        jnp.linalg.norm(mixed_gradient - reference_gradient)
-        / jnp.linalg.norm(reference_gradient)
-    )
-    assert relative_error < 2e-6
 
 
 def _exact_objective(

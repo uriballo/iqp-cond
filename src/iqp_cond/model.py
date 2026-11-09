@@ -20,6 +20,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from ._layout import ancilla_support, pad_visible_masks
+from ._precision import Precision
 from .encoders import Encoder
 from .estimator import ExpectationEstimate, estimate_pauli_z
 from .loss import ConditionalMMDResult, mmd
@@ -156,7 +157,7 @@ class ConditionalModel:
         key: jax.Array | None = None,
         samples: jnp.ndarray | None = None,
         n_samples: int | None = None,
-        precision: str = "fp64",
+        precision: str | Precision = "fp64",
         return_samples: bool = False,
     ) -> ExpectationEstimate:
         """Estimate visible Pauli-Z moments for every condition and mask."""
@@ -183,7 +184,7 @@ class ConditionalModel:
         n_ops: int | None = None,
         n_samples: int,
         shared_samples: bool = False,
-        precision: str = "fp64",
+        precision: str | Precision = "fp64",
         sample_chunk: int | None = None,
     ) -> ConditionalMMDResult:
         """Condition-balanced multiscale MMD against visible-width targets."""

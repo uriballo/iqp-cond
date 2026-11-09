@@ -5,34 +5,18 @@
 :func:`accumulate` emulate the formats: they round values, and sum them, as
 hardware working in the format would, while computing in the input's dtype.
 
-The dtype policies at the top are the previous configuration, kept until the
-estimator, the loss and the trainer move to :class:`Precision`.
+:class:`_Arithmetic` is the seam the estimator and the loss compute through:
+an fp64 knob runs the plain float64 expression, and any other knob rounds to
+its format and computes in float32.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from functools import cache
 
 import jax
 import jax.numpy as jnp
-
-
-@dataclass(frozen=True)
-class _DtypePolicy:
-    """The dtypes of one precision policy."""
-
-    compute: jnp.dtype
-    contraction: jnp.dtype
-    accumulate: jnp.dtype
-    ratios: jnp.dtype
-
-
-_POLICIES = {
-    "fp64": _DtypePolicy(jnp.float64, jnp.float64, jnp.float64, jnp.float64),
-    "gemm_f32": _DtypePolicy(jnp.float64, jnp.float32, jnp.float64, jnp.float64),
-    "estimator_f32": _DtypePolicy(jnp.float32, jnp.float32, jnp.float64, jnp.float64),
-    "fp32": _DtypePolicy(jnp.float32, jnp.float32, jnp.float32, jnp.float32),
-}
 
 
 @dataclass(frozen=True)
@@ -247,10 +231,113 @@ def resolve_precision(value: str | Precision) -> Precision:
     return PRECISIONS[value]
 
 
-def _resolve_policy(name: str) -> _DtypePolicy:
-    """Return the dtypes of the named policy, or raise for an unknown name."""
-    if name not in _POLICIES:
-        raise ValueError(
-            f"unknown precision {name!r}; expected one of {sorted(_POLICIES)}",
-        )
-    return _POLICIES[name]
+@cache
+def _rounder(name: str, variant: str):
+    """``quantize`` with the backward pass of the variant.
+
+    The uniform variant rounds cotangents to the same format; the split
+    variant passes them through unchanged (a straight-through estimator).
+    """
+
+    @jax.custom_vjp
+    def rounded(x):
+        return quantize(x, name)
+
+    def forward(x):
+        return quantize(x, name), None
+
+    def backward(_, cotangent):
+        if variant == "split":
+            return (cotangent,)
+        return (quantize(cotangent, name),)
+
+    rounded.defvjp(forward, backward)
+    return rounded
+
+
+def _blocked_product(a: jnp.ndarray, b: jnp.ndarray, name: str) -> jnp.ndarray:
+    """``a @ b.T`` accumulated in blocks of 32 as :func:`accumulate` does."""
+    fmt = _ELEMENT_FORMATS[name]
+    a_blocks = jnp.moveaxis(_to_blocks(a, 32), -2, 0)
+    b_blocks = jnp.moveaxis(_to_blocks(b, 32), -2, 0)
+
+    def add(running, block):
+        a_block, b_block = block
+        partial = jnp.matmul(a_block, b_block.T, precision=jax.lax.Precision.HIGHEST)
+        return _round(running + _round(partial, fmt), fmt), None
+
+    zeros = jnp.zeros((a.shape[0], b.shape[0]), a.dtype)
+    total, _ = jax.lax.scan(add, zeros, (a_blocks, b_blocks))
+    return total
+
+
+@cache
+def _accumulating_gemm(name: str, variant: str):
+    """Phase contraction accumulating in ``name``, characters held constant.
+
+    The uniform variant also accumulates the parameter gradient, a sum over
+    samples, in ``name``; the split variant computes it in float32.
+    """
+
+    @jax.custom_vjp
+    def gemm(characters, flips):
+        return _blocked_product(characters, flips, name)
+
+    def forward(characters, flips):
+        return gemm(characters, flips), characters
+
+    def backward(characters, cotangent):
+        if variant == "split":
+            flips_cotangent = jnp.matmul(
+                cotangent.T, characters, precision=jax.lax.Precision.HIGHEST
+            )
+        else:
+            flips_cotangent = _blocked_product(cotangent.T, characters.T, name)
+        return jnp.zeros_like(characters), flips_cotangent
+
+    gemm.defvjp(forward, backward)
+    return gemm
+
+
+class _Arithmetic:
+    """The operations of a training step in the formats of a ``Precision``."""
+
+    def __init__(self, value: str | Precision) -> None:
+        self.precision = resolve_precision(value)
+
+    def dtype(self, knob: str) -> jnp.dtype:
+        """float64 for an fp64 knob, float32 otherwise."""
+        fp64 = getattr(self.precision, knob) == "fp64"
+        return jnp.dtype(jnp.float64 if fp64 else jnp.float32)
+
+    def round(self, x: jnp.ndarray, knob: str) -> jnp.ndarray:
+        """Round ``x`` to the knob's format, in ``x``'s dtype below fp32."""
+        name = getattr(self.precision, knob)
+        if name == "fp64":
+            return x
+        if name == "fp32":
+            return x.astype(jnp.float32)
+        return _rounder(name, self.precision.variant)(x)
+
+    def gemm(self, characters: jnp.ndarray, flips: jnp.ndarray) -> jnp.ndarray:
+        """Return ``characters @ flips.T`` with rounded inputs and accumulation."""
+        flips = self.round(flips, "gemm_inputs")
+        name = self.precision.gemm_accumulate
+        if name == "fp64":
+            return characters @ flips.T
+        characters = characters.astype(jnp.float32)
+        flips = flips.astype(jnp.float32)
+        if name == "fp32":
+            return jnp.matmul(characters, flips.T, precision=jax.lax.Precision.HIGHEST)
+        return _accumulating_gemm(name, self.precision.variant)(characters, flips)
+
+    def sum(self, x: jnp.ndarray, axis: int) -> jnp.ndarray:
+        """Sum in the statistics format: block partial sums, fp32 final sum."""
+        name = self.precision.statistics
+        if name == "fp64":
+            return jnp.sum(x, axis=axis)
+        x = jnp.moveaxis(x.astype(jnp.float32), axis, -1)
+        if name == "fp32":
+            return jnp.sum(x, axis=-1)
+        partials = jnp.sum(_to_blocks(x, 32), axis=-1)
+        return jnp.sum(self.round(partials, "statistics"), axis=-1)

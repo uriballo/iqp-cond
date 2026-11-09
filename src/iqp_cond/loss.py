@@ -32,7 +32,7 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 
-from ._precision import _resolve_policy
+from ._precision import Precision, _Arithmetic
 from .encoders import Encoder
 from .encoders.base import _check_condition_pytree, _condition_rows
 from .estimator import _phase_differences, _ratio_sample_values
@@ -260,7 +260,7 @@ def _mmd_from_entries(
     encoders: Encoder,
     entries: tuple[_Entries, ...],
     *,
-    precision: str = "fp64",
+    precision: str | Precision = "fp64",
     sample_chunk: int | None = None,
 ) -> ConditionalMMDResult:
     """Evaluate drawn entries at ``params``; only the phases depend on them.
@@ -268,10 +268,10 @@ def _mmd_from_entries(
     Each bandwidth vectorizes its conditions.  ``sample_chunk`` streams the
     sample axis and accumulates the per-mask moments, bounding the live
     ``(samples, masks)`` buffers; both model and target terms use the unbiased
-    finite-sample estimator, accumulated in the policy's ``accumulate`` dtype.
+    finite-sample estimator, summed in the ``statistics`` format.
     """
-    policy = _resolve_policy(precision)
-    params = jnp.asarray(params, dtype=policy.accumulate)
+    arithmetic = _Arithmetic(precision)
+    params = jnp.asarray(params, dtype=jnp.float64)
     generators = jnp.asarray(generators, dtype=jnp.float64)
     rows = _condition_rows(encoders)
 
@@ -286,24 +286,28 @@ def _mmd_from_entries(
                 generators,
                 entry.masks,
                 samples,
-                policy,
+                arithmetic,
             )
             values = _ratio_sample_values(
                 encoder,
                 samples,
                 entry.masks,
                 phases,
-                policy,
+                arithmetic,
             )[0]
-            sums = sums + jnp.sum(values, axis=0)
-            square_sums = square_sums + jnp.sum(values**2, axis=0)
+            sums = sums + arithmetic.sum(values, axis=0)
+            square_sums = square_sums + arithmetic.sum(
+                arithmetic.round(values**2, "statistics"), axis=0
+            )
+        dtype = arithmetic.dtype("statistics")
         model_squares = (sums**2 - square_sums) / (n_samples * (n_samples - 1))
-        per_mask = (
+        per_mask = arithmetic.round(
             model_squares
-            - 2.0 * (sums / n_samples) * entry.target_means.astype(policy.accumulate)
-            + entry.target_squares.astype(policy.accumulate)
+            - 2.0 * (sums / n_samples) * entry.target_means.astype(dtype)
+            + entry.target_squares.astype(dtype),
+            "statistics",
         )
-        return jnp.sum(per_mask * entry.weights.astype(policy.accumulate))
+        return arithmetic.sum(per_mask * entry.weights.astype(dtype), axis=0)
 
     per_bandwidth_condition = jnp.stack(
         [jax.vmap(condition_value)(rows, entry) for entry in entries],
@@ -327,7 +331,7 @@ def mmd(
     n_ops: int | None = None,
     n_samples: int,
     shared_samples: bool = False,
-    precision: str = "fp64",
+    precision: str | Precision = "fp64",
     sample_chunk: int | None = None,
 ) -> ConditionalMMDResult:
     """Estimate the condition-balanced multiscale squared MMD.
@@ -343,10 +347,12 @@ def mmd(
     This avoids resampling once per bandwidth.  The default resamples once per
     (bandwidth, condition) entry.
 
-    ``precision`` names a policy from :data:`iqp_cond.PRECISIONS`; the loss
-    comes back in the policy's ``accumulate`` dtype.
+    ``precision`` is a :class:`iqp_cond.Precision` or a preset name from
+    :data:`iqp_cond.PRECISIONS`; the parameters stay float64, and the loss
+    comes back in float64 when the statistics are fp64 and in float32 otherwise.
     """
-    params = jnp.asarray(params, dtype=_resolve_policy(precision).accumulate)
+    _Arithmetic(precision)
+    params = jnp.asarray(params, dtype=jnp.float64)
     generators = jnp.asarray(generators, dtype=jnp.float64)
     targets = jnp.asarray(targets, dtype=jnp.float64)
     if sample_chunk is not None and sample_chunk < 1:

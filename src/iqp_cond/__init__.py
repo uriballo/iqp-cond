@@ -14,17 +14,18 @@ blocks remain available from their expert submodules.
 
 Importing this package turns on JAX float64
 (``jax.config.update("jax_enable_x64", True)``).  The estimator, the loss, and
-the trainer default to the ``"fp64"`` policy; :data:`PRECISIONS` lists the
-reduced-precision policies, which are chosen per call or through
-:class:`TrainingConfig`.  Keep float64 enabled, because the encoders and the
-float64 policies depend on it.
+the trainer default to ``"fp64"``.  A :class:`Precision`, built directly or
+with :func:`precision`, sets the number format of each operation, and
+:data:`PRECISIONS` holds the uniform presets; both are chosen per call or
+through :class:`TrainingConfig`.  Keep float64 enabled, because the encoders,
+the parameters and the fp64 path depend on it.
 """
 
 import jax
 
 jax.config.update("jax_enable_x64", True)
 
-from ._precision import _POLICIES as PRECISIONS
+from ._precision import FORMATS, PRECISIONS, Precision, precision
 from .encoders import (
     AngleEncoder,
     CollectivePhaseEncoder,
@@ -36,6 +37,7 @@ from .model import Ansatz, ConditionalModel
 from .training import TrainingConfig, train
 
 __all__ = [
+    "FORMATS",
     "PRECISIONS",
     "AngleEncoder",
     "Ansatz",
@@ -44,9 +46,11 @@ __all__ = [
     "Encoder",
     "EncoderCheck",
     "ParityEncoder",
+    "Precision",
     "TrainingConfig",
     "TwistedParityEncoder",
     "check_encoder",
+    "precision",
     "train",
 ]
 

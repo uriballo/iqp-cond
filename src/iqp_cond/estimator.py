@@ -23,7 +23,7 @@ import jax
 import jax.numpy as jnp
 
 from ._layout import pad_visible_masks
-from ._precision import _DtypePolicy, _resolve_policy
+from ._precision import Precision, _Arithmetic
 from .encoders import AngleEncoder, Encoder
 
 __all__ = [
@@ -93,17 +93,19 @@ def _phase_differences(
     generators: jnp.ndarray,
     masks: jnp.ndarray,
     samples: jnp.ndarray,
-    precision: _DtypePolicy,
+    arithmetic: _Arithmetic,
 ) -> jnp.ndarray:
     """Return ``Delta_a f_theta(z)`` for every sample and mask.
 
-    Parities are built in ``precision.compute`` and the final contraction runs
-    in ``precision.contraction``; the phases come back in ``compute``.
+    Parities and characters are exact integers, built in the contraction's
+    dtype; the contraction rounds its inputs and accumulates in the GEMM
+    knobs' formats, and the phases are stored in the ``phases`` format.
     """
-    samples = samples.astype(precision.compute)
-    generators = generators.astype(precision.compute)
-    masks = masks.astype(precision.compute)
-    params = params.astype(precision.compute)
+    dtype = arithmetic.dtype("gemm_accumulate")
+    samples = samples.astype(dtype)
+    generators = generators.astype(dtype)
+    masks = masks.astype(dtype)
+    params = params.astype(dtype)
     # Flattening the leading (condition, sample) axes keeps both contractions
     # plain matrix products; under the loss's condition vmap, batched einsums
     # with the unit condition axis measured about a quarter slower on CPU.
@@ -112,31 +114,37 @@ def _phase_differences(
     sample_characters = 1.0 - 2.0 * jnp.mod(sample_parities, 2.0)
     op_parities = jnp.mod(masks @ generators.T, 2.0)
     weighted_flips = -2.0 * op_parities * params[None, :]
-    characters = sample_characters.astype(precision.contraction)
-    flips = weighted_flips.astype(precision.contraction)
-    phases = (characters @ flips.T).astype(precision.compute)
+    phases = arithmetic.gemm(sample_characters, weighted_flips)
+    phases = arithmetic.round(phases, "phases")
     return phases.reshape(*leading, masks.shape[0])
+
+
+def _trig(phases: jnp.ndarray, arithmetic: _Arithmetic, function) -> jnp.ndarray:
+    """Evaluate ``function`` on the phases and store it in the ``phases`` format."""
+    return arithmetic.round(function(phases), "phases")
 
 
 def _sample_values(
     ratios: jnp.ndarray,
     phases: jnp.ndarray,
-    precision: _DtypePolicy,
+    arithmetic: _Arithmetic,
 ) -> jnp.ndarray:
     """Return the per-sample values ``Re[R exp(i Delta f)]``.
 
-    The product runs in ``precision.compute`` and the values come back in
-    ``precision.accumulate``.
+    The ratios are rounded to the ``ratios`` format, the cosine and sine to the
+    ``phases`` format, and the values to the ``statistics`` format.
     """
     # Re[R exp(i phi)] = Re R cos phi - Im R sin phi, which skips the complex
     # exponential and, for real ratios, the sine and the imaginary part.
-    phases = phases.astype(precision.compute)
     if jnp.iscomplexobj(ratios):
-        ratios = ratios.astype(jnp.result_type(precision.compute, jnp.complex64))
-        values = jnp.real(ratios) * jnp.cos(phases) - jnp.imag(ratios) * jnp.sin(phases)
+        real = arithmetic.round(jnp.real(ratios), "ratios")
+        imaginary = arithmetic.round(jnp.imag(ratios), "ratios")
+        values = real * _trig(phases, arithmetic, jnp.cos) - imaginary * _trig(
+            phases, arithmetic, jnp.sin
+        )
     else:
-        values = ratios.astype(precision.compute) * jnp.cos(phases)
-    return values.astype(precision.accumulate)
+        values = arithmetic.round(ratios, "ratios") * _trig(phases, arithmetic, jnp.cos)
+    return arithmetic.round(values, "statistics")
 
 
 def _ratio_sample_values(
@@ -144,38 +152,37 @@ def _ratio_sample_values(
     samples: jnp.ndarray,
     masks: jnp.ndarray,
     phases: jnp.ndarray,
-    precision: _DtypePolicy,
+    arithmetic: _Arithmetic,
 ) -> jnp.ndarray:
-    """Return the per-sample values ``Re[R exp(i Delta f)]`` in ``accumulate``.
+    """Return the per-sample values ``Re[R exp(i Delta f)]``.
 
     Complex angle-encoder ratios are evaluated from their log-polar form as
     ``|R| cos(arg R + Delta f)``, one exponential and one cosine per entry
     instead of a complex exponential and complex product; that measured about
     a third faster.  It was slower for real ratios and the parity encoder, so
-    every other encoder supplies ``R``.  Below float64 ``ratios``, the encoder's
-    floating leaves, the samples and the masks are cast first, so the query
-    runs in that precision.
+    every other encoder supplies ``R``.  Below fp64 ``ratios``, the encoder's
+    floating leaves, the samples and the masks are cast to float32 first, so
+    the query runs in float32 before its outputs are rounded.
     """
-    if jnp.dtype(precision.ratios) != jnp.dtype(jnp.float64):
-        real = jnp.dtype(precision.ratios)
-        complex_dtype = jnp.result_type(real, jnp.complex64)
+    if arithmetic.dtype("ratios") != jnp.dtype(jnp.float64):
 
         def cast(leaf: jnp.ndarray) -> jnp.ndarray:
             if not jnp.issubdtype(leaf.dtype, jnp.inexact):
                 return leaf
-            return leaf.astype(complex_dtype if jnp.iscomplexobj(leaf) else real)
+            return leaf.astype(jnp.complex64 if jnp.iscomplexobj(leaf) else jnp.float32)
 
         encoder = jax.tree_util.tree_map(cast, encoder)
-        samples = samples.astype(real)
-        masks = masks.astype(real)
+        samples = samples.astype(jnp.float32)
+        masks = masks.astype(jnp.float32)
     if isinstance(encoder, AngleEncoder) and encoder._complex:
         log_magnitudes, arguments = encoder._log_amplitude_ratios(samples, masks)
-        log_magnitudes = log_magnitudes.astype(precision.compute)
-        arguments = arguments.astype(precision.compute)
-        phases = phases.astype(precision.compute)
-        values = jnp.exp(log_magnitudes) * jnp.cos(arguments + phases)
-        return values.astype(precision.accumulate)
-    return _sample_values(encoder.amplitude_ratios(samples, masks), phases, precision)
+        magnitudes = arithmetic.round(jnp.exp(log_magnitudes), "ratios")
+        angles = arithmetic.round(
+            arithmetic.round(arguments, "ratios") + phases, "phases"
+        )
+        values = magnitudes * _trig(angles, arithmetic, jnp.cos)
+        return arithmetic.round(values, "statistics")
+    return _sample_values(encoder.amplitude_ratios(samples, masks), phases, arithmetic)
 
 
 def _estimate(
@@ -184,13 +191,16 @@ def _estimate(
     encoders: Encoder,
     masks: jnp.ndarray,
     samples: jnp.ndarray,
-    precision: str,
+    precision: str | Precision,
     return_samples: bool,
 ) -> ExpectationEstimate:
-    policy = _resolve_policy(precision)
-    phases = _phase_differences(params, generators, masks, samples, policy)
-    sample_values = _ratio_sample_values(encoders, samples, masks, phases, policy)
-    values = jnp.mean(sample_values, axis=1)
+    arithmetic = _Arithmetic(precision)
+    phases = _phase_differences(params, generators, masks, samples, arithmetic)
+    sample_values = _ratio_sample_values(encoders, samples, masks, phases, arithmetic)
+    if arithmetic.precision.statistics == "fp64":
+        values = jnp.mean(sample_values, axis=1)
+    else:
+        values = arithmetic.sum(sample_values, axis=1) / sample_values.shape[1]
     return ExpectationEstimate(
         values,
         int(samples.shape[1]),
@@ -249,7 +259,7 @@ def estimate_pauli_z(
     key: jax.Array | None = None,
     samples: jnp.ndarray | None = None,
     n_samples: int | None = None,
-    precision: str = "fp64",
+    precision: str | Precision = "fp64",
     return_samples: bool = False,
 ) -> ExpectationEstimate:
     """Estimate Pauli-Z expectations for one or more conditions.
@@ -265,12 +275,12 @@ def estimate_pauli_z(
     positions.  The padding follows the visible-first convention of
     :mod:`iqp_cond.model`.
 
-    ``precision`` names a policy from :data:`iqp_cond.PRECISIONS`: ``"fp64"``,
-    ``"gemm_f32"`` (float32 final phase contraction), ``"estimator_f32"``
-    (float32 parities, phases and products, float64 statistics) or ``"fp32"``
-    (float32 throughout, including the returned values).
+    ``precision`` is a :class:`iqp_cond.Precision` or the name of a preset in
+    :data:`iqp_cond.PRECISIONS`; values come back in float64 when the
+    statistics are fp64 and in float32 otherwise.
     """
-    params = jnp.asarray(params, dtype=_resolve_policy(precision).accumulate)
+    _Arithmetic(precision)
+    params = jnp.asarray(params, dtype=jnp.float64)
     generators = jnp.asarray(generators, dtype=jnp.float64)
     masks = jnp.asarray(masks, dtype=jnp.float64)
     _validate_sources(key, samples, n_samples)
@@ -317,7 +327,7 @@ def estimate_pauli_z_unchecked(
     key: jax.Array | None = None,
     samples: jnp.ndarray | None = None,
     n_samples: int | None = None,
-    precision: str = "fp64",
+    precision: str | Precision = "fp64",
     return_samples: bool = False,
 ) -> ExpectationEstimate:
     """Traceable estimator kernel with no array validation and model-width masks.

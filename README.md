@@ -52,11 +52,11 @@ Read [`USER_GUIDE.md`](USER_GUIDE.md) for shapes, training, inference, and custo
 
 ## API map
 
-- `iqp_cond`: `Ansatz`, `ConditionalModel`, the encoders `AngleEncoder`, `ParityEncoder`, `TwistedParityEncoder` and `CollectivePhaseEncoder`, `TrainingConfig`, `train`, `check_encoder`, and `PRECISIONS`, the names accepted by every `precision=` argument.
+- `iqp_cond`: `Ansatz`, `ConditionalModel`, the encoders `AngleEncoder`, `ParityEncoder`, `TwistedParityEncoder` and `CollectivePhaseEncoder`, `TrainingConfig`, `train`, `check_encoder`, and the precision settings `Precision`, `precision`, `PRECISIONS` and `FORMATS`, accepted by every `precision=` argument.
 - `iqp_cond.encoders`: the `Encoder` and `ExactEncoder` protocols and every built-in encoder, one module per family (`product`, `symmetric`).
 - `model`: moment estimation, MMD evaluation, exact probabilities, and sampling are methods on `ConditionalModel`.
 - `iqp_cond.estimator`, `iqp_cond.initialization`, `iqp_cond.operators`, and `iqp_cond.simulation`: numerical routines and circuit construction for advanced workflows.
 
 Importing `iqp_cond` enables JAX float64, which the estimator, loss, and trainer use internally. Create JAX arrays after importing the package.
 
-Precision is one named policy, `TrainingConfig(precision=...)` or the `precision=` argument of the estimator and the loss, chosen from `ciqp.PRECISIONS`. The default `"fp64"` runs everything in float64. `"gemm_f32"` runs only the final phase contraction in float32, `"estimator_f32"` also builds parities and phases and evaluates the ratio-phase product in float32 before returning to float64 for the statistics, and `"fp32"` keeps the statistics, the loss, the parameters, the optimizer state and the encoders' ratio queries in float32 too.
+Every `precision=` argument, and `TrainingConfig(precision=...)`, takes a `Precision` that names the number format of each operation of a training step, or the name of a uniform preset from `ciqp.PRECISIONS` such as `"fp32"` or `"bf16"`. The default `"fp64"` runs everything in float64; the parameters and the optimizer state stay float64 under every precision. The user guide describes the operations and formats.

@@ -23,7 +23,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from ._precision import _resolve_policy
+from ._precision import Precision, resolve_precision
 from .encoders import Encoder
 from .encoders.base import _check_condition_pytree, _select_condition
 from .initialization import parameters_from_data
@@ -73,12 +73,10 @@ class TrainingConfig:
     retained bank. In expectation both estimate the same condition-balanced
     arithmetic-mean multiscale objective.
 
-    ``precision`` names a policy from :data:`iqp_cond.PRECISIONS`.  ``"fp64"``
-    is the default.  ``"gemm_f32"`` runs only the final phase contraction in
-    float32.  ``"estimator_f32"`` also builds parities and phases and evaluates
-    the ratio-phase product in float32, returning to float64 for the statistics.
-    ``"fp32"`` keeps the statistics, the loss, the parameters, the optimizer
-    state and the encoder's ratio queries in float32 as well.
+    ``precision`` is a :class:`iqp_cond.Precision` or the name of a preset in
+    :data:`iqp_cond.PRECISIONS`, ``"fp64"`` by default.  It sets the format of
+    each operation of the loss; the parameters and the optimizer state stay
+    float64 under every precision.
 
     ``sample_chunk`` streams the Monte Carlo samples in slices, bounding the live
     ``(samples, masks, qubits)`` ratio tensor.  It is faster at large sample
@@ -95,7 +93,7 @@ class TrainingConfig:
     mc_samples: int = 1_000
     validation_n_ops: int = 512
     validation_mc_samples: int = 1_000
-    precision: str = "fp64"
+    precision: str | Precision = "fp64"
     sample_chunk: int | None = None
     mask_refresh: MaskRefresh = STEP
 
@@ -133,7 +131,7 @@ class TrainingConfig:
             raise ValueError(
                 "mc_samples and validation_mc_samples must be at least two",
             )
-        _resolve_policy(self.precision)
+        resolve_precision(self.precision)
         if self.sample_chunk is not None and self.sample_chunk < 1:
             raise ValueError("sample_chunk must be positive")
         if self.mask_refresh not in (STEP, CACHE):
@@ -437,10 +435,7 @@ def train(
     encoders = model.encoder
     n_conditions = encoders.n_conditions
     sigmas = config.resolved_sigmas(model.visible)
-    # The parameters, and with them the optimizer state, live in the policy's
-    # accumulation dtype.
     params = _initial_parameters(model, training_targets, initial_params, seed)
-    params = params.astype(_resolve_policy(config.precision).accumulate)
     schedule = optax.cosine_decay_schedule(
         init_value=config.learning_rate,
         decay_steps=config.steps,
