@@ -52,6 +52,8 @@ def probabilities(model: ConditionalModel, params: np.ndarray) -> np.ndarray:
     if not isinstance(encoder, ExactEncoder):
         raise TypeError("the encoder must provide post_hadamard_amplitudes")
     n_qubits = model.n_qubits
+    if n_qubits > 31:
+        raise ValueError("exact probabilities index states with uint32, so n <= 31")
     phase = _phases(
         jnp.asarray(params, dtype=jnp.float64),
         np.asarray(model.generators, dtype=np.int64),

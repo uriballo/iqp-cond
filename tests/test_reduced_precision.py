@@ -156,3 +156,39 @@ def test_training_records_the_parameters_at_every_checkpoint(data):
     assert result.checkpoint_params.shape == (3, data["params"].size)
     np.testing.assert_array_equal(result.checkpoint_params[0], data["params"])
     np.testing.assert_array_equal(result.checkpoint_params[-1], result.final_params)
+
+
+def test_an_fp64_knob_computes_in_float64_after_reduced_knobs(data):
+    # fp32 phases with fp64 statistics: the statistics, and so the returned
+    # estimate, are float64 even though the values arrive from fp32 phases.
+    model = data["model"]
+    result = estimate_pauli_z(
+        jnp.asarray(data["params"]),
+        model.ansatz.generators,
+        model.encoder,
+        data["masks"],
+        samples=data["samples"],
+        precision=precision("fp32", statistics="fp64"),
+    )
+    assert result.values.dtype == jnp.float64
+
+
+def test_the_default_loss_scale_does_not_overflow_fp16(data):
+    result = ciqp.train(
+        data["model"],
+        data["targets"],
+        data["targets"],
+        seed=5,
+        initial_params=data["params"],
+        config=ciqp.TrainingConfig(
+            steps=3,
+            batch_size=8,
+            validation_interval=3,
+            n_ops=16,
+            mc_samples=32,
+            validation_n_ops=16,
+            validation_mc_samples=32,
+            precision="fp16",
+        ),
+    )
+    assert result.skipped_steps.size == 0

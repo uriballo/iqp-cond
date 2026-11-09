@@ -91,11 +91,9 @@ def _quantize_mx(x: jnp.ndarray, element: _ElementFormat) -> jnp.ndarray:
     amax = jnp.max(jnp.abs(blocks), axis=-1, keepdims=True)
     _, amax_exponent = jnp.frexp(amax)
     _, element_exponent = jnp.frexp(element.max)
-    scale = jnp.where(
-        amax > 0,
-        jnp.ldexp(jnp.ones_like(amax), amax_exponent - element_exponent),
-        1.0,
-    )
+    # The shared scale is an E8M0 power of two, limited to 2^-127 ... 2^127.
+    exponent = jnp.clip(amax_exponent - element_exponent, -127, 127)
+    scale = jnp.where(amax > 0, jnp.ldexp(jnp.ones_like(amax), exponent), 1.0)
     rounded = _round(blocks / scale, replace(element, overflow="saturate")) * scale
     return _from_blocks(rounded, x.shape[-1])
 
@@ -256,7 +254,11 @@ def _rounder(name: str, variant: str):
 
 
 def _blocked_product(a: jnp.ndarray, b: jnp.ndarray, name: str) -> jnp.ndarray:
-    """``a @ b.T`` accumulated in blocks of 32 as :func:`accumulate` does."""
+    """``a @ b.T`` accumulated in ``name`` exactly as :func:`accumulate` sums.
+
+    The block partial products are rounded, and so is the running sum after
+    each block: the accumulator of a GEMM in that format.
+    """
     fmt = _ELEMENT_FORMATS[name]
     a_blocks = jnp.moveaxis(_to_blocks(a, 32), -2, 0)
     b_blocks = jnp.moveaxis(_to_blocks(b, 32), -2, 0)
@@ -311,10 +313,14 @@ class _Arithmetic:
         return jnp.dtype(jnp.float64 if fp64 else jnp.float32)
 
     def round(self, x: jnp.ndarray, knob: str) -> jnp.ndarray:
-        """Round ``x`` to the knob's format, in ``x``'s dtype below fp32."""
+        """Return ``x`` in the knob's format: float64 for fp64, float32 for fp32.
+
+        Formats below fp32 round in ``x``'s own dtype, so a float64 value is
+        rounded once, without passing through float32.
+        """
         name = getattr(self.precision, knob)
         if name == "fp64":
-            return x
+            return x.astype(jnp.float64)
         if name == "fp32":
             return x.astype(jnp.float32)
         return _rounder(name, self.precision.variant)(x)
@@ -324,7 +330,7 @@ class _Arithmetic:
         flips = self.round(flips, "gemm_inputs")
         name = self.precision.gemm_accumulate
         if name == "fp64":
-            return characters @ flips.T
+            return characters.astype(jnp.float64) @ flips.astype(jnp.float64).T
         characters = characters.astype(jnp.float32)
         flips = flips.astype(jnp.float32)
         if name == "fp32":
@@ -332,7 +338,12 @@ class _Arithmetic:
         return _accumulating_gemm(name, self.precision.variant)(characters, flips)
 
     def sum(self, x: jnp.ndarray, axis: int) -> jnp.ndarray:
-        """Sum in the statistics format: block partial sums, fp32 final sum."""
+        """Sum in the statistics format: block partial sums, fp32 final sum.
+
+        Unlike the GEMM accumulator, the statistics keep their per-sample
+        values and block partial sums in the format but reduce the partials in
+        fp32, as the agreed model for sample averages specifies.
+        """
         name = self.precision.statistics
         if name == "fp64":
             return jnp.sum(x, axis=axis)

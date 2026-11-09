@@ -80,7 +80,8 @@ class TrainingConfig:
     the uniform variant), the loss is scaled before differentiation, starting
     from ``initial_loss_scale``: a non-finite gradient skips the update and
     halves the scale, and the scale doubles after 2000 consecutive finite
-    updates.
+    updates.  The scale itself is the first cotangent the fp16 rounders see,
+    so it must start below fp16's largest value, 65504.
 
     ``sample_chunk`` streams the Monte Carlo samples in slices, bounding the live
     ``(samples, masks, qubits)`` ratio tensor.  It is faster at large sample
@@ -98,7 +99,7 @@ class TrainingConfig:
     validation_n_ops: int = 512
     validation_mc_samples: int = 1_000
     precision: str | Precision = "fp64"
-    initial_loss_scale: float = 2.0**16
+    initial_loss_scale: float = 2.0**15
     sample_chunk: int | None = None
     mask_refresh: MaskRefresh = STEP
 

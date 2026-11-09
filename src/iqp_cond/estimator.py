@@ -200,7 +200,10 @@ def _estimate(
     if arithmetic.precision.statistics == "fp64":
         values = jnp.mean(sample_values, axis=1)
     else:
-        values = arithmetic.sum(sample_values, axis=1) / sample_values.shape[1]
+        values = arithmetic.round(
+            arithmetic.sum(sample_values, axis=1) / sample_values.shape[1],
+            "statistics",
+        )
     return ExpectationEstimate(
         values,
         int(samples.shape[1]),

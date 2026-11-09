@@ -10,6 +10,7 @@ import pytest
 from iqp_cond._precision import (
     PRECISIONS,
     Precision,
+    _blocked_product,
     accumulate,
     precision,
     quantize,
@@ -203,3 +204,15 @@ def test_presets_are_uniform_recipes_named_after_their_format():
 def test_names_that_are_not_presets_are_rejected(name):
     with pytest.raises(ValueError):
         resolve_precision(name)
+
+
+def test_the_gemm_accumulator_follows_the_accumulation_model():
+    # Integer operands make every block partial exact, so the only rounding is
+    # the format's, and the GEMM must reproduce accumulate() entry by entry.
+    rng = np.random.default_rng(1)
+    a = jnp.asarray(rng.choice([-1.0, 1.0], size=(3, 70)))
+    b = jnp.asarray(rng.integers(-40, 41, size=(2, 70)).astype(float))
+    expected = np.array(
+        [[float(accumulate(a[i] * b[j], "fp16")) for j in range(2)] for i in range(3)]
+    )
+    np.testing.assert_array_equal(np.asarray(_blocked_product(a, b, "fp16")), expected)

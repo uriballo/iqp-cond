@@ -40,6 +40,7 @@ from .operators import OperatorBank, sample_nonidentity_masks_jax
 
 __all__ = [
     "ConditionalMMDResult",
+    "TargetMoments",
     "hamming_rbf",
     "mmd",
     "target_moments",
@@ -261,6 +262,7 @@ def _mmd_entries(
         zip(mask_sets, sample_sets, strict=True)
     ):
         if isinstance(targets, TargetMoments):
+            # Bank rows are in mask order, so the moments line up with them.
             means = targets.moments[bandwidth, :, : visible_masks.shape[1]]
             squares = means**2
         else:
@@ -323,12 +325,16 @@ def _mmd_from_entries(
             square_sums = square_sums + arithmetic.sum(
                 arithmetic.round(values**2, "statistics"), axis=0
             )
+        # Model and target terms are stored in the statistics format alike.
+        model_squares = arithmetic.round(
+            (sums**2 - square_sums) / (n_samples * (n_samples - 1)), "statistics"
+        )
+        model_means = arithmetic.round(sums / n_samples, "statistics")
+        target_means = arithmetic.round(entry.target_means, "statistics")
+        target_squares = arithmetic.round(entry.target_squares, "statistics")
         dtype = arithmetic.dtype("statistics")
-        model_squares = (sums**2 - square_sums) / (n_samples * (n_samples - 1))
         per_mask = arithmetic.round(
-            model_squares
-            - 2.0 * (sums / n_samples) * entry.target_means.astype(dtype)
-            + entry.target_squares.astype(dtype),
+            model_squares - 2.0 * model_means * target_means + target_squares,
             "statistics",
         )
         return arithmetic.sum(per_mask * entry.weights.astype(dtype), axis=0)
