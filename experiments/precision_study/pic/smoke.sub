@@ -1,0 +1,12 @@
+# Precision study, smoke run: the whole pipeline once, on one L40S (gpu09-gpu15).
+executable = job.sh
+arguments = $(request_cpus) $(ClusterId) smoke
+log = jobs/smoke-$(ClusterId).log
+output = jobs/smoke-$(ClusterId).out
+error = jobs/smoke-$(ClusterId).err
+request_cpus = 8
+request_memory = 32GB
+request_gpus = 1
+Requirements = regexp("gpu(09|1[0-5])", Name)
++flavour = "short"
+queue

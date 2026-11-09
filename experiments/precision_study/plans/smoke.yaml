@@ -1,0 +1,22 @@
+# L40S smoke run: the whole pipeline at two sizes, short schedules, to check
+# it on the GPU and time each stage before the full plan.
+name: smoke
+defaults:
+  teacher_seed: 1
+  steps: 200
+  validation_interval: 25
+  pool_draws: 8192
+  teacher_samples: 1000000
+grid:
+  n_qubits: [12, 64]
+  mc_samples: [1000]
+  mask_refresh: [step, cache]
+  init_seed: [1]
+recipes:
+  fp64: {}
+  bf16: {base: bf16}
+  fp16: {base: fp16}
+  mxfp4_gemm: {base: fp32, gemm_inputs: mxfp4}
+variants: [uniform, split]
+baselines: true
+eval_every: {64: 1, 128: 4}
