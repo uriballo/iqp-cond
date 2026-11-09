@@ -27,7 +27,7 @@ from ._precision import Precision, resolve_precision
 from .encoders import Encoder
 from .encoders.base import _check_condition_pytree, _select_condition
 from .initialization import parameters_from_data
-from .loss import _Entries, _mmd_entries, _mmd_from_entries, mmd
+from .loss import TargetMoments, _Entries, _mmd_entries, _mmd_from_entries, mmd
 from .model import ConditionalModel
 from .operators import OperatorBank, expected_bodyness_sigmas, operator_bank
 
@@ -201,12 +201,36 @@ def _condition_schedule(n_conditions: int, steps: int, seed: int) -> np.ndarray:
     return rng.integers(0, n_conditions, size=steps)
 
 
+def _validate_moment_targets(model: ConditionalModel, name: str, targets) -> None:
+    if targets.bank.n_conditions != model.encoder.n_conditions:
+        raise ValueError(
+            f"model covers {model.encoder.n_conditions} conditions but {name} "
+            f"have {targets.bank.n_conditions}",
+        )
+    if targets.bank.n_visible != model.visible:
+        raise ValueError(
+            f"model declares {model.visible} visible qubits but {name} "
+            f"have {targets.bank.n_visible}",
+        )
+
+
 def _validate_training_inputs(
     model: ConditionalModel,
-    training_targets: np.ndarray,
-    validation_targets: np.ndarray,
+    training_targets: np.ndarray | TargetMoments,
+    validation_targets: np.ndarray | TargetMoments,
 ) -> None:
     """Check the shared model/data conventions."""
+    sources = (
+        ("training_targets", training_targets),
+        ("validation_targets", validation_targets),
+    )
+    if any(isinstance(targets, TargetMoments) for _, targets in sources):
+        for name, targets in sources:
+            if not isinstance(targets, TargetMoments):
+                raise ValueError("training and validation targets must both be moments")
+            _validate_moment_targets(model, name, targets)
+        _check_condition_pytree(model.encoder)
+        return
     if training_targets.ndim != 3:
         raise ValueError("training_targets must be rank three")
     if validation_targets.ndim != 3:
@@ -305,12 +329,14 @@ def _make_training_steps(
     def cell_loss(
         params: jnp.ndarray,
         encoders: Encoder,
-        bank: OperatorBank | None,
+        bank: OperatorBank | TargetMoments | None,
         step: jax.Array,
         condition: jax.Array,
         bandwidth: jax.Array,
     ) -> jnp.ndarray:
         encoder = _select_condition(encoders, condition)
+        if isinstance(bank, TargetMoments):
+            return _moment_cell_loss(params, encoder, bank, step, condition, bandwidth)
         target_batch = training_targets[condition, batch_indices[step, condition]][None]
 
         def loss(**mask_source: object) -> jnp.ndarray:
@@ -337,6 +363,55 @@ def _make_training_steps(
                 lambda index=index: loss(bank=_cell_bank(bank, index, condition))
                 for index in range(bank.n_bandwidths)
             ],
+        )
+
+    def _moment_cell_loss(params, encoder, targets, step, condition, bandwidth):
+        """One (condition, bandwidth) cell of a moment target.
+
+        Cache refresh evaluates the pool's cell; step refresh draws
+        ``config.n_ops`` of its masks in proportion to their weights, each
+        weighted ``q / n_ops`` with ``q`` the cell's nonidentity mass.
+        """
+        pool = targets.bank
+
+        def cell(index: int) -> jnp.ndarray:
+            width = pool.width(index)
+            masks = pool.masks[index, condition, :width]
+            weights = pool.weights[index, condition, :width]
+            moments = targets.moments[index, condition, :width]
+            if config.mask_refresh == STEP:
+                mask_key = jax.random.fold_in(jax.random.fold_in(random_key, step), 1)
+                mass = jnp.sum(weights)
+                drawn = jax.random.choice(
+                    mask_key, width, (config.n_ops,), p=weights / mass
+                )
+                masks, moments = masks[drawn], moments[drawn]
+                weights = jnp.full(config.n_ops, mass / config.n_ops)
+                width = config.n_ops
+            cell_bank = OperatorBank(
+                sigmas=(pool.sigmas[index],),
+                masks=masks[None, None],
+                weights=weights[None, None],
+                n_ops=pool.n_ops,
+                n_visible=pool.n_visible,
+                n_masks=width,
+                widths=(width,),
+            )
+            return mmd(
+                params,
+                model.generators,
+                encoder,
+                TargetMoments(cell_bank, moments[None, None]),
+                jax.random.fold_in(random_key, step),
+                n_samples=config.mc_samples,
+                shared_samples=True,
+                precision=config.precision,
+                sample_chunk=config.sample_chunk,
+            ).loss
+
+        return jax.lax.switch(
+            bandwidth,
+            [lambda index=index: cell(index) for index in range(pool.n_bandwidths)],
         )
 
     loss_scaled = resolve_precision(config.precision).loss_scaled
@@ -410,7 +485,7 @@ def _make_training_steps(
 def _make_validation(
     model: ConditionalModel,
     config: TrainingConfig,
-    validation_targets: np.ndarray,
+    validation_targets: np.ndarray | TargetMoments,
     sigmas: tuple[float, ...],
     seed: int,
 ) -> Callable[[jnp.ndarray], jnp.ndarray]:
@@ -418,15 +493,16 @@ def _make_validation(
 
     Every checkpoint would redraw the same masks and samples, so they are drawn
     once for the fit; the ratios and phases are recomputed at each checkpoint.
+    Moment targets are evaluated on every mask of their own bank.
     """
-    targets = jnp.asarray(validation_targets)
+    moments = isinstance(validation_targets, TargetMoments)
     entries = _mmd_entries(
         model.encoder,
-        targets,
+        validation_targets if moments else jnp.asarray(validation_targets),
         jax.random.PRNGKey(seed + 1_000_000),
-        bank=None,
-        sigmas=sigmas,
-        n_ops=config.validation_n_ops,
+        bank=validation_targets.bank if moments else None,
+        sigmas=None if moments else sigmas,
+        n_ops=None if moments else config.validation_n_ops,
         n_samples=config.validation_mc_samples,
         shared_samples=False,
     )
@@ -479,14 +555,29 @@ def train(
     MMD selects checkpoints. ``selection_metric`` may supply a deterministic
     scalar diagnostic such as exact TVD instead. Validation MMD is still
     recorded at every checkpoint when an alternative selection metric is used.
+
+    Both target arguments may instead be :class:`iqp_cond.loss.TargetMoments`,
+    which carry their own masks: cache refresh evaluates the training moments'
+    cells, step refresh draws ``config.n_ops`` of a cell's masks per update in
+    proportion to their weights, and validation evaluates every mask of the
+    validation moments.  The bandwidths then come from the training bank, and
+    ``initial_params`` is required.
     """
-    training_targets = np.asarray(training_targets, dtype=np.float64)
-    validation_targets = np.asarray(validation_targets, dtype=np.float64)
+    moments = isinstance(training_targets, TargetMoments)
+    if not moments:
+        training_targets = np.asarray(training_targets, dtype=np.float64)
+        validation_targets = np.asarray(validation_targets, dtype=np.float64)
     _validate_training_inputs(model, training_targets, validation_targets)
+    if moments and initial_params is None:
+        raise ValueError("moment targets need initial_params")
 
     encoders = model.encoder
     n_conditions = encoders.n_conditions
-    sigmas = config.resolved_sigmas(model.visible)
+    sigmas = (
+        training_targets.bank.sigmas
+        if moments
+        else config.resolved_sigmas(model.visible)
+    )
     params = _initial_parameters(model, training_targets, initial_params, seed)
     schedule = optax.cosine_decay_schedule(
         init_value=config.learning_rate,
@@ -495,26 +586,28 @@ def train(
     )
     optimizer = optax.adam(schedule)
     optimizer_state = optimizer.init(params)
-    batch_indices = _batch_schedule(
-        n_conditions,
-        training_targets.shape[1],
-        config,
-        seed,
-    )
     bandwidth_indices = _bandwidth_schedule(len(sigmas), config.steps, seed)
     condition_indices = _condition_schedule(n_conditions, config.steps, seed)
-    bank = (
-        operator_bank(sigmas, config.n_ops, n_conditions, model.visible, seed)
-        if config.mask_refresh == CACHE
-        else None
-    )
+    if moments:
+        # The moment source carries its own masks and replaces the batches.
+        bank, sample_targets, batch_indices = training_targets, None, None
+    else:
+        bank = (
+            operator_bank(sigmas, config.n_ops, n_conditions, model.visible, seed)
+            if config.mask_refresh == CACHE
+            else None
+        )
+        sample_targets = jnp.asarray(training_targets)
+        batch_indices = jnp.asarray(
+            _batch_schedule(n_conditions, training_targets.shape[1], config, seed)
+        )
     training_steps = _make_training_steps(
         model,
         config,
         optimizer,
         jax.random.PRNGKey(seed),
-        jnp.asarray(training_targets),
-        jnp.asarray(batch_indices),
+        sample_targets,
+        batch_indices,
         jnp.asarray(sigmas, dtype=jnp.float64),
     )
     evaluate_validation = _make_validation(
