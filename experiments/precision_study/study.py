@@ -30,7 +30,7 @@ import iqp_cond as ciqp
 from iqp_cond.loss import TargetMoments, mmd
 from iqp_cond.operators import OperatorBank, expected_bodyness_sigmas, operator_bank
 
-from .teacher import teacher, teacher_moments
+from .teacher import teacher, teacher_moments, teacher_samples
 
 CACHE = Path(__file__).parent / "cache"
 _TRAINING_BANK_SEED, _EVALUATION_BANK_SEED = 10_000, 20_000
@@ -48,6 +48,8 @@ class RunConfig:
     theta0_ulp: bool = False
     mc_samples: int = 1000
     mask_refresh: str = "step"
+    refresh_source: str = "auto"
+    teacher_sample_count: int = 100_000
     steps: int = 2000
     validation_interval: int = 25
     n_ops: int = 512
@@ -123,10 +125,45 @@ def _bank_moments(config: RunConfig, draws: int, seed: int) -> TargetMoments:
     return TargetMoments(bank, moments)
 
 
+def _source(config: RunConfig) -> str:
+    """``"samples"``, ``"pool"`` or ``"bank"``: where the training targets come from.
+
+    The refreshed arm trains on exact teacher samples up to 30 qubits and on
+    the moment pool above, unless ``refresh_source`` names one; the cached arm
+    always trains on a fixed moment bank.
+    """
+    if config.mask_refresh != "step":
+        return "bank"
+    if config.refresh_source != "auto":
+        return config.refresh_source
+    return "samples" if config.n_qubits <= 30 else "pool"
+
+
+def _teacher_samples(config: RunConfig, count: int, seed: int) -> np.ndarray:
+    """Exact teacher samples, ``(1, count, n)``, cached on disk."""
+    path = CACHE / (
+        f"n{config.n_qubits}-teacher{config.teacher_seed}-c{config.teacher_c}"
+        f"-angle{config.teacher_angle:.6f}-samples{count}-seed{seed}.npy"
+    )
+    if path.exists():
+        return np.load(path)
+    generators, params = teacher(
+        config.n_qubits,
+        config.teacher_seed,
+        c=config.teacher_c,
+        angle=config.teacher_angle,
+    )
+    samples = teacher_samples(generators, params, count, key=jax.random.key(seed))
+    CACHE.mkdir(exist_ok=True)
+    np.save(path, samples[None])
+    return samples[None]
+
+
 @dataclass(frozen=True)
 class _Setup:
     model: ciqp.ConditionalModel
-    targets: TargetMoments
+    targets: TargetMoments | np.ndarray
+    validation: TargetMoments | np.ndarray
     evaluation: TargetMoments
 
 
@@ -134,13 +171,24 @@ class _Setup:
 def _setup(config: RunConfig) -> _Setup:
     n = config.n_qubits
     encoder = ciqp.AngleEncoder(np.zeros((1, 1, n)), axes=("Y" * n,))
-    draws = config.pool_draws if config.mask_refresh == "step" else config.n_ops
+    evaluation = _bank_moments(
+        config, config.eval_masks, config.teacher_seed + _EVALUATION_BANK_SEED
+    )
+    source = _source(config)
+    seed = config.teacher_seed + _TRAINING_BANK_SEED
+    if source == "samples":
+        targets = _teacher_samples(config, config.teacher_sample_count, seed)
+        # The trainer's own validation is unused; two samples are its minimum.
+        validation = _teacher_samples(config, 2, seed + 1)
+    else:
+        draws = config.pool_draws if source == "pool" else config.n_ops
+        targets = _bank_moments(config, draws, seed)
+        validation = evaluation
     return _Setup(
         model=ciqp.ConditionalModel(ciqp.Ansatz.complete(n), encoder),
-        targets=_bank_moments(config, draws, config.teacher_seed + _TRAINING_BANK_SEED),
-        evaluation=_bank_moments(
-            config, config.eval_masks, config.teacher_seed + _EVALUATION_BANK_SEED
-        ),
+        targets=targets,
+        validation=validation,
+        evaluation=evaluation,
     )
 
 
@@ -155,6 +203,8 @@ def _shared(config: RunConfig) -> RunConfig:
         init_seed=0,
         seed=0,
         mask_refresh=config.mask_refresh,
+        refresh_source=config.refresh_source,
+        teacher_sample_count=config.teacher_sample_count,
         n_ops=config.n_ops,
         teacher_c=config.teacher_c,
         teacher_angle=config.teacher_angle,
@@ -188,13 +238,19 @@ def initial_params(config: RunConfig) -> np.ndarray:
 
 def run(config: RunConfig) -> ciqp.training.TrainingResult:
     setup = build(config)
+    samples = _source(config) == "samples"
     return ciqp.train(
         setup.model,
         setup.targets,
-        setup.evaluation,
+        setup.validation,
         seed=config.seed,
         initial_params=initial_params(config),
         config=ciqp.TrainingConfig(
+            # Samples refresh masks through the library's own path, on the
+            # bodyness-2 band, with every teacher sample in each step's batch.
+            sigmas=expected_bodyness_sigmas(config.n_qubits, (2,)) if samples else None,
+            batch_size=config.teacher_sample_count if samples else 256,
+            validation_n_ops=1,
             steps=config.steps,
             validation_interval=config.validation_interval,
             n_ops=config.n_ops,

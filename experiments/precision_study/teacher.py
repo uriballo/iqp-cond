@@ -20,6 +20,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+import iqp_cond as ciqp
+from iqp_cond.exact import probabilities
+
 _CHUNK = 2**18  # Monte Carlo samples per mask and pass
 _BUDGET = 2**24  # array elements per compiled batch
 
@@ -138,3 +141,20 @@ def teacher_moments(
                 )
             moments[indices] = total / (-(-n_samples // _CHUNK) * _CHUNK)
     return moments
+
+
+def teacher_samples(
+    generators: np.ndarray, params: np.ndarray, n_samples: int, *, key: jax.Array
+) -> np.ndarray:
+    """Draw bit strings from the teacher's exact output distribution.
+
+    The distribution comes from the Walsh-Hadamard transform of
+    :mod:`iqp_cond.exact`, so this is limited to registers of up to 31 qubits
+    and needs ``2^n`` probabilities in memory.
+    """
+    n_qubits = generators.shape[1]
+    encoder = ciqp.AngleEncoder(np.zeros((1, 1, n_qubits)), axes=("Y" * n_qubits,))
+    model = ciqp.ConditionalModel(ciqp.Ansatz(generators), encoder)
+    distribution = jnp.asarray(probabilities(model, params)[0])
+    indices = jax.random.choice(key, distribution.size, (n_samples,), p=distribution)
+    return np.asarray((indices[:, None] >> jnp.arange(n_qubits)) & 1, dtype=float)

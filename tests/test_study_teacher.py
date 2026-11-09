@@ -7,7 +7,11 @@ import numpy as np
 import pytest
 
 import iqp_cond as ciqp
-from experiments.precision_study.teacher import teacher, teacher_moments
+from experiments.precision_study.teacher import (
+    teacher,
+    teacher_moments,
+    teacher_samples,
+)
 from iqp_cond.exact import probabilities
 
 N = 10
@@ -51,3 +55,14 @@ def test_sampled_teacher_moments_are_unbiased(setup):
     # Each moment is a mean of cosines, so its standard error is at most
     # 1 / sqrt(n_samples).
     assert np.max(np.abs(moments - expected)) < 5 / np.sqrt(n_samples)
+
+
+def test_teacher_samples_follow_the_teacher_moments(setup):
+    generators, params, masks, expected = setup
+    n_samples = 50_000
+    samples = teacher_samples(generators, params, n_samples, key=jax.random.key(8))
+    assert samples.shape == (n_samples, N)
+    characters = 1.0 - 2.0 * ((samples @ masks.T) % 2)
+    # Each empirical moment is a mean of +-1 values: standard error at most
+    # 1 / sqrt(n_samples).
+    assert np.max(np.abs(characters.mean(axis=0) - expected)) < 5 / np.sqrt(n_samples)
