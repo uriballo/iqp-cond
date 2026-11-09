@@ -60,7 +60,3 @@ Read [`USER_GUIDE.md`](USER_GUIDE.md) for shapes, training, inference, and custo
 Importing `iqp_cond` enables JAX float64, which the estimator, loss, and trainer use internally. Create JAX arrays after importing the package.
 
 Precision is one named policy, `TrainingConfig(precision=...)` or the `precision=` argument of the estimator and the loss, chosen from `ciqp.PRECISIONS`. The default `"fp64"` runs everything in float64. `"gemm_f32"` runs only the final phase contraction in float32, `"estimator_f32"` also builds parities and phases and evaluates the ratio-phase product in float32 before returning to float64 for the statistics, and `"fp32"` keeps the statistics, the loss, the parameters, the optimizer state and the encoders' ratio queries in float32 too.
-
-## Benchmark the library
-
-The [conditional pipeline benchmark](benchmarks/conditional_pipeline/README.md) measures encoder operations, estimation, MMD, gradients, and one fixed 16-qubit training fit. Its [comparison workflow](benchmarks/conditional_pipeline/HANDOFF.md) explains how to compare a fork with shared inputs and saved numerical outputs.
