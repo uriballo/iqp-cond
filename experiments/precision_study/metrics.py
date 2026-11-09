@@ -1,4 +1,5 @@
-"""Trajectory metrics: how a reduced-precision run deviates from fp64."""
+"""Metrics of the precision study: trajectory deviation from fp64 and the
+rounding error of a quantity in units of its Monte Carlo noise."""
 
 from __future__ import annotations
 
