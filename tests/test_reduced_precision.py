@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 from fp64_golden import inputs
 
+import iqp_cond as ciqp
 from iqp_cond import precision
 from iqp_cond.estimator import estimate_pauli_z
 from iqp_cond.loss import mmd
@@ -95,3 +96,41 @@ def test_split_variant_differentiates_through_the_rounding_unchanged(data):
         gradient(precision(gemm_inputs="bf16", variant="split")), reference
     )
     assert not np.array_equal(gradient(precision(gemm_inputs="bf16")), reference)
+
+
+def fp16_training(data, steps):
+    return ciqp.train(
+        data["model"],
+        data["targets"],
+        data["targets"],
+        seed=5,
+        initial_params=data["params"],
+        config=ciqp.TrainingConfig(
+            steps=steps,
+            batch_size=8,
+            validation_interval=steps,
+            n_ops=16,
+            mc_samples=32,
+            validation_n_ops=16,
+            validation_mc_samples=32,
+            precision="fp16",
+            initial_loss_scale=2.0**80,
+        ),
+    )
+
+
+def test_overflowing_fp16_steps_are_skipped_and_halve_the_loss_scale(data):
+    # A scale of 2^80 overflows fp16's largest value, 65504, in the first
+    # rounded cotangent, so every step is skipped and the scale halves each time.
+    result = fp16_training(data, steps=5)
+    np.testing.assert_array_equal(result.skipped_steps, [1, 2, 3, 4, 5])
+    np.testing.assert_array_equal(result.loss_scales, 2.0 ** np.arange(80, 75, -1))
+    np.testing.assert_array_equal(result.final_params, data["params"])
+
+
+def test_fp16_training_resumes_once_the_loss_scale_fits(data):
+    result = fp16_training(data, steps=90)
+    skipped = result.skipped_steps
+    np.testing.assert_array_equal(skipped, np.arange(1, skipped.size + 1))
+    assert 0 < skipped.size < 90
+    assert not np.array_equal(result.final_params, data["params"])

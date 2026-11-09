@@ -385,9 +385,10 @@ def test_compiled_cell_matches_the_selected_condition_objective(
         sigmas,
     )
     step, condition, bandwidth = 3, 1, 1
-    _, _, losses = training_steps(
+    _, _, _, losses, _, _ = training_steps(
         params,
         optimizer.init(params),
+        (jnp.asarray(1.0, jnp.float64), jnp.asarray(0)),
         model.encoder,
         None,
         (jnp.asarray([step]), jnp.asarray([condition]), jnp.asarray([bandwidth])),

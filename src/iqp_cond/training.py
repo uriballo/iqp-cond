@@ -76,7 +76,11 @@ class TrainingConfig:
     ``precision`` is a :class:`iqp_cond.Precision` or the name of a preset in
     :data:`iqp_cond.PRECISIONS`, ``"fp64"`` by default.  It sets the format of
     each operation of the loss; the parameters and the optimizer state stay
-    float64 under every precision.
+    float64 under every precision.  When ``precision.loss_scaled`` (fp16 in
+    the uniform variant), the loss is scaled before differentiation, starting
+    from ``initial_loss_scale``: a non-finite gradient skips the update and
+    halves the scale, and the scale doubles after 2000 consecutive finite
+    updates.
 
     ``sample_chunk`` streams the Monte Carlo samples in slices, bounding the live
     ``(samples, masks, qubits)`` ratio tensor.  It is faster at large sample
@@ -94,6 +98,7 @@ class TrainingConfig:
     validation_n_ops: int = 512
     validation_mc_samples: int = 1_000
     precision: str | Precision = "fp64"
+    initial_loss_scale: float = 2.0**16
     sample_chunk: int | None = None
     mask_refresh: MaskRefresh = STEP
 
@@ -132,6 +137,8 @@ class TrainingConfig:
                 "mc_samples and validation_mc_samples must be at least two",
             )
         resolve_precision(self.precision)
+        if not self.initial_loss_scale > 0:
+            raise ValueError("initial_loss_scale must be positive")
         if self.sample_chunk is not None and self.sample_chunk < 1:
             raise ValueError("sample_chunk must be positive")
         if self.mask_refresh not in (STEP, CACHE):
@@ -143,7 +150,12 @@ class TrainingConfig:
 
 @dataclass(frozen=True)
 class TrainingResult:
-    """Best parameters and scalar training history."""
+    """Best parameters and scalar training history.
+
+    ``loss_scales`` holds the loss scale used at each update (1 unless the
+    precision is loss-scaled), and ``skipped_steps`` the 1-based updates that
+    were skipped because their gradient overflowed.
+    """
 
     seed: int
     best_params: np.ndarray
@@ -156,6 +168,11 @@ class TrainingResult:
     validation_steps: np.ndarray
     validation_losses: np.ndarray
     selection_scores: np.ndarray
+    loss_scales: np.ndarray
+    skipped_steps: np.ndarray
+
+
+_LOSS_SCALE_GROWTH_INTERVAL = 2000
 
 
 def _batch_schedule(
@@ -276,7 +293,7 @@ def _make_training_steps(
     training_targets: jnp.ndarray,
     batch_indices: jnp.ndarray,
     sigmas: jnp.ndarray,
-) -> Callable[..., tuple[jnp.ndarray, optax.OptState, jnp.ndarray]]:
+) -> Callable:
     """Compile a scan of updates, one (condition, bandwidth) cell per update.
 
     The condition indexes the encoder leaves, the targets, and the batch
@@ -322,35 +339,70 @@ def _make_training_steps(
             ],
         )
 
+    loss_scaled = resolve_precision(config.precision).loss_scaled
+
     @jax.jit
     def training_steps(
         params: jnp.ndarray,
         optimizer_state: optax.OptState,
+        scaling: tuple[jax.Array, jax.Array],
         encoders: Encoder,
         bank: OperatorBank | None,
         cells: tuple[jax.Array, jax.Array, jax.Array],
-    ) -> tuple[jnp.ndarray, optax.OptState, jnp.ndarray]:
+    ):
         def update(carry, cell):
-            current_params, current_state = carry
-            loss, gradient = jax.value_and_grad(cell_loss)(
-                current_params,
-                encoders,
-                bank,
-                *cell,
-            )
+            current_params, current_state, (scale, finite_run) = carry
+            if not loss_scaled:
+                loss, gradient = jax.value_and_grad(cell_loss)(
+                    current_params,
+                    encoders,
+                    bank,
+                    *cell,
+                )
+                updates, new_state = optimizer.update(
+                    gradient,
+                    current_state,
+                    current_params,
+                )
+                new_params = optax.apply_updates(current_params, updates)
+                return (new_params, new_state, (scale, finite_run)), (
+                    loss,
+                    scale,
+                    jnp.array(True),
+                )
+            scaled_loss, scaled_gradient = jax.value_and_grad(
+                lambda *arguments: cell_loss(*arguments) * scale
+            )(current_params, encoders, bank, *cell)
+            gradient = scaled_gradient / scale
+            finite = jnp.all(jnp.isfinite(gradient))
             updates, new_state = optimizer.update(
-                gradient,
+                jnp.where(finite, gradient, 0.0),
                 current_state,
                 current_params,
             )
-            return (optax.apply_updates(current_params, updates), new_state), loss
+            new_params = jnp.where(
+                finite, optax.apply_updates(current_params, updates), current_params
+            )
+            new_state = jax.tree_util.tree_map(
+                lambda new, old: jnp.where(finite, new, old), new_state, current_state
+            )
+            grown = finite_run + 1 >= _LOSS_SCALE_GROWTH_INTERVAL
+            new_scale = jnp.where(
+                finite, jnp.where(grown, scale * 2.0, scale), scale / 2.0
+            )
+            new_run = jnp.where(finite & ~grown, finite_run + 1, 0)
+            return (new_params, new_state, (new_scale, new_run)), (
+                scaled_loss / scale,
+                scale,
+                finite,
+            )
 
-        (params, optimizer_state), losses = jax.lax.scan(
+        (params, optimizer_state, scaling), (losses, scales, finite) = jax.lax.scan(
             update,
-            (params, optimizer_state),
+            (params, optimizer_state, scaling),
             cells,
         )
-        return params, optimizer_state, losses
+        return params, optimizer_state, scaling, losses, scales, finite
 
     return training_steps
 
@@ -479,7 +531,13 @@ def train(
             return validation, validation
         return validation, float(selection_metric(np.asarray(current_params)))
 
-    train_losses = []
+    train_losses, loss_scales, finite_steps = [], [], []
+    initial_scale = (
+        config.initial_loss_scale
+        if resolve_precision(config.precision).loss_scaled
+        else 1.0
+    )
+    scaling = (jnp.asarray(initial_scale, jnp.float64), jnp.asarray(0))
     best_params = params
     best_step = 0
     best_validation, best_selection = score(params)
@@ -488,9 +546,10 @@ def train(
     selection_scores = [best_selection]
     for start in range(0, config.steps, config.validation_interval):
         stop = min(start + config.validation_interval, config.steps)
-        params, optimizer_state, losses = training_steps(
+        params, optimizer_state, scaling, losses, scales, finite = training_steps(
             params,
             optimizer_state,
+            scaling,
             encoders,
             bank,
             (
@@ -500,6 +559,8 @@ def train(
             ),
         )
         train_losses.append(losses)
+        loss_scales.append(scales)
+        finite_steps.append(finite)
         if stop % config.validation_interval == 0:
             current_validation, current_selection = score(params)
             validation_steps.append(stop)
@@ -523,4 +584,6 @@ def train(
         validation_steps=np.asarray(validation_steps),
         validation_losses=np.asarray(validation_losses),
         selection_scores=np.asarray(selection_scores),
+        loss_scales=np.asarray(jnp.concatenate(loss_scales)),
+        skipped_steps=np.flatnonzero(~np.asarray(jnp.concatenate(finite_steps))) + 1,
     )
