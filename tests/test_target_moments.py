@@ -93,3 +93,24 @@ def test_training_on_teacher_moments_approaches_the_teacher(refresh):
         ),
     )
     assert distance(result.final_params) < 0.5 * distance(data["params"])
+
+
+def test_numpy_moments_work_under_jit_with_reduced_statistics():
+    data = inputs()
+    model = data["model"]
+    bank = operator_bank((1.0,), 16, model.encoder.n_conditions, model.visible, seed=4)
+    targets = TargetMoments(bank, np.full(bank.weights.shape, 0.25))
+
+    @jax.jit
+    def loss(params):
+        return mmd(
+            params,
+            model.ansatz.generators,
+            model.encoder,
+            targets,
+            jax.random.key(0),
+            n_samples=16,
+            precision=ciqp.precision(statistics="bf16"),
+        ).loss
+
+    assert np.isfinite(float(loss(data["params"])))

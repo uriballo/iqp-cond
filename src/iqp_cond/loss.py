@@ -268,13 +268,15 @@ def _mmd_entries(
         else:
             means, squares = jax.vmap(target_moments)(targets[:, None], visible_masks)
             means, squares = means[:, 0], squares[:, 0]
+        # Banks and moments may arrive as NumPy arrays (loaded from disk, say);
+        # the entries are JAX arrays so every transformation can trace them.
         entries.append(
             _Entries(
                 jnp.pad(visible_masks, ((0, 0), (0, 0), (0, n_ancillas))),
-                weights,
+                jnp.asarray(weights),
                 samples,
-                means,
-                squares,
+                jnp.asarray(means),
+                jnp.asarray(squares),
             ),
         )
     return tuple(entries)
