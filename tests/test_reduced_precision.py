@@ -134,3 +134,25 @@ def test_fp16_training_resumes_once_the_loss_scale_fits(data):
     np.testing.assert_array_equal(skipped, np.arange(1, skipped.size + 1))
     assert 0 < skipped.size < 90
     assert not np.array_equal(result.final_params, data["params"])
+
+
+def test_training_records_the_parameters_at_every_checkpoint(data):
+    result = ciqp.train(
+        data["model"],
+        data["targets"],
+        data["targets"],
+        seed=5,
+        initial_params=data["params"],
+        config=ciqp.TrainingConfig(
+            steps=6,
+            batch_size=8,
+            validation_interval=3,
+            n_ops=8,
+            mc_samples=16,
+            validation_n_ops=8,
+            validation_mc_samples=16,
+        ),
+    )
+    assert result.checkpoint_params.shape == (3, data["params"].size)
+    np.testing.assert_array_equal(result.checkpoint_params[0], data["params"])
+    np.testing.assert_array_equal(result.checkpoint_params[-1], result.final_params)

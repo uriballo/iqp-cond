@@ -154,7 +154,8 @@ class TrainingResult:
 
     ``loss_scales`` holds the loss scale used at each update (1 unless the
     precision is loss-scaled), and ``skipped_steps`` the 1-based updates that
-    were skipped because their gradient overflowed.
+    were skipped because their gradient overflowed.  ``checkpoint_params``
+    holds the parameters at each of ``validation_steps``.
     """
 
     seed: int
@@ -170,6 +171,7 @@ class TrainingResult:
     selection_scores: np.ndarray
     loss_scales: np.ndarray
     skipped_steps: np.ndarray
+    checkpoint_params: np.ndarray
 
 
 _LOSS_SCALE_GROWTH_INTERVAL = 2000
@@ -635,6 +637,7 @@ def train(
     best_step = 0
     best_validation, best_selection = score(params)
     validation_steps = [0]
+    checkpoint_params = [params]
     validation_losses = [best_validation]
     selection_scores = [best_selection]
     for start in range(0, config.steps, config.validation_interval):
@@ -657,6 +660,7 @@ def train(
         if stop % config.validation_interval == 0:
             current_validation, current_selection = score(params)
             validation_steps.append(stop)
+            checkpoint_params.append(params)
             validation_losses.append(current_validation)
             selection_scores.append(current_selection)
             if current_selection < best_selection:
@@ -678,5 +682,6 @@ def train(
         validation_losses=np.asarray(validation_losses),
         selection_scores=np.asarray(selection_scores),
         loss_scales=np.asarray(jnp.concatenate(loss_scales)),
+        checkpoint_params=np.asarray(jnp.stack(checkpoint_params)),
         skipped_steps=np.flatnonzero(~np.asarray(jnp.concatenate(finite_steps))) + 1,
     )
