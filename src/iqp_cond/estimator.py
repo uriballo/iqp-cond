@@ -120,8 +120,8 @@ def _phase_differences(
 
 
 def _trig(phases: jnp.ndarray, arithmetic: _Arithmetic, function) -> jnp.ndarray:
-    """Evaluate ``function`` on the phases and store it in the ``phases`` format."""
-    return arithmetic.round(function(phases), "phases")
+    """Evaluate ``function`` on the phases and store it in the ``cosines`` format."""
+    return arithmetic.round(function(phases), "cosines")
 
 
 def _sample_values(
@@ -132,7 +132,7 @@ def _sample_values(
     """Return the per-sample values ``Re[R exp(i Delta f)]``.
 
     The ratios are rounded to the ``ratios`` format, the cosine and sine to the
-    ``phases`` format, and the values to the ``statistics`` format.
+    ``cosines`` format, and the values to the ``statistics`` format.
     """
     # Re[R exp(i phi)] = Re R cos phi - Im R sin phi, which skips the complex
     # exponential and, for real ratios, the sine and the imaginary part.

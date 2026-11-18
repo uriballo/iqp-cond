@@ -163,12 +163,22 @@ def test_shorthand_sets_every_knob_from_a_base_and_overrides_single_knobs():
         lambda: Precision(statistics="mxfp8"),
         lambda: precision("nvfp4"),
         lambda: Precision(variant="mixed"),
+        lambda: Precision(phase_gradient="fp12"),
+        lambda: Precision(backward_accumulate="mxfp8"),
+        lambda: Precision(cosines="nvfp4"),
+        lambda: Precision(rounding=()),
+        lambda: Precision(rounding=("gradient",)),
     ],
     ids=[
         "unknown format",
         "block format off the GEMM",
         "block base",
         "unknown variant",
+        "unknown backward format",
+        "block format on the backward",
+        "block format on the cosines",
+        "no stochastic field",
+        "unknown stochastic field",
     ],
 )
 def test_invalid_configurations_are_rejected_when_built(build):
@@ -186,6 +196,7 @@ def test_block_formats_are_accepted_on_the_gemm_inputs():
         (precision("fp16"), True),
         (precision("fp32", phases="fp16"), True),
         (precision("fp16", variant="split"), False),
+        (precision("bf16", variant="split", phase_gradient="fp16"), True),
         (precision("bf16"), False),
         (precision(), False),
     ],
@@ -268,3 +279,15 @@ def test_pow2_scaling_keeps_the_grid_fixed_as_the_largest_magnitude_moves():
 def test_scaling_must_be_amax_or_pow2():
     with pytest.raises(ValueError, match="scaling must be"):
         Precision(scaling="block")
+
+
+def test_cosines_follow_the_phases_unless_set():
+    assert precision("bf16").format_of("cosines") == "bf16"
+    assert precision("bf16", cosines="fp8_e4m3").format_of("cosines") == "fp8_e4m3"
+
+
+def test_a_tuple_rounds_only_the_named_fields_stochastically():
+    recipe = precision("bf16", rounding=["gemm_inputs", "phase_gradient"])
+    assert recipe.rounding == ("gemm_inputs", "phase_gradient")
+    assert recipe.stochastic("phase_gradient")
+    assert not recipe.stochastic("statistics")

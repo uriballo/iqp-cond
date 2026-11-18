@@ -192,3 +192,69 @@ def test_the_default_loss_scale_does_not_overflow_fp16(data):
         ),
     )
     assert result.skipped_steps.size == 0
+
+
+@pytest.mark.parametrize(
+    ("knob", "name", "unit_roundoff"),
+    [
+        ("phase_gradient", "bf16", 2.0**-8),
+        ("phase_gradient", "fp8_e5m2", 2.0**-3),
+        ("backward_accumulate", "bf16", 2.0**-8),
+    ],
+)
+def test_a_coarse_backward_knob_changes_only_the_gradient(
+    data, knob, name, unit_roundoff
+):
+    def value_and_gradient(recipe):
+        return jax.value_and_grad(lambda p: loss(data, p, recipe))(
+            jnp.asarray(data["params"])
+        )
+
+    exact_loss, exact_gradient = value_and_gradient("fp64")
+    coarse_loss, coarse_gradient = value_and_gradient(precision(**{knob: name}))
+    assert float(coarse_loss) == float(exact_loss)
+    error = float(
+        jnp.linalg.norm(coarse_gradient - exact_gradient)
+        / jnp.linalg.norm(exact_gradient)
+    )
+    # Rounding errors in the sums over samples partly average out.
+    assert unit_roundoff / 100 < error < unit_roundoff
+
+
+def test_stochastic_rounding_of_one_backward_knob_is_unbiased(data):
+    from iqp_cond.loss import _mmd_entries, _mmd_from_entries
+
+    model = data["model"]
+    entries = _mmd_entries(
+        model.encoder,
+        jnp.asarray(data["targets"]),
+        jax.random.key(3),
+        bank=None,
+        sigmas=(1.0, 2.0),
+        n_ops=16,
+        n_samples=64,
+        shared_samples=False,
+    )
+
+    def gradient(recipe, key):
+        return jax.grad(
+            lambda p: (
+                _mmd_from_entries(
+                    p,
+                    model.ansatz.generators,
+                    model.encoder,
+                    entries,
+                    precision=recipe,
+                    rounding_key=key,
+                ).loss
+            )
+        )(jnp.asarray(data["params"]))
+
+    exact = gradient("fp64", None)
+    nearest = gradient(precision(phase_gradient="fp8_e4m3"), None)
+    stochastic = precision(phase_gradient="fp8_e4m3", rounding=("phase_gradient",))
+    keys = jax.random.split(jax.random.key(0), 2000)
+    mean = jnp.mean(jax.jit(jax.vmap(lambda key: gradient(stochastic, key)))(keys), 0)
+    nearest_error = float(jnp.linalg.norm(nearest - exact))
+    assert nearest_error > 0
+    assert float(jnp.linalg.norm(mean - exact)) < 0.2 * nearest_error
