@@ -16,7 +16,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import jax
 import jax.numpy as jnp
@@ -31,9 +31,13 @@ from .loss import TargetMoments, _Entries, _mmd_entries, _mmd_from_entries, mmd
 from .model import ConditionalModel
 from .operators import OperatorBank, expected_bodyness_sigmas, operator_bank
 
+if TYPE_CHECKING:
+    from .guidelines import Measurement
+
 __all__ = [
     "CACHE",
     "STEP",
+    "Adaptation",
     "TrainingConfig",
     "TrainingResult",
     "train",
@@ -45,6 +49,33 @@ MaskRefresh = Literal["step", "cache"]
 
 _BANDWIDTH_SEED_OFFSET = 83_001
 _CONDITION_SEED_OFFSET = 191_003
+_MEASUREMENT_SEED_OFFSET = 307_007
+
+
+@dataclass(frozen=True)
+class Adaptation:
+    """Remeasure the sample and mask counts during training.
+
+    Every ``every`` updates, from the first, :func:`train` measures the step
+    noise at the current parameters with :func:`iqp_cond.measure`, on
+    ``masks`` masks per cell, and trains the following updates at its
+    ``samples`` and ``masks`` in place of ``mc_samples`` and ``n_ops``;
+    ``r_cap`` caps the mask count.  An invalid estimate keeps the previous
+    settings, which start from ``mc_samples`` and ``n_ops``.  The measurements
+    draw from their own random stream, so the training draws are unchanged.
+    """
+
+    every: int = 100
+    r_cap: int = 65_536
+    masks: int = 4_096
+
+    def __post_init__(self) -> None:
+        if self.every < 1:
+            raise ValueError("every must be positive")
+        if self.r_cap < 1:
+            raise ValueError("r_cap must be positive")
+        if self.masks < 2:
+            raise ValueError("masks must be at least two")
 
 
 @dataclass(frozen=True)
@@ -86,6 +117,11 @@ class TrainingConfig:
     ``sample_chunk`` streams the Monte Carlo samples in slices, bounding the live
     ``(samples, masks, qubits)`` ratio tensor.  It is faster at large sample
     budgets and slightly slower for small ones, so it is off by default.
+
+    ``adapt``, an :class:`Adaptation`, sets ``mc_samples`` and ``n_ops`` from
+    the measured step noise during training.  It needs step refresh and
+    raw-sample targets, and ``adapt.every`` must be a multiple of
+    ``validation_interval`` and divide ``steps``.
     """
 
     steps: int = 2_000
@@ -102,6 +138,7 @@ class TrainingConfig:
     initial_loss_scale: float = 2.0**15
     sample_chunk: int | None = None
     mask_refresh: MaskRefresh = STEP
+    adapt: Adaptation | None = None
 
     def resolved_sigmas(self, n_visible: int) -> tuple[float, ...]:
         """Return the bandwidth schedule for ``n_visible`` visible qubits.
@@ -147,6 +184,15 @@ class TrainingConfig:
                 f"unknown mask_refresh: {self.mask_refresh!r}; "
                 f"expected {STEP!r} or {CACHE!r}",
             )
+        if self.adapt is not None:
+            if self.mask_refresh != STEP:
+                raise ValueError("adapt needs step mask refresh")
+            if self.adapt.every % self.validation_interval:
+                raise ValueError(
+                    "adapt.every must be a multiple of validation_interval"
+                )
+            if self.steps % self.adapt.every:
+                raise ValueError("adapt.every must divide steps")
 
 
 @dataclass(frozen=True)
@@ -156,7 +202,10 @@ class TrainingResult:
     ``loss_scales`` holds the loss scale used at each update (1 unless the
     precision is loss-scaled), and ``skipped_steps`` the 1-based updates that
     were skipped because their gradient overflowed.  ``checkpoint_params``
-    holds the parameters at each of ``validation_steps``.
+    holds the parameters at each of ``validation_steps``.  Under
+    ``config.adapt``, ``measurements`` holds each
+    :class:`iqp_cond.Measurement`, taken before the 0-based update in
+    ``measurement_steps``; both are empty otherwise.
     """
 
     seed: int
@@ -173,6 +222,8 @@ class TrainingResult:
     loss_scales: np.ndarray
     skipped_steps: np.ndarray
     checkpoint_params: np.ndarray
+    measurement_steps: np.ndarray
+    measurements: tuple[Measurement, ...]
 
 
 _LOSS_SCALE_GROWTH_INTERVAL = 2000
@@ -569,6 +620,9 @@ def train(
     proportion to their weights, and validation evaluates every mask of the
     validation moments.  The bandwidths then come from the training bank, and
     ``initial_params`` is required.
+
+    With ``config.adapt`` the sample and mask counts follow the measured step
+    noise; see :class:`Adaptation`.
     """
     moments = isinstance(training_targets, TargetMoments)
     if not moments:
@@ -577,6 +631,8 @@ def train(
     _validate_training_inputs(model, training_targets, validation_targets)
     if moments and initial_params is None:
         raise ValueError("moment targets need initial_params")
+    if moments and config.adapt is not None:
+        raise ValueError("adapt needs raw-sample targets")
 
     encoders = model.encoder
     n_conditions = encoders.n_conditions
@@ -651,10 +707,31 @@ def train(
     checkpoint_params = [params]
     validation_losses = [best_validation]
     selection_scores = [best_selection]
+    n_samples, n_ops = config.mc_samples, config.n_ops
+    measurement_steps, measurements = [], []
     for start in range(0, config.steps, config.validation_interval):
         stop = min(start + config.validation_interval, config.steps)
+        if config.adapt is not None and start % config.adapt.every == 0:
+            # Imported here: the guidelines module builds on this one.
+            from .guidelines import _measure
+
+            measurement = _measure(
+                model,
+                params,
+                training_targets,
+                config,
+                jax.random.fold_in(
+                    jax.random.PRNGKey(seed + _MEASUREMENT_SEED_OFFSET), start
+                ),
+                config.adapt.masks,
+                config.adapt.r_cap,
+                (n_samples, n_ops),
+            )
+            n_samples, n_ops = measurement.samples, measurement.masks
+            measurement_steps.append(start)
+            measurements.append(measurement)
         params, optimizer_state, scaling, losses, scales, finite = training_steps(
-            config.mc_samples, config.n_ops
+            n_samples, n_ops
         )(
             params,
             optimizer_state,
@@ -699,4 +776,6 @@ def train(
         loss_scales=np.asarray(jnp.concatenate(loss_scales)),
         checkpoint_params=np.asarray(jnp.stack(checkpoint_params)),
         skipped_steps=np.flatnonzero(~np.asarray(jnp.concatenate(finite_steps))) + 1,
+        measurement_steps=np.asarray(measurement_steps, dtype=np.int64),
+        measurements=tuple(measurements),
     )

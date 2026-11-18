@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -12,8 +14,13 @@ from iqp_cond import guidelines
 from iqp_cond.encoders.base import _select_condition
 from iqp_cond.estimator import _gradient_terms
 from iqp_cond.exact import probabilities
-from iqp_cond.loss import _Entries, _mmd_from_entries, target_moments
-from iqp_cond.operators import sample_nonidentity_masks_jax
+from iqp_cond.loss import (
+    TargetMoments,
+    _Entries,
+    _mmd_from_entries,
+    target_moments,
+)
+from iqp_cond.operators import operator_bank, sample_nonidentity_masks_jax
 
 N_QUBITS = 4
 
@@ -216,3 +223,93 @@ def test_settings_round_cap_and_keep(monkeypatch: pytest.MonkeyPatch) -> None:
         (16, 8),
     )
     assert (kept.samples, kept.masks, kept.flag) == (16, 8, "kept")
+
+
+def small_training_problem() -> tuple[ciqp.ConditionalModel, np.ndarray, np.ndarray]:
+    model = zero_state_model()
+    rng = np.random.default_rng(12)
+    training = rng.integers(0, 2, (1, 64, N_QUBITS)).astype(np.float64)
+    validation = rng.integers(0, 2, (1, 32, N_QUBITS)).astype(np.float64)
+    return model, training, validation
+
+
+def test_pinned_adaptation_reproduces_the_fixed_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Measurements that keep the settings leave training unchanged."""
+    model, training, validation = small_training_problem()
+    config = ciqp.TrainingConfig(
+        steps=8, batch_size=16, validation_interval=2, n_ops=8, mc_samples=16
+    )
+    fixed = ciqp.train(model, training, validation, seed=3, config=config)
+
+    def pinned(*arguments):
+        nan = np.full((1, 3), np.nan)
+        return guidelines.Measurement(
+            nan, nan, nan, nan, nan, 0.5, 8.0, *arguments[-1], "kept"
+        )
+
+    monkeypatch.setattr(guidelines, "_measure", pinned)
+    adaptive = ciqp.train(
+        model,
+        training,
+        validation,
+        seed=3,
+        config=dataclasses.replace(config, adapt=ciqp.Adaptation(every=4)),
+    )
+    np.testing.assert_array_equal(adaptive.measurement_steps, [0, 4])
+    for name in ("final_params", "train_losses", "validation_losses"):
+        np.testing.assert_array_equal(getattr(adaptive, name), getattr(fixed, name))
+
+
+def test_adaptation_trains_at_the_measured_settings() -> None:
+    model, training, validation = small_training_problem()
+    config = ciqp.TrainingConfig(
+        steps=4,
+        batch_size=16,
+        validation_interval=2,
+        n_ops=8,
+        mc_samples=16,
+        adapt=ciqp.Adaptation(every=2, r_cap=64, masks=64),
+    )
+    result = ciqp.train(model, training, validation, seed=4, config=config)
+    np.testing.assert_array_equal(result.measurement_steps, [0, 2])
+    for measurement in result.measurements:
+        assert measurement.flag in ("estimated", "capped")
+        assert measurement.samples >= 4 and measurement.masks <= 64
+        for count in (measurement.samples, measurement.masks):
+            assert count & (count - 1) == 0 or count == 64
+    assert np.isfinite(result.train_losses).all()
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"mask_refresh": "cache"}, "step mask refresh"),
+        ({"validation_interval": 30}, "multiple of validation_interval"),
+        ({"steps": 150}, "divide steps"),
+    ],
+)
+def test_config_rejects_unsupported_adaptation(options, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        ciqp.TrainingConfig(
+            **{"steps": 200, **options}, adapt=ciqp.Adaptation(every=100)
+        )
+
+
+def test_adaptation_rejects_moment_targets() -> None:
+    model = zero_state_model()
+    bank = operator_bank((1.0,), 8, 1, N_QUBITS, 0)
+    moments = TargetMoments(bank, jnp.zeros(bank.weights.shape))
+    config = ciqp.TrainingConfig(
+        steps=2, validation_interval=2, adapt=ciqp.Adaptation(every=2)
+    )
+    with pytest.raises(ValueError, match="raw-sample targets"):
+        ciqp.train(
+            model,
+            moments,
+            moments,
+            seed=0,
+            config=config,
+            initial_params=np.zeros(model.ansatz.n_parameters),
+        )

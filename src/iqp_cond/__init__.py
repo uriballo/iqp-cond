@@ -36,11 +36,12 @@ from .encoders import (
 )
 from .guidelines import Measurement, measure
 from .model import Ansatz, ConditionalModel
-from .training import TrainingConfig, train
+from .training import Adaptation, TrainingConfig, train
 
 __all__ = [
     "FORMATS",
     "PRECISIONS",
+    "Adaptation",
     "AngleEncoder",
     "Ansatz",
     "CollectivePhaseEncoder",

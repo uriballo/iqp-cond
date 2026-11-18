@@ -115,6 +115,8 @@ report = ciqp.measure(model, warm.best_params, training_targets, config, jax.ran
 config = dataclasses.replace(config, mc_samples=report.samples, n_ops=report.masks)
 ```
 
+The recommended route is to let training remeasure as it goes. `TrainingConfig(adapt=ciqp.Adaptation(every=100, r_cap=65536, masks=4096))` measures at the current parameters before update 0 and every `every` updates after it, and trains the following updates at one `S` and one `R` for every cell, starting from `mc_samples` and `n_ops`. An invalid estimate keeps the previous settings. The measurements use their own random stream, so the training draws are those of a fixed run. Adaptation needs `mask_refresh="step"` and raw-sample targets, and `every` must be a multiple of `validation_interval` and divide `steps`. `TrainingResult.measurement_steps` and `TrainingResult.measurements` record each `Measurement`, whose `flag` is `"estimated"`, `"capped"` when `R*` exceeded `r_cap`, or `"kept"`.
+
 ## Estimate expectations and sample
 
 `model.estimate_pauli_z(params, masks, key=..., n_samples=...)` estimates visible Pauli-Z moments and returns an `ExpectationEstimate` with values shaped `(conditions, masks)`. Supply either a random key and a sample count, or pre-drawn `samples=` instead. Set `return_samples=True` to retain per-sample values and access Monte Carlo standard errors through `standard_errors`. Ancilla identity padding is handled automatically for visible-width masks.
