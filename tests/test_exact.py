@@ -42,3 +42,15 @@ def test_probabilities_match_pennylane_for_other_inputs(encoder):
     np.testing.assert_allclose(
         probabilities(model, params), model.probabilities(params), atol=1e-12
     )
+
+
+def test_single_precision_probabilities_match_to_float32_roundoff():
+    data = inputs()
+    model = data["model"]
+    # complex64 halves the memory of large registers; each probability is a
+    # sum of squares of transformed amplitudes, accurate to about 1e-6.
+    np.testing.assert_allclose(
+        probabilities(model, data["params"], dtype=np.complex64),
+        model.probabilities(data["params"]),
+        atol=1e-6,
+    )

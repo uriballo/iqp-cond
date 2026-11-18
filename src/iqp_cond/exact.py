@@ -17,7 +17,9 @@ from .encoders.base import ExactEncoder
 from .model import ConditionalModel
 
 
-def _phases(params: jnp.ndarray, generators: np.ndarray, n_qubits: int) -> jnp.ndarray:
+def _phases(
+    params: jnp.ndarray, generators: np.ndarray, n_qubits: int, dtype
+) -> jnp.ndarray:
     """Return ``sum_j theta_j chi_j(z)`` for every little-endian basis index."""
     index = jnp.arange(2**n_qubits, dtype=jnp.uint32)
     masks = jnp.asarray(generators @ (1 << np.arange(n_qubits)), dtype=jnp.uint32)
@@ -27,7 +29,9 @@ def _phases(params: jnp.ndarray, generators: np.ndarray, n_qubits: int) -> jnp.n
         odd = jax.lax.population_count(index & mask) & 1
         return phase + theta * (1.0 - 2.0 * odd), None
 
-    phase, _ = jax.lax.scan(add, jnp.zeros(index.shape), (masks, params))
+    phase, _ = jax.lax.scan(
+        add, jnp.zeros(index.shape, dtype), (masks, params.astype(dtype))
+    )
     return phase
 
 
@@ -41,12 +45,15 @@ def _walsh_hadamard(state: jnp.ndarray, n_qubits: int) -> jnp.ndarray:
     return state / 2 ** (n_qubits / 2)
 
 
-def probabilities(model: ConditionalModel, params: np.ndarray) -> np.ndarray:
+def probabilities(
+    model: ConditionalModel, params: np.ndarray, *, dtype=jnp.complex128
+) -> np.ndarray:
     """Return every condition's exact visible distribution, ``(C, 2**n_visible)``.
 
     Indices are little-endian, as in :meth:`ConditionalModel.probabilities`;
     ancillas are the highest qubits and are summed out.  The encoder must
-    provide ``post_hadamard_amplitudes``.
+    provide ``post_hadamard_amplitudes``.  ``dtype=jnp.complex64`` halves the
+    memory, for large registers, at single-precision accuracy.
     """
     encoder = model.encoder
     if not isinstance(encoder, ExactEncoder):
@@ -54,12 +61,16 @@ def probabilities(model: ConditionalModel, params: np.ndarray) -> np.ndarray:
     n_qubits = model.n_qubits
     if n_qubits > 31:
         raise ValueError("exact probabilities index states with uint32, so n <= 31")
+    real = jnp.finfo(dtype).dtype
     phase = _phases(
         jnp.asarray(params, dtype=jnp.float64),
         np.asarray(model.generators, dtype=np.int64),
         n_qubits,
+        real,
     )
-    states = jnp.asarray(encoder.post_hadamard_amplitudes()) * jnp.exp(1j * phase)
+    states = jnp.asarray(encoder.post_hadamard_amplitudes(), dtype) * jnp.exp(
+        1j * phase
+    ).astype(dtype)
     output = jax.vmap(lambda state: _walsh_hadamard(state, n_qubits))(states)
     probabilities = jnp.abs(output) ** 2
     hidden = 2 ** (n_qubits - model.visible)

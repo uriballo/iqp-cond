@@ -11,6 +11,11 @@ Mask draws exclude the identity mask.  The identity contributes exactly zero to
 the kernel MMD, so spending budget on it only adds variance.  The sampler folds
 the remaining mass ``1 - (1 - p)**n`` into the returned weights, and it
 represents each duplicate once with its exact empirical multiplicity.
+
+A bandwidth is a scalar ``sigma`` (the isotropic kernel) or a length-``n``
+vector of per-qubit bandwidths, the anisotropic product kernel
+``exp(-sum_i [x_i != y_i] / (2 sigma_i^2))``: mask bit ``i`` is then set with its
+own probability ``p_i``.  :func:`random_anisotropic_sigma` draws such a vector.
 """
 
 from __future__ import annotations
@@ -30,6 +35,7 @@ __all__ = [
     "expected_bodyness_sigmas",
     "mmd_operator_probability",
     "operator_bank",
+    "random_anisotropic_sigma",
     "sample_nonidentity_masks",
     "sample_nonidentity_masks_jax",
 ]
@@ -64,6 +70,68 @@ def expected_bodyness_sigmas(
         float((-2.0 * math.log(1.0 - 2.0 * target / n_visible)) ** -0.5)
         for target in values
     )
+
+
+def random_anisotropic_sigma(
+    n_visible: int,
+    seed: int,
+    *,
+    spread: float = 2.0,
+    bodyness: float = 2.0,
+) -> tuple[float, ...]:
+    """Draw per-qubit bandwidths for a random anisotropic kernel.
+
+    Each ``log sigma_i`` is uniform within a factor ``spread`` of the isotropic
+    bandwidth for the mean bodyness ``bodyness``; one common factor then rescales
+    the vector so the mean bodyness ``sum_i p_i`` equals ``bodyness`` again, which
+    keeps the kernel comparable with the isotropic one at the same target.
+    """
+    if spread < 1.0:
+        raise ValueError("spread must be at least 1")
+    (base,) = expected_bodyness_sigmas(n_visible, (bodyness,))
+    target = min(float(bodyness), 0.49 * n_visible)
+    rng = np.random.default_rng(seed)
+    raw = base * np.exp(rng.uniform(-math.log(spread), math.log(spread), n_visible))
+
+    def bodyness_at(log_scale: float) -> float:
+        sigma = math.exp(log_scale) * raw
+        return float(np.sum((1.0 - np.exp(-1.0 / (2.0 * sigma**2))) / 2.0))
+
+    # The mean bodyness falls as every bandwidth grows, so bisect the scale.
+    low, high = -20.0, 20.0
+    for _ in range(200):
+        middle = 0.5 * (low + high)
+        if bodyness_at(middle) > target:
+            low = middle
+        else:
+            high = middle
+    return tuple(float(value) for value in math.exp(0.5 * (low + high)) * raw)
+
+
+def _valid_bandwidth(sigma, n_visible: int) -> bool:
+    """A positive, finite scalar or length-``n_visible`` vector."""
+    values = np.asarray(sigma, dtype=np.float64)
+    shape_ok = values.ndim == 0 or values.shape == (n_visible,)
+    return bool(shape_ok and np.all(np.isfinite(values)) and np.all(values > 0.0))
+
+
+def _bandwidth(sigma) -> float | tuple[float, ...]:
+    """A bandwidth as a hashable float or tuple of floats."""
+    if np.ndim(sigma) == 1:
+        return tuple(float(value) for value in sigma)
+    return float(sigma)
+
+
+def _first_bit_cdf(p: np.ndarray) -> tuple[np.ndarray, float]:
+    """CDF of a nonidentity mask's first set bit, and the nonidentity mass.
+
+    Bit ``i`` is the first set bit with probability ``p_i prod_{j<i} (1 - p_j)``;
+    conditioning on a nonidentity mask divides by their sum.
+    """
+    lead = np.concatenate([[1.0], np.cumprod(1.0 - p)[:-1]])
+    first = p * lead
+    mass = float(np.sum(first))
+    return np.cumsum(first) / mass, mass
 
 
 def mmd_operator_probability(sigma: float | jnp.ndarray) -> jnp.ndarray:
@@ -104,9 +172,27 @@ def sample_nonidentity_masks_jax(
     if n_ops < 1 or n_visible < 1:
         raise ValueError("n_ops and n_visible must be positive")
     # A traced sigma, as in the trainer's shared step, is validated upstream.
-    if not isinstance(sigma, jax.core.Tracer) and sigma <= 0.0:
+    if not isinstance(sigma, jax.core.Tracer) and not _valid_bandwidth(
+        sigma, n_visible
+    ):
         raise ValueError("sigma must be positive")
     p = mmd_operator_probability(sigma)
+    if jnp.ndim(p) == 1:
+        # Per-qubit probabilities: the first set bit by inverse CDF, the bits
+        # after it independent, the bits before it zero.
+        lead = jnp.concatenate([jnp.ones(1), jnp.cumprod(1.0 - p)[:-1]])
+        first_pmf = p * lead
+        mass = jnp.sum(first_pmf)
+        cdf = jnp.cumsum(first_pmf) / mass
+        first = jnp.minimum(
+            jnp.searchsorted(cdf, jax.random.uniform(key, (n_ops,)), side="right"),
+            n_visible - 1,
+        )
+        bits = jax.random.uniform(jax.random.fold_in(key, 1), (n_ops, n_visible)) < p
+        position = jnp.arange(n_visible)
+        bits = jnp.where(position < first[:, None], False, bits)
+        masks = jnp.where(position == first[:, None], True, bits).astype(jnp.float64)
+        return masks, jnp.full((n_ops,), mass / n_ops, dtype=jnp.float64)
     k = jnp.arange(n_visible + 1, dtype=jnp.float64)
     log_choose = (
         gammaln(n_visible + 1.0) - gammaln(k + 1.0) - gammaln(n_visible - k + 1.0)
@@ -141,10 +227,14 @@ def sample_nonidentity_masks(
     This function runs outside any JIT, because rejection sampling needs a
     concrete NumPy generator.
     """
-    if n_ops < 1 or n_qubits < 1 or sigma <= 0.0:
+    if n_ops < 1 or n_qubits < 1 or not _valid_bandwidth(sigma, n_qubits):
         raise ValueError("n_ops, n_qubits, and sigma must be positive")
-    p = float(mmd_operator_probability(sigma))
-    q_nonidentity = 1.0 - (1.0 - p) ** n_qubits
+    if np.ndim(sigma) == 1:
+        p = np.asarray(mmd_operator_probability(jnp.asarray(sigma)))
+        q_nonidentity = 1.0 - float(np.prod(1.0 - p))
+    else:
+        p = float(mmd_operator_probability(sigma))
+        q_nonidentity = 1.0 - (1.0 - p) ** n_qubits
     chunks: list[np.ndarray] = []
     remaining = n_ops
     while remaining:
@@ -219,6 +309,27 @@ def _sample_nonidentity_codes(
     return bits.astype(np.int64) @ powers
 
 
+def _sample_nonidentity_codes_vector(
+    rng: np.random.Generator,
+    n_ops: int,
+    p: np.ndarray,
+    n_conditions: int,
+) -> np.ndarray:
+    """Per-qubit counterpart of :func:`_sample_nonidentity_codes`: the first set
+    bit by inverse CDF, the later bits independent, the earlier bits zero."""
+    n_qubits = p.size
+    cdf, _ = _first_bit_cdf(p)
+    first = np.minimum(
+        np.searchsorted(cdf, rng.random((n_conditions, n_ops)), side="right"),
+        n_qubits - 1,
+    )
+    bits = rng.random((n_conditions, n_ops, n_qubits)) < p
+    position = np.arange(n_qubits)
+    bits = np.where(position < first[..., None], False, bits)
+    bits = np.where(position == first[..., None], True, bits)
+    return bits.astype(np.int64) @ (1 << np.arange(n_qubits, dtype=np.int64))
+
+
 def _compress_codes(
     codes: np.ndarray,
     n_qubits: int,
@@ -265,7 +376,7 @@ class OperatorBank:
     produces.
     """
 
-    sigmas: tuple[float, ...]
+    sigmas: tuple[float | tuple[float, ...], ...]
     masks: jnp.ndarray
     weights: jnp.ndarray
     n_ops: int
@@ -373,7 +484,7 @@ def _assemble_bank(
                 )
             )
     return OperatorBank(
-        sigmas=tuple(float(sigma) for sigma in sigmas),
+        sigmas=tuple(_bandwidth(sigma) for sigma in sigmas),
         masks=jnp.asarray(masks),
         weights=jnp.asarray(weights),
         n_ops=n_ops,
@@ -426,15 +537,22 @@ def _draw_batched(
     drawn: list[list[tuple[np.ndarray, np.ndarray]]] = []
     for bandwidth, sigma in enumerate(sigmas):
         cap = caps[bandwidth]
-        p = _mask_probability(sigma)
-        nonidentity_mass = 1.0 - (1.0 - p) ** n_visible
-        codes = _sample_nonidentity_codes(
-            root,
-            n_ops,
-            n_visible,
-            float(sigma),
-            n_conditions,
-        )
+        if np.ndim(sigma) == 1:
+            p_vector = np.asarray(mmd_operator_probability(jnp.asarray(sigma)))
+            _, nonidentity_mass = _first_bit_cdf(p_vector)
+            codes = _sample_nonidentity_codes_vector(
+                root, n_ops, p_vector, n_conditions
+            )
+        else:
+            p = _mask_probability(sigma)
+            nonidentity_mass = 1.0 - (1.0 - p) ** n_visible
+            codes = _sample_nonidentity_codes(
+                root,
+                n_ops,
+                n_visible,
+                float(sigma),
+                n_conditions,
+            )
         groups, unique_codes, counts = _compress_codes(codes, n_visible)
         # Keys are sorted, so the groups are nondecreasing. The code slices
         # each condition out with one search over the boundaries instead of a
@@ -453,7 +571,7 @@ def _draw_batched(
                         root,
                         n_ops,
                         n_visible,
-                        float(sigma),
+                        _bandwidth(sigma),
                     )
                     if masks.shape[0] <= cap:
                         entry = (masks, weights)
@@ -502,7 +620,7 @@ def _draw_entrywise(
                     rng,
                     n_ops,
                     n_visible,
-                    float(sigma),
+                    _bandwidth(sigma),
                 )
                 if cap is None or masks.shape[0] <= cap:
                     entry = (masks, weights)
@@ -546,14 +664,16 @@ def operator_bank(
     """
     if not sigmas:
         raise ValueError("sigmas must not be empty")
-    if any(not math.isfinite(float(sigma)) or float(sigma) <= 0.0 for sigma in sigmas):
-        raise ValueError("sigmas must be positive and finite")
     if n_ops < 1:
         raise ValueError("n_ops must be positive")
     if n_conditions < 1:
         raise ValueError("n_conditions must be positive")
     if n_visible < 1:
         raise ValueError("n_visible must be positive")
+    if not all(_valid_bandwidth(sigma, n_visible) for sigma in sigmas):
+        raise ValueError(
+            "sigmas must be positive and finite, each a scalar or one per qubit"
+        )
     per_bandwidth = isinstance(max_masks, Sequence) and not isinstance(max_masks, str)
     caps: tuple[int | None, ...]
     if max_masks is None:

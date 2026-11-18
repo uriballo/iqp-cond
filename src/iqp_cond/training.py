@@ -13,7 +13,6 @@ the fit. Validation uses fixed randomness so checkpoint scores stay comparable.
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
@@ -23,7 +22,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from ._precision import Precision, resolve_precision
+from ._precision import Precision, _rounding_key, resolve_precision
 from .encoders import Encoder
 from .encoders.base import _check_condition_pytree, _select_condition
 from .initialization import parameters_from_data
@@ -164,11 +163,18 @@ class TrainingConfig:
         if self.sigmas is not None and (
             not self.sigmas
             or any(
-                not math.isfinite(float(sigma)) or float(sigma) <= 0.0
+                np.ndim(sigma) > 1
+                or not np.all(np.isfinite(np.asarray(sigma, dtype=np.float64)))
+                or np.any(np.asarray(sigma, dtype=np.float64) <= 0.0)
                 for sigma in self.sigmas
             )
         ):
             raise ValueError("sigmas must be positive and finite")
+        if (
+            self.sigmas is not None
+            and len({np.shape(sigma) for sigma in self.sigmas}) > 1
+        ):
+            raise ValueError("sigmas must be all scalars or all vectors of one length")
         if self.n_ops < 1 or self.validation_n_ops < 1:
             raise ValueError("n_ops and validation_n_ops must be positive")
         if self.mc_samples < 2 or self.validation_mc_samples < 2:
@@ -555,10 +561,11 @@ def _make_validation(
     Moment targets are evaluated on every mask of their own bank.
     """
     moments = isinstance(validation_targets, TargetMoments)
+    key = jax.random.PRNGKey(seed + 1_000_000)
     entries = _mmd_entries(
         model.encoder,
         validation_targets if moments else jnp.asarray(validation_targets),
-        jax.random.PRNGKey(seed + 1_000_000),
+        key,
         bank=validation_targets.bank if moments else None,
         sigmas=None if moments else sigmas,
         n_ops=None if moments else config.validation_n_ops,
@@ -578,6 +585,8 @@ def _make_validation(
             encoders,
             entries,
             precision=config.precision,
+            # Fixed bits, like the fixed entries, keep validation comparable.
+            rounding_key=_rounding_key(key),
         ).loss
 
     return lambda current_params: validation_loss(

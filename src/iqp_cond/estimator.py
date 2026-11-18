@@ -23,7 +23,7 @@ import jax
 import jax.numpy as jnp
 
 from ._layout import pad_visible_masks
-from ._precision import Precision, _Arithmetic
+from ._precision import Precision, _Arithmetic, _rounding_key, resolve_precision
 from .encoders import AngleEncoder, Encoder
 
 __all__ = [
@@ -217,8 +217,9 @@ def _estimate(
     samples: jnp.ndarray,
     precision: str | Precision,
     return_samples: bool,
+    key: jax.Array | None,
 ) -> ExpectationEstimate:
-    arithmetic = _Arithmetic(precision)
+    arithmetic = _Arithmetic(precision, _rounding_key(key))
     phases = _phase_differences(params, generators, masks, samples, arithmetic)
     sample_values = _ratio_sample_values(encoders, samples, masks, phases, arithmetic)
     if arithmetic.precision.statistics == "fp64":
@@ -304,9 +305,10 @@ def estimate_pauli_z(
 
     ``precision`` is a :class:`iqp_cond.Precision` or the name of a preset in
     :data:`iqp_cond.PRECISIONS`; values come back in float64 when the
-    statistics are fp64 and in float32 otherwise.
+    statistics are fp64 and in float32 otherwise.  Stochastic rounding draws
+    its bits from ``key``, so it is unavailable with pre-drawn ``samples``.
     """
-    _Arithmetic(precision)
+    resolve_precision(precision)
     params = jnp.asarray(params, dtype=jnp.float64)
     generators = jnp.asarray(generators, dtype=jnp.float64)
     masks = jnp.asarray(masks, dtype=jnp.float64)
@@ -342,6 +344,7 @@ def estimate_pauli_z(
         drawn,
         precision,
         return_samples,
+        key,
     )
 
 
@@ -371,4 +374,5 @@ def estimate_pauli_z_unchecked(
         drawn,
         precision,
         return_samples,
+        key,
     )

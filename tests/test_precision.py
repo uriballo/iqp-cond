@@ -10,6 +10,7 @@ import pytest
 from iqp_cond._precision import (
     PRECISIONS,
     Precision,
+    _Arithmetic,
     _blocked_product,
     accumulate,
     precision,
@@ -193,8 +194,14 @@ def test_loss_scaling_follows_fp16_in_the_backward_pass(recipe, scaled):
     assert recipe.loss_scaled is scaled
 
 
-def test_presets_are_uniform_recipes_named_after_their_format():
-    assert set(PRECISIONS) == {"fp64", "fp32", *ELEMENT_DTYPES, "tf32"}
+def test_presets_are_named_after_their_format_plus_fp8_stochastic():
+    assert set(PRECISIONS) == {
+        "fp64",
+        "fp32",
+        *ELEMENT_DTYPES,
+        "tf32",
+        "fp8_stochastic",
+    }
     assert resolve_precision("bf16") == precision("bf16")
     recipe = precision("fp32", gemm_inputs="mxfp4")
     assert resolve_precision(recipe) is recipe
@@ -216,3 +223,48 @@ def test_the_gemm_accumulator_follows_the_accumulation_model():
         [[float(accumulate(a[i] * b[j], "fp16")) for j in range(2)] for i in range(3)]
     )
     np.testing.assert_array_equal(np.asarray(_blocked_product(a, b, "fp16")), expected)
+
+
+def test_hardware_accumulation_rounds_the_fp32_product_to_the_format():
+    # As tensor cores do: accumulate in fp32, then round the output once.
+    rng = np.random.default_rng(2)
+    characters = rng.choice([-1.0, 1.0], size=(64, 300))
+    flips = rng.normal(0.0, 0.3, size=(16, 300))
+    expected = (
+        (characters.astype(np.float32) @ flips.astype(np.float32).T)
+        .astype(np.float16)
+        .astype(np.float64)
+    )
+    recipe = precision(gemm_accumulate="fp16", gemm_inputs="fp32")
+    actual = _Arithmetic(recipe).gemm(jnp.asarray(characters), jnp.asarray(flips))
+    np.testing.assert_allclose(np.asarray(actual), expected, rtol=0, atol=0)
+
+
+def test_blocked_accumulation_keeps_the_low_precision_accumulator():
+    rng = np.random.default_rng(3)
+    characters = jnp.asarray(rng.choice([-1.0, 1.0], size=(4, 70)))
+    flips = jnp.asarray(rng.integers(-40, 41, size=(3, 70)).astype(float))
+    recipe = precision(gemm_accumulate="fp16", accumulation="blocked")
+    np.testing.assert_array_equal(
+        np.asarray(_Arithmetic(recipe).gemm(characters, flips)),
+        np.asarray(_blocked_product(characters, flips, "fp16")),
+    )
+
+
+def test_pow2_scaling_keeps_the_grid_fixed_as_the_largest_magnitude_moves():
+    """With a power-of-two scale, a value rounds the same way whatever the
+    tensor's largest magnitude; with the amax scale the grid moves with it."""
+    value = 0.3172
+    largest = np.linspace(0.6, 1.2, 25)  # within one octave of the format's range
+    pow2 = [
+        float(quantize(jnp.array([value, top]), "fp8_e4m3", scaling="pow2")[0])
+        for top in largest
+    ]
+    amax = [float(quantize(jnp.array([value, top]), "fp8_e4m3")[0]) for top in largest]
+    assert len(set(pow2)) == 1
+    assert len(set(amax)) > 1
+
+
+def test_scaling_must_be_amax_or_pow2():
+    with pytest.raises(ValueError, match="scaling must be"):
+        Precision(scaling="block")

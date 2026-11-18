@@ -18,6 +18,7 @@ from iqp_cond.operators import (
     expected_bodyness_sigmas,
     mmd_operator_probability,
     operator_bank,
+    random_anisotropic_sigma,
     sample_nonidentity_masks,
     sample_nonidentity_masks_jax,
 )
@@ -420,3 +421,62 @@ def test_expected_bodyness_sigmas_rejects_invalid_inputs() -> None:
         expected_bodyness_sigmas(8, targets=())
     with pytest.raises(ValueError, match="bodyness targets must be positive"):
         expected_bodyness_sigmas(8, targets=(0.0,))
+
+
+def _conditional_bit_law(sigma: np.ndarray) -> tuple[np.ndarray, float]:
+    """Per-qubit P(bit i set | mask nonidentity) and the nonidentity mass."""
+    p = (1.0 - np.exp(-1.0 / (2.0 * sigma**2))) / 2.0
+    mass = 1.0 - np.prod(1.0 - p)
+    return p / mass, mass
+
+
+ANISOTROPIC = np.array([0.6, 0.9, 1.3, 2.0, 0.8, 1.6])
+
+
+def test_anisotropic_bank_draws_each_bit_with_its_own_probability() -> None:
+    expected, mass = _conditional_bit_law(ANISOTROPIC)
+    bank = operator_bank((tuple(ANISOTROPIC),), 200_000, 1, 6, seed=3)
+    masks, weights = bank.entry(0, 0)
+    weights = np.asarray(weights)
+    assert np.sum(weights) == pytest.approx(mass)
+    assert not np.any(np.all(np.asarray(masks) == 0, axis=1)[weights > 0])
+    frequency = weights @ np.asarray(masks) / mass
+    np.testing.assert_allclose(frequency, expected, atol=4e-3)
+
+
+def test_anisotropic_jax_sampler_draws_each_bit_with_its_own_probability() -> None:
+    expected, mass = _conditional_bit_law(ANISOTROPIC)
+    masks, weights = sample_nonidentity_masks_jax(
+        jax.random.PRNGKey(5), 200_000, 6, jnp.asarray(ANISOTROPIC)
+    )
+    assert float(jnp.sum(weights)) == pytest.approx(mass)
+    assert bool(jnp.all(jnp.any(masks > 0, axis=1)))
+    np.testing.assert_allclose(np.asarray(masks.mean(axis=0)), expected, atol=4e-3)
+
+
+def test_equal_per_qubit_bandwidths_reproduce_the_isotropic_law() -> None:
+    sigma = 0.9
+    vector = operator_bank((tuple([sigma] * 5),), 200_000, 1, 5, seed=1)
+    scalar = operator_bank((sigma,), 200_000, 1, 5, seed=2)
+
+    def weight_law(bank):
+        masks, weights = bank.entry(0, 0)
+        hamming = np.asarray(masks).sum(axis=1).astype(int)
+        return np.bincount(hamming, weights=np.asarray(weights), minlength=6)
+
+    np.testing.assert_allclose(weight_law(vector), weight_law(scalar), atol=4e-3)
+
+
+def test_random_anisotropic_sigma_is_reproducible_and_keeps_the_bodyness() -> None:
+    first = random_anisotropic_sigma(24, seed=7, spread=2.0)
+    assert first == random_anisotropic_sigma(24, seed=7, spread=2.0)
+    assert first != random_anisotropic_sigma(24, seed=8, spread=2.0)
+    sigma = np.asarray(first)
+    p = (1.0 - np.exp(-1.0 / (2.0 * sigma**2))) / 2.0
+    assert np.sum(p) == pytest.approx(2.0, rel=1e-9)
+    assert sigma.max() / sigma.min() <= 4.0 + 1e-12
+
+
+def test_operator_bank_rejects_a_bandwidth_vector_of_the_wrong_length() -> None:
+    with pytest.raises(ValueError, match="one per qubit"):
+        operator_bank(((1.0, 1.0, 1.0),), 16, 1, 4, seed=0)

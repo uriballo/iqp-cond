@@ -32,7 +32,7 @@ from dataclasses import dataclass
 import jax
 import jax.numpy as jnp
 
-from ._precision import Precision, _Arithmetic
+from ._precision import Precision, _Arithmetic, _rounding_key, resolve_precision
 from .encoders import Encoder
 from .encoders.base import _check_condition_pytree, _condition_rows
 from .estimator import _phase_differences, _ratio_sample_values
@@ -290,6 +290,7 @@ def _mmd_from_entries(
     *,
     precision: str | Precision = "fp64",
     sample_chunk: int | None = None,
+    rounding_key: jax.Array | None = None,
 ) -> ConditionalMMDResult:
     """Evaluate drawn entries at ``params``; only the phases depend on them.
 
@@ -297,8 +298,9 @@ def _mmd_from_entries(
     sample axis and accumulates the per-mask moments, bounding the live
     ``(samples, masks)`` buffers; both model and target terms use the unbiased
     finite-sample estimator, summed in the ``statistics`` format.
+    ``rounding_key`` supplies the bits of stochastic rounding.
     """
-    arithmetic = _Arithmetic(precision)
+    arithmetic = _Arithmetic(precision, rounding_key)
     params = jnp.asarray(params, dtype=jnp.float64)
     generators = jnp.asarray(generators, dtype=jnp.float64)
     rows = _condition_rows(encoders)
@@ -306,9 +308,8 @@ def _mmd_from_entries(
     def condition_value(encoder: Encoder, entry: _Entries) -> jnp.ndarray:
         n_samples = entry.samples.shape[1]
         chunk = n_samples if sample_chunk is None else min(sample_chunk, n_samples)
-        sums = square_sums = 0.0
-        for start in range(0, n_samples, chunk):
-            samples = entry.samples[:, start : start + chunk]
+
+        def chunk_sums(params, samples):
             phases = _phase_differences(
                 params,
                 generators,
@@ -323,10 +324,39 @@ def _mmd_from_entries(
                 phases,
                 arithmetic,
             )[0]
-            sums = sums + arithmetic.sum(values, axis=0)
-            square_sums = square_sums + arithmetic.sum(
+            return arithmetic.sum(values, axis=0), arithmetic.sum(
                 arithmetic.round(values**2, "statistics"), axis=0
             )
+
+        if chunk == n_samples:
+            sums, square_sums = chunk_sums(params, entry.samples)
+        else:
+            # A scan runs the chunks one after another, and the checkpoint
+            # recomputes each in the backward pass instead of keeping its
+            # (samples, generators) characters, so memory follows the chunk.
+            chunk_sums = jax.checkpoint(chunk_sums)
+            n_chunks = n_samples // chunk
+            sums, square_sums = chunk_sums(params, entry.samples[:, :chunk])
+            if n_chunks > 1:
+                whole = entry.samples[:, chunk : n_chunks * chunk]
+                whole = jnp.moveaxis(
+                    whole.reshape(whole.shape[0], n_chunks - 1, chunk, -1), 1, 0
+                )
+
+                def add(carry, samples):
+                    chunk_sum, chunk_square_sum = chunk_sums(params, samples)
+                    return (
+                        (carry[0] + chunk_sum, carry[1] + chunk_square_sum),
+                        None,
+                    )
+
+                (sums, square_sums), _ = jax.lax.scan(add, (sums, square_sums), whole)
+            if n_chunks * chunk < n_samples:
+                chunk_sum, chunk_square_sum = chunk_sums(
+                    params, entry.samples[:, n_chunks * chunk :]
+                )
+                sums = sums + chunk_sum
+                square_sums = square_sums + chunk_square_sum
         # Model and target terms are stored in the statistics format alike.
         model_squares = arithmetic.round(
             (sums**2 - square_sums) / (n_samples * (n_samples - 1)), "statistics"
@@ -386,8 +416,9 @@ def mmd(
     ``precision`` is a :class:`iqp_cond.Precision` or a preset name from
     :data:`iqp_cond.PRECISIONS`; the parameters stay float64, and the loss
     comes back in float64 when the statistics are fp64 and in float32 otherwise.
+    Stochastic rounding draws its bits from ``key``, apart from the samples.
     """
-    _Arithmetic(precision)
+    resolve_precision(precision)
     params = jnp.asarray(params, dtype=jnp.float64)
     generators = jnp.asarray(generators, dtype=jnp.float64)
     if isinstance(targets, TargetMoments):
@@ -404,6 +435,9 @@ def mmd(
         n_conditions, _, n_data_qubits = targets.shape
     if sample_chunk is not None and sample_chunk < 1:
         raise ValueError("sample_chunk must be positive")
+    if sample_chunk is not None and resolve_precision(precision).rounding != "nearest":
+        # The scan's chunks would draw the same stochastic-rounding bits.
+        raise ValueError("sample_chunk supports round-to-nearest only")
     if bank is None:
         if not sigmas:
             raise ValueError(
@@ -450,4 +484,5 @@ def mmd(
         entries,
         precision=precision,
         sample_chunk=sample_chunk,
+        rounding_key=_rounding_key(key),
     )

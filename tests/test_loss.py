@@ -530,6 +530,36 @@ def test_sample_chunk_matches_the_monolithic_objective() -> None:
     )
 
 
+@pytest.mark.parametrize("sample_chunk", [100, 300])
+def test_sample_chunk_gradient_matches_the_monolithic_gradient(sample_chunk) -> None:
+    """Chunks recomputed in the backward pass give the same gradient."""
+    rng = np.random.default_rng(63)
+    ansatz = ciqp.Ansatz.complete(4)
+    encoders = y_layer(rng.uniform(0.4, 2.4, size=(2, 4)))
+    targets = rng.integers(0, 2, size=(2, 64, 4)).astype(np.float64)
+    params = rng.normal(0.0, 0.3, size=ansatz.n_parameters)
+    bank = operator_bank(SIGMAS, 32, 2, 4, seed=13)
+    key = jax.random.PRNGKey(7)
+
+    def gradient(chunk):
+        return jax.grad(
+            lambda current: (
+                mmd(
+                    current,
+                    ansatz.generators,
+                    encoders,
+                    targets,
+                    key,
+                    bank=bank,
+                    n_samples=512,
+                    sample_chunk=chunk,
+                ).loss
+            )
+        )(params)
+
+    assert np.allclose(gradient(sample_chunk), gradient(None), rtol=1e-9, atol=1e-12)
+
+
 def test_sample_chunk_must_be_positive() -> None:
     rng = np.random.default_rng(62)
     ansatz = ciqp.Ansatz.complete(3)

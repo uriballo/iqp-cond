@@ -17,9 +17,9 @@ Importing this package turns on JAX float64
 (``jax.config.update("jax_enable_x64", True)``).  The estimator, the loss, and
 the trainer default to ``"fp64"``.  A :class:`Precision`, built directly or
 with :func:`precision`, sets the number format of each operation, and
-:data:`PRECISIONS` holds the uniform presets; both are chosen per call or
-through :class:`TrainingConfig`.  Keep float64 enabled, because the encoders,
-the parameters and the fp64 path depend on it.
+:data:`PRECISIONS` holds the uniform presets and ``"fp8_stochastic"``; both
+are chosen per call or through :class:`TrainingConfig`.  Keep float64 enabled,
+because the encoders, the parameters and the fp64 path depend on it.
 """
 
 import jax

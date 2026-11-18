@@ -757,6 +757,29 @@ def test_mixed_precision_and_chunked_training_run(
     assert result.best_params.shape == (model.ansatz.n_parameters,)
 
 
+def test_stochastic_training_is_reproducible_for_a_seed(
+    model: ciqp.ConditionalModel,
+    targets: tuple[np.ndarray, np.ndarray],
+) -> None:
+    training, validation = targets
+    config = ciqp.TrainingConfig(
+        steps=4,
+        batch_size=8,
+        validation_interval=2,
+        sigmas=(0.8, 1.3),
+        n_ops=8,
+        mc_samples=17,
+        validation_n_ops=8,
+        validation_mc_samples=19,
+        precision="fp8_stochastic",
+    )
+    first = ciqp.train(model, training, validation, seed=31, config=config)
+    second = ciqp.train(model, training, validation, seed=31, config=config)
+    assert np.all(np.isfinite(first.train_losses))
+    np.testing.assert_array_equal(first.final_params, second.final_params)
+    np.testing.assert_array_equal(first.validation_losses, second.validation_losses)
+
+
 def _exact_objective(
     probabilities: np.ndarray,
     targets: np.ndarray,
