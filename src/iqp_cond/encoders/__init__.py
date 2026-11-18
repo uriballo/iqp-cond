@@ -34,9 +34,9 @@ The package is organised by shared machinery:
 :mod:`~iqp_cond.encoders.product`
     :class:`AngleEncoder`, a product state of fixed-axis rotation layers.
 :mod:`~iqp_cond.encoders.symmetric`
-    :class:`ParityEncoder`, :class:`TwistedParityEncoder` and
-    :class:`CollectivePhaseEncoder`, entangled states whose amplitudes depend
-    only on Hamming weights.
+    :class:`ParityEncoder`, :class:`TwistedParityEncoder`,
+    :class:`CollectivePhaseEncoder` and :class:`SpinSymmetricEncoder`,
+    entangled states whose amplitudes depend only on Hamming weights.
 
 Implementations are batched over conditions: every array has a leading
 condition axis.  Exact small-system work needs a further capability,
@@ -46,7 +46,12 @@ A new family goes in its own module and is re-exported here.
 
 from .base import Encoder, ExactEncoder
 from .product import AngleEncoder, layered_amplitudes
-from .symmetric import CollectivePhaseEncoder, ParityEncoder, TwistedParityEncoder
+from .symmetric import (
+    CollectivePhaseEncoder,
+    ParityEncoder,
+    SpinSymmetricEncoder,
+    TwistedParityEncoder,
+)
 
 __all__ = [
     "AngleEncoder",
@@ -54,6 +59,7 @@ __all__ = [
     "Encoder",
     "ExactEncoder",
     "ParityEncoder",
+    "SpinSymmetricEncoder",
     "TwistedParityEncoder",
     "layered_amplitudes",
 ]

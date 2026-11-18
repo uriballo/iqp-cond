@@ -48,6 +48,7 @@ The library also ships three entangled encoders whose amplitudes depend only on 
 | `TwistedParityEncoder(angles, twists, n_qubits=n, turn=-pi/4)` | A one-axis twist `exp[-i (mu/m) sum Z_i Z_j]` and a collective turn `RX(turn)` on the `m` leaves, then `IsingZZ(t)` from each leaf to the root | Spin squeezing makes the input probabilities depend on the condition; `twists = 0` recovers the parity encoder |
 | `CollectivePhaseEncoder(linear, quadratic, n_qubits=n)` | `exp[-i (a J_z + b J_z^2)] \|+>^n` with `J_z = sum Z_j / 2` | Uniform input probabilities, with condition-dependent reference magnitudes |
 
+For an unconditional model, `SpinSymmetricEncoder(n)` starts from `(|0...0> + |1...1>)/sqrt(2)`, the `spin_sym` input of IQPopt (Armengol et al.'s 2D Ising model). It has one condition and no parameters; every reference string has even parity, odd-weight expectations vanish, and outputs are invariant under a global bit flip.
 
 The twisted parity and collective phase encoders build a table indexed by Hamming weight. Their sampling and training queries remain accurate on registers of several dozen qubits, but exact `post_hadamard_amplitudes` is meant for small registers.
 

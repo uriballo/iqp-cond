@@ -32,8 +32,9 @@ def test_probabilities_match_pennylane(n_visible):
         # circuit.
         ciqp.AngleEncoder(np.zeros((1, 1, 5)), axes=("YYYYY",)),
         ciqp.TwistedParityEncoder([0.4, 1.1], [0.3, -0.7], n_qubits=5),
+        ciqp.SpinSymmetricEncoder(5),
     ],
-    ids=["standard IQP", "twisted parity"],
+    ids=["standard IQP", "twisted parity", "spin symmetric"],
 )
 def test_probabilities_match_pennylane_for_other_inputs(encoder):
     ansatz = ciqp.Ansatz.complete(5)

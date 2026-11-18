@@ -32,6 +32,7 @@ from .encoders import (
     CollectivePhaseEncoder,
     Encoder,
     ParityEncoder,
+    SpinSymmetricEncoder,
     TwistedParityEncoder,
 )
 from .guidelines import Measurement, measure
@@ -51,6 +52,7 @@ __all__ = [
     "Measurement",
     "ParityEncoder",
     "Precision",
+    "SpinSymmetricEncoder",
     "TrainingConfig",
     "TwistedParityEncoder",
     "check_encoder",

@@ -1,4 +1,4 @@
-"""The parity, twisted parity and collective phase encoders.
+"""The parity, twisted parity, collective phase and spin-symmetric encoders.
 
 Each encoder is compared against a dense statevector built gate by gate in
 numpy, independently of its shell table or closed form, and against the
@@ -7,6 +7,8 @@ PennyLane conformance check.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -14,6 +16,7 @@ import pytest
 
 import iqp_cond as ciqp
 from iqp_cond.encoders import ExactEncoder
+from iqp_cond.estimator import estimate_pauli_z
 from iqp_cond.verification import check_encoder
 
 N_QUBITS = 5
@@ -102,6 +105,7 @@ ENCODERS = {
     "parity": make_parity,
     "twisted": make_twisted,
     "collective": make_collective,
+    "spin_symmetric": lambda: ciqp.SpinSymmetricEncoder(N_QUBITS),
 }
 
 
@@ -118,6 +122,10 @@ def dense_references(name: str) -> np.ndarray:
                 for t, mu in [(0.0, 0.0), (0.4, 0.8), (1.3, -0.5)]
             ],
         )
+    if name == "spin_symmetric":
+        state = np.zeros(1 << N_QUBITS)
+        state[[0, -1]] = 2**-0.5
+        return hadamard_transform(state)[None]
     return np.stack(
         [
             hadamard_transform(collective_input(a, b, N_QUBITS))
@@ -217,7 +225,9 @@ def test_parity_encoder_ratios_stay_bounded_on_large_registers() -> None:
     )
 
 
-@pytest.mark.parametrize("name", ENCODERS)
+@pytest.mark.parametrize(
+    "name", [name for name in ENCODERS if name != "spin_symmetric"]
+)
 def test_encoder_is_a_pytree_that_selects_conditions(name: str) -> None:
     encoder = ENCODERS[name]()
     leaves, treedef = jax.tree_util.tree_flatten(encoder)
@@ -244,6 +254,16 @@ def test_encoder_is_a_pytree_that_selects_conditions(name: str) -> None:
         encoder.select(encoder.n_conditions)
     with pytest.raises(IndexError, match="condition"):
         encoder.preparation(-1)
+
+
+def test_spin_symmetric_encoder_has_one_condition() -> None:
+    encoder = ciqp.SpinSymmetricEncoder(N_QUBITS)
+    leaves, treedef = jax.tree_util.tree_flatten(encoder)
+    assert leaves == []
+    assert jax.tree_util.tree_unflatten(treedef, leaves) == encoder
+    assert encoder.n_conditions == 1
+    with pytest.raises(IndexError, match="condition"):
+        encoder.preparation(1)
 
 
 def test_encoders_validate_their_inputs() -> None:
@@ -288,3 +308,60 @@ def test_twisted_encoder_trains_through_the_public_api() -> None:
     )
     assert result.best_params.shape == (ansatz.n_parameters,)
     assert model.sample(result.best_params, 4, seed=5).shape == (2, 4, 4)
+
+
+def iqpopt_spin_sym_expectations(params, generators, masks):
+    """IQPopt's ``spin_sym`` estimator summed over every string, so exact.
+
+    IQPopt draws ``z`` uniformly and weights ``cos(2 theta.F @ C(z))`` by
+    ``2 - |a| mod 2 - 2 (|z| mod 2)`` (``IqpSimulator.op_expval_batch``).
+    """
+    flips = jnp.mod(masks @ generators.T, 2.0)
+    total = 0.0
+    for chunk in jnp.split(jnp.asarray(bits_of(generators.shape[1]), float), 16):
+        characters = 1.0 - 2.0 * jnp.mod(chunk @ generators.T, 2.0)
+        weights = (
+            2.0
+            - jnp.mod(masks.sum(1), 2.0)[None, :]
+            - 2.0 * jnp.mod(chunk.sum(1), 2.0)[:, None]
+        )
+        total = total + jnp.sum(
+            weights * jnp.cos(characters @ (2.0 * params * flips).T), axis=0
+        )
+    return total / 2 ** generators.shape[1]
+
+
+def test_spin_symmetric_expectations_match_iqpopt_on_its_2d_ising_model() -> None:
+    """IQPopt's 2D Ising parameters, generators and masks (``spin_sym=True``).
+
+    Averaging the library's per-sample values over every even-weight string
+    gives the exact expectations, as IQPopt's estimator over every string does;
+    the gradients of a weighted sum of them agree too.
+    """
+    reference = np.load(Path(__file__).parent / "data/iqpopt_spin_sym_2d_ising.npz")
+    params = jnp.asarray(reference["params"])
+    generators = jnp.asarray(reference["generators"], float)
+    masks = jnp.asarray(reference["masks"], float)
+    encoder = ciqp.SpinSymmetricEncoder(generators.shape[1])
+    strings = bits_of(generators.shape[1])
+    even = jnp.asarray(strings[strings.sum(1) % 2 == 0], float)
+    mix = jnp.asarray(np.random.default_rng(0).normal(size=masks.shape[0]))
+
+    def library(params):
+        values = [
+            estimate_pauli_z(params, generators, encoder, masks, samples=chunk).values
+            for chunk in jnp.split(even, 8)
+        ]
+        return jnp.mean(jnp.stack(values), axis=0)[0]
+
+    expected = iqpopt_spin_sym_expectations(params, generators, masks)
+    np.testing.assert_allclose(library(params), expected, rtol=0, atol=1e-12)
+    np.testing.assert_array_equal(library(params)[16:], 0.0)
+    np.testing.assert_allclose(
+        jax.grad(lambda p: library(p) @ mix)(params),
+        jax.grad(lambda p: iqpopt_spin_sym_expectations(p, generators, masks) @ mix)(
+            params
+        ),
+        rtol=0,
+        atol=1e-12,
+    )

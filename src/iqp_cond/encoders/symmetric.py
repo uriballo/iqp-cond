@@ -2,10 +2,10 @@
 
 Each encoder treats some qubits identically.  For the parity encoders these are
 the leaves ``0, ..., n - 2``, and the last qubit is a distinguished root.  The
-collective phase encoder treats every qubit identically.  The post-Hadamard
-amplitudes ``psi_c(z)`` then depend only on the leaf Hamming weight and the
-root bit, so sampling and ratio queries reduce to a table with one entry per
-weight shell, even though the states are entangled.
+collective phase and spin-symmetric encoders treat every qubit identically.
+The post-Hadamard amplitudes ``psi_c(z)`` then depend only on the leaf Hamming
+weight and the root bit, so sampling and ratio queries reduce to a table with
+one entry per weight shell, even though the states are entangled.
 
 :class:`ParityEncoder`
     ``RX(t)`` on every leaf followed by a CNOT from each leaf to the root.
@@ -16,6 +16,9 @@ weight shell, even though the states are entangled.
 :class:`CollectivePhaseEncoder`
     Linear and quadratic phases in the collective spin ``J_z`` applied to the
     uniform superposition.
+:class:`SpinSymmetricEncoder`
+    The input ``(|0...0> + |1...1>)/sqrt(2)`` of IQPopt's ``spin_sym``, for an
+    unconditional model.
 
 The shell-table encoders find their reference amplitudes with a Krawtchouk
 transform.  That transform is an alternating sum whose absolute rounding error
@@ -24,7 +27,7 @@ and so do ratio queries at sampled strings.  Beyond about 24 qubits, however,
 shells with negligible probability lose their relative accuracy, so
 :meth:`post_hadamard_amplitudes` is exact only on small registers.
 Construction checks normalisation and raises :class:`FloatingPointError` if it
-fails.  All three encoders store qubit ``q`` as bit ``q`` of a little-endian
+fails.  All four encoders store qubit ``q`` as bit ``q`` of a little-endian
 index and on PennyLane wire ``q``, like :class:`~iqp_cond.AngleEncoder`.
 """
 
@@ -32,6 +35,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from math import comb, lgamma
 from typing import ClassVar
 
@@ -44,6 +48,7 @@ from .base import _safe_ratio, _select_condition
 __all__ = [
     "CollectivePhaseEncoder",
     "ParityEncoder",
+    "SpinSymmetricEncoder",
     "TwistedParityEncoder",
 ]
 
@@ -550,5 +555,67 @@ class CollectivePhaseEncoder(_ShellEncoder):
                 for right in range(left + 1, n):
                     qml.IsingZZ(second, wires=[left, right])
             qml.GlobalPhase(second * n / 4)
+
+        return queue
+
+
+@partial(jax.tree_util.register_dataclass, data_fields=[], meta_fields=["n_qubits"])
+@dataclass(frozen=True)
+class SpinSymmetricEncoder:
+    """The spin-symmetric input ``(|0...0> + |1...1>)/sqrt(2)``, one condition.
+
+    This is the initial state of IQPopt's ``spin_sym`` option (Armengol
+    et al., arXiv:2503.02934, used there for the 2D Ising data), which applies
+    ``PauliRot(pi/2, "Y" + "X" * (n - 1))`` before the Hadamard layer.  The
+    post-Hadamard amplitude is ``2**((1 - n)/2)`` on even-weight strings and
+    zero on odd ones, so samples are uniform over even weights, an even-weight
+    mask has ratio one and an odd-weight mask ratio zero: the model output is
+    invariant under a global bit flip, and odd-weight expectations vanish.
+    IQPopt instead samples every string uniformly and weights each sample;
+    both estimators are unbiased for the same expectations.  The encoder has
+    no array leaves, so it always has one condition.
+    """
+
+    n_qubits: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "n_qubits", _register_size(self.n_qubits, 2))
+
+    @property
+    def n_conditions(self) -> int:
+        """Number of conditions in the batch, always one."""
+        return 1
+
+    def sample(self, key: jax.Array, n_samples: int) -> jnp.ndarray:
+        """Draw ``(1, n_samples, n_qubits)`` uniform even-weight bitstrings."""
+        leaves = jax.random.bernoulli(
+            key, shape=(1, n_samples, self.n_qubits - 1)
+        ).astype(jnp.float64)
+        root = jnp.mod(jnp.sum(leaves, axis=-1, keepdims=True), 2.0)
+        return jnp.concatenate([leaves, root], axis=-1)
+
+    def amplitude_ratios(self, samples: jnp.ndarray, masks: jnp.ndarray) -> jnp.ndarray:
+        """Return ``(1, n_samples, n_masks)`` ratios: 1 for even masks, else 0."""
+        even = jnp.mod(jnp.sum(masks, axis=-1), 2.0) == 0.0
+        return jnp.broadcast_to(
+            even.astype(masks.dtype), (*samples.shape[:2], masks.shape[0])
+        )
+
+    def post_hadamard_amplitudes(self) -> jnp.ndarray:
+        """Return ``(1, 2**n_qubits)`` little-endian amplitudes."""
+        n = self.n_qubits
+        weights = ((np.arange(1 << n)[:, None] >> np.arange(n)) & 1).sum(axis=1)
+        return jnp.asarray(np.where(weights % 2 == 0, 2 ** ((1 - n) / 2), 0.0)[None])
+
+    def preparation(self, condition: int) -> Callable[[], None]:
+        """Return a callable queuing IQPopt's ``PauliRot`` preparation."""
+        if condition != 0:
+            raise IndexError(f"condition {condition} outside the batch")
+        import pennylane as qml
+
+        def queue() -> None:
+            qml.PauliRot(
+                np.pi / 2, "Y" + "X" * (self.n_qubits - 1), wires=range(self.n_qubits)
+            )
 
         return queue

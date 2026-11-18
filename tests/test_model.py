@@ -27,6 +27,7 @@ def test_package_root_is_the_compact_workflow_api() -> None:
         "Measurement",
         "ParityEncoder",
         "Precision",
+        "SpinSymmetricEncoder",
         "TrainingConfig",
         "TwistedParityEncoder",
         "check_encoder",
