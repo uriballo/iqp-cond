@@ -60,6 +60,8 @@ select = ["E", "F", "I", "N", "W", "B", "UP", "RUF"]
 # Notebook cells compile separately, so a `from __future__` import has to stay
 # in the cell that needs it, which F404 reads as a misplaced import.
 "*.ipynb" = ["F404"]
+# The step-noise parts keep the paper's notation (S, R, A, B, C, F).
+"{src/iqp_cond/guidelines.py,tests/test_guidelines.py}" = ["N803", "N806"]
 
 [tool.ruff.format]
 quote-style = "double"

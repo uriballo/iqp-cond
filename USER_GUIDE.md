@@ -77,6 +77,44 @@ If `initial_params` is omitted, initialization uses pooled training data and a m
 
 `TrainingResult` contains `best_params` and `final_params`, the `best_step` and `best_validation_loss`, plus `train_steps`, `train_losses`, `validation_steps`, and `validation_losses`. Use `best_params` for evaluation; validation selects that checkpoint.
 
+## Setting samples and masks
+
+Each update's gradient carries Monte Carlo noise from its `mc_samples` reference samples `S` and its `n_ops` masks `R`, on top of the data noise of its `batch_size` rows `B`. For one (condition, bandwidth) cell the noise variance is `A/R + sigma_1^2/S + B_int/(R S)`: a mask part, a sample part and their interaction. `ciqp.measure(model, params, training_targets, config, key)` estimates these parts for every cell at `params`, together with the matching ratio `gamma`, the sample noise of one reference draw relative to the data noise of one row, and returns a `Measurement` with two settings:
+
+- `samples`, `S = gamma B` rounded to a power of two and at least 4, so the model side is as noisy as the batch;
+- `masks`, `R* = sum (A + B_int/S) / sum (sigma_1^2/S)` over the cells, rounded to a power of two and capped at `r_cap`, the mask count at which the mask and sample terms are equal.
+
+The per-cell numbers are kept in `gamma_numerators`, `gamma_denominators`, `mask_parts`, `sample_parts` and `interaction_parts`, each shaped `(conditions, bandwidths)`. Every cell uses its own table of `masks=4096` masks, whatever `config.n_ops`, and its own draws from `key`, and the measurement runs in float64 whatever `config.precision`. It needs raw-sample targets and raises `ValueError` when `gamma`, the summed `sigma_1^2` or `R*` is not positive and finite. Each update draws one cell, so the variance between the cells' gradients is not part of the estimate.
+
+The parts move during training. At initialization `gamma` is typically 0.03-0.2 against about 0.5 for trained parameters, and `R*` is near 1e4 early against hundreds later, so settings measured at the starting parameters mislead. Measure fixed settings at trained or warm parameters:
+
+```python
+import dataclasses
+
+import jax
+import numpy as np
+import iqp_cond as ciqp
+
+n_qubits = 6
+encoder = ciqp.AngleEncoder(np.zeros((1, 1, n_qubits)), axes=("Y" * n_qubits,))
+model = ciqp.ConditionalModel(ciqp.Ansatz.complete(n_qubits), encoder)
+rng = np.random.default_rng(0)
+
+
+def draw(n_rows):
+    """Rows that are all zeros or all ones, with each bit flipped at rate 0.1."""
+    ones = rng.random((1, n_rows, 1)) < 0.5
+    return (ones ^ (rng.random((1, n_rows, n_qubits)) < 0.1)).astype(float)
+
+
+training_targets, validation_targets = draw(1024), draw(256)
+
+config = ciqp.TrainingConfig(steps=500)
+warm = ciqp.train(model, training_targets, validation_targets, seed=0, config=config)
+report = ciqp.measure(model, warm.best_params, training_targets, config, jax.random.PRNGKey(1))
+config = dataclasses.replace(config, mc_samples=report.samples, n_ops=report.masks)
+```
+
 ## Estimate expectations and sample
 
 `model.estimate_pauli_z(params, masks, key=..., n_samples=...)` estimates visible Pauli-Z moments and returns an `ExpectationEstimate` with values shaped `(conditions, masks)`. Supply either a random key and a sample count, or pre-drawn `samples=` instead. Set `return_samples=True` to retain per-sample values and access Monte Carlo standard errors through `standard_errors`. Ancilla identity padding is handled automatically for visible-width masks.

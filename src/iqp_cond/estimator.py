@@ -185,6 +185,30 @@ def _ratio_sample_values(
     return _sample_values(encoder.amplitude_ratios(samples, masks), phases, arithmetic)
 
 
+def _gradient_terms(
+    params: jnp.ndarray,
+    generators: jnp.ndarray,
+    encoder: Encoder,
+    masks: jnp.ndarray,
+    samples: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Return one condition's per-sample, per-mask gradient terms in float64.
+
+    ``encoder`` covers one condition, ``samples`` has shape ``(S, qubits)`` and
+    visible-width ``masks`` are padded with identity on the ancillas.  The
+    values ``v = Re[R exp(i phi)]`` have the derivative
+    ``d v / d theta = s C * F`` with ``s = 2 Im[R exp(i phi)]``, the sample
+    characters ``C`` of shape ``(S, generators)`` and the mask flips ``F`` of
+    shape ``(R, generators)``; ``v`` and ``s`` have shape ``(S, R)``.
+    """
+    masks = pad_visible_masks(masks, encoder.n_qubits - masks.shape[1])
+    characters = 1.0 - 2.0 * jnp.mod(samples @ generators.T, 2.0)
+    flips = jnp.mod(masks @ generators.T, 2.0)
+    phases = characters @ (-2.0 * flips * params[None, :]).T
+    terms = encoder.amplitude_ratios(samples[None], masks)[0] * jnp.exp(1j * phases)
+    return jnp.real(terms), 2.0 * jnp.imag(terms), characters, flips
+
+
 def _estimate(
     params: jnp.ndarray,
     generators: jnp.ndarray,

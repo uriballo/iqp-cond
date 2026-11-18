@@ -9,7 +9,8 @@ basis sampling and amplitude-ratio queries; that requirement is the
 
 The compact public API covers the full workflow: build a
 :class:`ConditionalModel` from an :class:`Ansatz` and an :class:`Encoder`,
-estimate moments, train, and sample through model methods.  Numerical building
+estimate moments, train, set the sample and mask counts with :func:`measure`,
+and sample through model methods.  Numerical building
 blocks remain available from their expert submodules.
 
 Importing this package turns on JAX float64
@@ -33,6 +34,7 @@ from .encoders import (
     ParityEncoder,
     TwistedParityEncoder,
 )
+from .guidelines import Measurement, measure
 from .model import Ansatz, ConditionalModel
 from .training import TrainingConfig, train
 
@@ -45,11 +47,13 @@ __all__ = [
     "ConditionalModel",
     "Encoder",
     "EncoderCheck",
+    "Measurement",
     "ParityEncoder",
     "Precision",
     "TrainingConfig",
     "TwistedParityEncoder",
     "check_encoder",
+    "measure",
     "precision",
     "train",
 ]
