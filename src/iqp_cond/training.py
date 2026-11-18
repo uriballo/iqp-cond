@@ -317,30 +317,34 @@ def _make_training_steps(
     config: TrainingConfig,
     optimizer: optax.GradientTransformation,
     random_key: jax.Array,
-    training_targets: jnp.ndarray,
-    batch_indices: jnp.ndarray,
     sigmas: jnp.ndarray,
+    n_samples: int,
+    n_ops: int,
 ) -> Callable:
     """Compile a scan of updates, one (condition, bandwidth) cell per update.
 
     The condition indexes the encoder leaves, the targets, and the batch
-    schedule on the device, so one program serves every condition.  Under
+    rows on the device, so one program serves every condition.  Under
     per-step refresh the bandwidth indexes ``sigmas``; under cache refresh it
     switches between the bank's bandwidths, whose evaluated widths differ.
+    ``n_samples`` and ``n_ops`` fix the program's shapes, so each setting
+    compiles once.
     """
 
     def cell_loss(
         params: jnp.ndarray,
         encoders: Encoder,
         bank: OperatorBank | TargetMoments | None,
+        targets: jnp.ndarray | None,
         step: jax.Array,
         condition: jax.Array,
         bandwidth: jax.Array,
+        batch: jax.Array | None,
     ) -> jnp.ndarray:
         encoder = _select_condition(encoders, condition)
         if isinstance(bank, TargetMoments):
             return _moment_cell_loss(params, encoder, bank, step, condition, bandwidth)
-        target_batch = training_targets[condition, batch_indices[step, condition]][None]
+        target_batch = targets[condition, batch[condition]][None]
 
         def loss(**mask_source: object) -> jnp.ndarray:
             return mmd(
@@ -350,7 +354,7 @@ def _make_training_steps(
                 target_batch,
                 jax.random.fold_in(random_key, step),
                 **mask_source,
-                n_samples=config.mc_samples,
+                n_samples=n_samples,
                 # One cell has one condition and one bandwidth, so sharing only
                 # fixes the key layout of the cached-bank cell.
                 shared_samples=True,
@@ -359,7 +363,7 @@ def _make_training_steps(
             ).loss
 
         if bank is None:
-            return loss(sigmas=(sigmas[bandwidth],), n_ops=config.n_ops)
+            return loss(sigmas=(sigmas[bandwidth],), n_ops=n_ops)
         return jax.lax.switch(
             bandwidth,
             [
@@ -372,7 +376,7 @@ def _make_training_steps(
         """One (condition, bandwidth) cell of a moment target.
 
         Cache refresh evaluates the pool's cell; step refresh draws
-        ``config.n_ops`` of its masks in proportion to their weights, each
+        ``n_ops`` of its masks in proportion to their weights, each
         weighted ``q / n_ops`` with ``q`` the cell's nonidentity mass.
         """
         pool = targets.bank
@@ -385,12 +389,10 @@ def _make_training_steps(
             if config.mask_refresh == STEP:
                 mask_key = jax.random.fold_in(jax.random.fold_in(random_key, step), 1)
                 mass = jnp.sum(weights)
-                drawn = jax.random.choice(
-                    mask_key, width, (config.n_ops,), p=weights / mass
-                )
+                drawn = jax.random.choice(mask_key, width, (n_ops,), p=weights / mass)
                 masks, moments = masks[drawn], moments[drawn]
-                weights = jnp.full(config.n_ops, mass / config.n_ops)
-                width = config.n_ops
+                weights = jnp.full(n_ops, mass / n_ops)
+                width = n_ops
             cell_bank = OperatorBank(
                 sigmas=(pool.sigmas[index],),
                 masks=masks[None, None],
@@ -406,7 +408,7 @@ def _make_training_steps(
                 encoder,
                 TargetMoments(cell_bank, moments[None, None]),
                 jax.random.fold_in(random_key, step),
-                n_samples=config.mc_samples,
+                n_samples=n_samples,
                 shared_samples=True,
                 precision=config.precision,
                 sample_chunk=config.sample_chunk,
@@ -426,7 +428,8 @@ def _make_training_steps(
         scaling: tuple[jax.Array, jax.Array],
         encoders: Encoder,
         bank: OperatorBank | None,
-        cells: tuple[jax.Array, jax.Array, jax.Array],
+        targets: jnp.ndarray | None,
+        cells: tuple[jax.Array, jax.Array, jax.Array, jax.Array | None],
     ):
         def update(carry, cell):
             current_params, current_state, (scale, finite_run) = carry
@@ -435,6 +438,7 @@ def _make_training_steps(
                     current_params,
                     encoders,
                     bank,
+                    targets,
                     *cell,
                 )
                 updates, new_state = optimizer.update(
@@ -450,7 +454,7 @@ def _make_training_steps(
                 )
             scaled_loss, scaled_gradient = jax.value_and_grad(
                 lambda *arguments: cell_loss(*arguments) * scale
-            )(current_params, encoders, bank, *cell)
+            )(current_params, encoders, bank, targets, *cell)
             gradient = scaled_gradient / scale
             finite = jnp.all(jnp.isfinite(gradient))
             updates, new_state = optimizer.update(
@@ -604,15 +608,21 @@ def train(
         batch_indices = jnp.asarray(
             _batch_schedule(n_conditions, training_targets.shape[1], config, seed)
         )
-    training_steps = _make_training_steps(
-        model,
-        config,
-        optimizer,
-        jax.random.PRNGKey(seed),
-        sample_targets,
-        batch_indices,
-        jnp.asarray(sigmas, dtype=jnp.float64),
-    )
+    compiled_steps = {}
+
+    def training_steps(n_samples: int, n_ops: int) -> Callable:
+        if (n_samples, n_ops) not in compiled_steps:
+            compiled_steps[n_samples, n_ops] = _make_training_steps(
+                model,
+                config,
+                optimizer,
+                jax.random.PRNGKey(seed),
+                jnp.asarray(sigmas, dtype=jnp.float64),
+                n_samples,
+                n_ops,
+            )
+        return compiled_steps[n_samples, n_ops]
+
     evaluate_validation = _make_validation(
         model,
         config,
@@ -644,15 +654,19 @@ def train(
     for start in range(0, config.steps, config.validation_interval):
         stop = min(start + config.validation_interval, config.steps)
         params, optimizer_state, scaling, losses, scales, finite = training_steps(
+            config.mc_samples, config.n_ops
+        )(
             params,
             optimizer_state,
             scaling,
             encoders,
             bank,
+            sample_targets,
             (
                 jnp.arange(start, stop),
                 jnp.asarray(condition_indices[start:stop]),
                 jnp.asarray(bandwidth_indices[start:stop]),
+                None if batch_indices is None else batch_indices[start:stop],
             ),
         )
         train_losses.append(losses)

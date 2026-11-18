@@ -380,9 +380,9 @@ def test_compiled_cell_matches_the_selected_condition_objective(
         config,
         optimizer,
         key,
-        jnp.asarray(training),
-        jnp.asarray(batch_indices),
         sigmas,
+        config.mc_samples,
+        config.n_ops,
     )
     step, condition, bandwidth = 3, 1, 1
     _, _, _, losses, _, _ = training_steps(
@@ -391,7 +391,13 @@ def test_compiled_cell_matches_the_selected_condition_objective(
         (jnp.asarray(1.0, jnp.float64), jnp.asarray(0)),
         model.encoder,
         None,
-        (jnp.asarray([step]), jnp.asarray([condition]), jnp.asarray([bandwidth])),
+        jnp.asarray(training),
+        (
+            jnp.asarray([step]),
+            jnp.asarray([condition]),
+            jnp.asarray([bandwidth]),
+            jnp.asarray(batch_indices[step : step + 1]),
+        ),
     )
     expected = mmd(
         params,
