@@ -571,9 +571,15 @@ class SpinSymmetricEncoder:
     zero on odd ones, so samples are uniform over even weights, an even-weight
     mask has ratio one and an odd-weight mask ratio zero: the model output is
     invariant under a global bit flip, and odd-weight expectations vanish.
-    IQPopt instead samples every string uniformly and weights each sample;
-    both estimators are unbiased for the same expectations.  The encoder has
-    no array leaves, so it always has one condition.
+    IQPopt instead samples every string uniformly and weights each sample by
+    ``2 - |a| mod 2 - 2 (|z| mod 2)``; both estimators are unbiased for the
+    same expectations, but not equally noisy.  For an even mask with mean
+    ``mu`` and ``E[cos^2]`` over even strings, the per-sample variance is
+    ``E[cos^2] - mu^2`` here and ``2 E[cos^2] - mu^2`` in IQPopt, so ``S``
+    samples here are worth about ``2 S`` there; an odd mask is exactly zero
+    here and noisy in IQPopt, and masks drawn with odd weight spend part of
+    ``R`` on moments that are zero.  The encoder has no array leaves, so it
+    always has one condition.
     """
 
     n_qubits: int

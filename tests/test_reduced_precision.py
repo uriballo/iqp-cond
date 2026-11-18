@@ -258,3 +258,31 @@ def test_stochastic_rounding_of_one_backward_knob_is_unbiased(data):
     nearest_error = float(jnp.linalg.norm(nearest - exact))
     assert nearest_error > 0
     assert float(jnp.linalg.norm(mean - exact)) < 0.2 * nearest_error
+
+
+@pytest.mark.parametrize("variant", ["uniform", "split"])
+@pytest.mark.parametrize("accumulation", ["blocked", "hardware"])
+def test_an_unset_backward_knob_keeps_the_variant_rounding(data, variant, accumulation):
+    # fp32 rounds nothing in the float32 contraction, so setting it must leave
+    # the variant's gradient unchanged.
+    def gradient(**knobs):
+        recipe = precision("bf16", variant=variant, accumulation=accumulation, **knobs)
+        return jax.grad(lambda p: loss(data, p, recipe))(jnp.asarray(data["params"]))
+
+    np.testing.assert_array_equal(gradient(phase_gradient="fp32"), gradient())
+
+
+def test_stochastic_rounding_refuses_sample_chunks(data):
+    with pytest.raises(ValueError, match="sample_chunk"):
+        mmd(
+            jnp.asarray(data["params"]),
+            data["model"].ansatz.generators,
+            data["model"].encoder,
+            data["targets"],
+            jax.random.key(3),
+            sigmas=(1.0,),
+            n_ops=16,
+            n_samples=64,
+            precision="fp8_stochastic",
+            sample_chunk=16,
+        )

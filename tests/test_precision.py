@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 import ml_dtypes
 import numpy as np
@@ -12,6 +13,7 @@ from iqp_cond._precision import (
     Precision,
     _Arithmetic,
     _blocked_product,
+    _stochastic_rounder,
     accumulate,
     precision,
     quantize,
@@ -168,6 +170,8 @@ def test_shorthand_sets_every_knob_from_a_base_and_overrides_single_knobs():
         lambda: Precision(cosines="nvfp4"),
         lambda: Precision(rounding=()),
         lambda: Precision(rounding=("gradient",)),
+        lambda: precision("bf16", statistics="fp32", rounding=("statistics",)),
+        lambda: precision("bf16", rounding=("phase_gradient",)),
     ],
     ids=[
         "unknown format",
@@ -179,6 +183,8 @@ def test_shorthand_sets_every_knob_from_a_base_and_overrides_single_knobs():
         "block format on the cosines",
         "no stochastic field",
         "unknown stochastic field",
+        "stochastic field in fp32",
+        "stochastic field unset",
     ],
 )
 def test_invalid_configurations_are_rejected_when_built(build):
@@ -246,7 +252,9 @@ def test_hardware_accumulation_rounds_the_fp32_product_to_the_format():
         .astype(np.float16)
         .astype(np.float64)
     )
-    recipe = precision(gemm_accumulate="fp16", gemm_inputs="fp32")
+    recipe = precision(
+        gemm_accumulate="fp16", gemm_inputs="fp32", accumulation="hardware"
+    )
     actual = _Arithmetic(recipe).gemm(jnp.asarray(characters), jnp.asarray(flips))
     np.testing.assert_allclose(np.asarray(actual), expected, rtol=0, atol=0)
 
@@ -287,7 +295,28 @@ def test_cosines_follow_the_phases_unless_set():
 
 
 def test_a_tuple_rounds_only_the_named_fields_stochastically():
-    recipe = precision("bf16", rounding=["gemm_inputs", "phase_gradient"])
+    recipe = precision(
+        "bf16", phase_gradient="bf16", rounding=["gemm_inputs", "phase_gradient"]
+    )
     assert recipe.rounding == ("gemm_inputs", "phase_gradient")
     assert recipe.stochastic("phase_gradient")
     assert not recipe.stochastic("statistics")
+
+
+def test_any_stochastic_rounding_needs_a_key():
+    for rounding in ("stochastic", ("statistics",)):
+        with pytest.raises(ValueError, match="key"):
+            _Arithmetic(precision("bf16", rounding=rounding))
+
+
+def test_forward_and_backward_bits_are_independent_and_fresh_per_site():
+    x = jnp.linspace(0.3, 0.9, 4096)
+    key = jax.random.key(0)
+    forward, vjp = jax.vjp(lambda v: _stochastic_rounder("bf16", "uniform")(v, key), x)
+    (backward,) = vjp(x)
+    # Shared bits would round x identically in both passes.
+    assert float(jnp.mean(forward == backward)) < 0.9
+    arithmetic = _Arithmetic(precision("bf16", rounding="stochastic"), key)
+    first = arithmetic.round(x, "statistics")
+    second = arithmetic.round(x, "statistics")
+    assert float(jnp.mean(first == second)) < 0.9

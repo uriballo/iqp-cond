@@ -207,21 +207,25 @@ class Precision:
     The backward pass follows ``variant``: ``"uniform"`` rounds the gradient
     leaving each operation to that operation's format, and ``"split"`` runs
     the backward computations in fp32.  ``phase_gradient`` and
-    ``backward_accumulate`` set the phase contraction's backward on their own,
-    in either variant: the gradient with respect to the phases is rounded to
-    ``phase_gradient`` where it enters the backward contraction, which sums the
-    gradient with respect to the flips in ``backward_accumulate``.  Setting
-    either one stops the variant from rounding that gradient to
-    ``gemm_inputs`` or ``gemm_accumulate``, and an unset one is left
-    unrounded.  Both round within the forward contraction's dtype (float64
-    when ``gemm_accumulate`` is fp64, float32 otherwise).  Under the uniform
-    variant the gradient reaching the contraction is already rounded to
-    ``phases``; the split variant isolates ``phase_gradient``.
+    ``backward_accumulate`` add roundings to the phase contraction's backward:
+    the gradient with respect to the phases is rounded to ``phase_gradient``
+    where it enters the backward contraction, which sums the gradient with
+    respect to the flips in ``backward_accumulate``, following
+    ``accumulation``.  Both round within the forward contraction's dtype
+    (float64 when ``gemm_accumulate`` is fp64, float32 otherwise).  Under the
+    uniform variant the variant's own roundings stay: the gradient reaching
+    the contraction is already rounded to ``phases`` (and, with
+    ``"hardware"`` accumulation, to ``gemm_accumulate``), the gradient leaving
+    it is rounded to ``gemm_inputs``, and an unset ``backward_accumulate``
+    sums as the forward contraction does.  Under the split variant only the
+    two knobs round, an unset one not at all, so the split variant isolates
+    each of them.
 
-    Below fp32, ``gemm_accumulate`` follows ``accumulation``: ``"hardware"``
-    accumulates in fp32 and rounds the contraction's output to the format, as
-    tensor cores do; ``"blocked"`` keeps a genuine low-precision accumulator
-    (blocks of 32 and a rounded running sum), a pessimistic bound.
+    Below fp32, ``gemm_accumulate`` follows ``accumulation``: ``"blocked"``,
+    the default, keeps a genuine low-precision accumulator (blocks of 32 and a
+    rounded running sum), a pessimistic bound; ``"hardware"`` accumulates in
+    fp32 and rounds the contraction's output to the format, as tensor cores
+    do.
 
     ``rounding="stochastic"`` rounds every value below fp32 up or down at
     random, with probability set by its distance to each neighbour, so the
@@ -244,7 +248,7 @@ class Precision:
     statistics: str = "fp64"
     ratios: str = "fp64"
     variant: str = "uniform"
-    accumulation: str = "hardware"
+    accumulation: str = "blocked"
     rounding: str | tuple[str, ...] = "nearest"
     scaling: str = "amax"
     cosines: str | None = None
@@ -287,6 +291,15 @@ class Precision:
                     "rounding must name at least one format field, and only "
                     f"those; got {self.rounding!r}"
                 )
+            unrounded = [
+                knob
+                for knob in self.rounding
+                if self.format_of(knob) in (None, "fp64", "fp32")
+            ]
+            if unrounded:
+                raise ValueError(
+                    f"rounding names {unrounded}, which do not round below fp32"
+                )
         if self.scaling not in ("amax", "pow2"):
             raise ValueError(f"scaling must be 'amax' or 'pow2', not {self.scaling!r}")
 
@@ -319,7 +332,7 @@ def precision(
     base: str = "fp64",
     *,
     variant: str = "uniform",
-    rounding: str = "nearest",
+    rounding: str | tuple[str, ...] = "nearest",
     scaling: str = "amax",
     **knobs: str,
 ) -> Precision:
@@ -333,11 +346,10 @@ def precision(
 
 
 PRECISIONS = {name: precision(name) for name in ("fp64", "fp32", *_ELEMENT_FORMATS)}
-# The fast setting of the precision study: fp8 E4M3 with stochastic rounding,
-# the statistics in fp32, which kept training within 1-3% of fp64 at 64 and
-# 128 qubits.  The uniform presets above are the others.
+# fp8 E4M3 with stochastic rounding, the statistics in fp32 and the
+# contraction accumulated in fp32 as tensor cores do.
 PRECISIONS["fp8_stochastic"] = precision(
-    "fp8_e4m3", statistics="fp32", rounding="stochastic"
+    "fp8_e4m3", statistics="fp32", rounding="stochastic", accumulation="hardware"
 )
 
 
@@ -525,7 +537,7 @@ class _Arithmetic:
 
     def __init__(self, value: str | Precision, key: jax.Array | None = None) -> None:
         self.precision = resolve_precision(value)
-        if self.precision.rounding == "stochastic" and key is None:
+        if self.precision.rounding != "nearest" and key is None:
             raise ValueError(
                 "stochastic rounding needs a random key; pass one to the estimator "
                 "or the loss"
@@ -545,22 +557,18 @@ class _Arithmetic:
         self._sites += 1
         return jax.random.fold_in(self._key, self._sites)
 
-    def round(
-        self, x: jnp.ndarray, knob: str, variant: str | None = None
-    ) -> jnp.ndarray:
+    def round(self, x: jnp.ndarray, knob: str) -> jnp.ndarray:
         """Return ``x`` in the knob's format: float64 for fp64, float32 for fp32.
 
         Formats below fp32 round in ``x``'s own dtype, so a float64 value is
-        rounded once, without passing through float32.  ``variant`` overrides
-        the precision's for the backward pass of this rounding.
+        rounded once, without passing through float32.
         """
         name = self.precision.format_of(knob)
         if name == "fp64":
             return x.astype(jnp.float64)
         if name == "fp32":
             return x.astype(jnp.float32)
-        variant = variant or self.precision.variant
-        scaling = self.precision.scaling
+        variant, scaling = self.precision.variant, self.precision.scaling
         key = self._site_key(knob)
         if key is None:
             return _rounder(name, variant, scaling)(x)
@@ -584,21 +592,24 @@ class _Arithmetic:
     def _gemm_with_backward(
         self, characters: jnp.ndarray, flips: jnp.ndarray
     ) -> jnp.ndarray:
-        """:meth:`gemm` with the backward knobs' backward pass.
+        """:meth:`gemm` with the backward knobs' roundings in its backward pass.
 
-        The forward roundings pass their gradients through unchanged, so the
-        contraction's backward alone rounds them.
+        The forward roundings keep the variant's backward, so under the
+        uniform variant the knobs add to its roundings.
         """
         precision = self.precision
         dtype = self.dtype("gemm_accumulate")
-        flips = self.round(flips, "gemm_inputs", "split").astype(dtype)
+        flips = self.round(flips, "gemm_inputs").astype(dtype)
         name = precision.gemm_accumulate
         below_fp32 = name not in ("fp64", "fp32")
         blocked = below_fp32 and precision.accumulation == "blocked"
+        backward_accumulate = precision.backward_accumulate
+        if backward_accumulate is None and blocked and precision.variant == "uniform":
+            backward_accumulate = name
         contract = _contraction(
             name if blocked else None,
             precision.phase_gradient,
-            precision.backward_accumulate,
+            backward_accumulate,
             precision.accumulation,
             precision.scaling,
         )
@@ -609,7 +620,7 @@ class _Arithmetic:
             self._site_key("backward_accumulate"),
         )
         if below_fp32 and not blocked:
-            return self.round(product, "gemm_accumulate", "split")
+            return self.round(product, "gemm_accumulate")
         return product
 
     def sum(self, x: jnp.ndarray, axis: int) -> jnp.ndarray:

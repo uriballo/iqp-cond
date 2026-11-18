@@ -15,7 +15,7 @@ represents each duplicate once with its exact empirical multiplicity.
 A bandwidth is a scalar ``sigma`` (the isotropic kernel) or a length-``n``
 vector of per-qubit bandwidths, the anisotropic product kernel
 ``exp(-sum_i [x_i != y_i] / (2 sigma_i^2))``: mask bit ``i`` is then set with its
-own probability ``p_i``.  :func:`random_anisotropic_sigma` draws such a vector.
+own probability ``p_i``.
 """
 
 from __future__ import annotations
@@ -35,7 +35,6 @@ __all__ = [
     "expected_bodyness_sigmas",
     "mmd_operator_probability",
     "operator_bank",
-    "random_anisotropic_sigma",
     "sample_nonidentity_masks",
     "sample_nonidentity_masks_jax",
 ]
@@ -70,42 +69,6 @@ def expected_bodyness_sigmas(
         float((-2.0 * math.log(1.0 - 2.0 * target / n_visible)) ** -0.5)
         for target in values
     )
-
-
-def random_anisotropic_sigma(
-    n_visible: int,
-    seed: int,
-    *,
-    spread: float = 2.0,
-    bodyness: float = 2.0,
-) -> tuple[float, ...]:
-    """Draw per-qubit bandwidths for a random anisotropic kernel.
-
-    Each ``log sigma_i`` is uniform within a factor ``spread`` of the isotropic
-    bandwidth for the mean bodyness ``bodyness``; one common factor then rescales
-    the vector so the mean bodyness ``sum_i p_i`` equals ``bodyness`` again, which
-    keeps the kernel comparable with the isotropic one at the same target.
-    """
-    if spread < 1.0:
-        raise ValueError("spread must be at least 1")
-    (base,) = expected_bodyness_sigmas(n_visible, (bodyness,))
-    target = min(float(bodyness), 0.49 * n_visible)
-    rng = np.random.default_rng(seed)
-    raw = base * np.exp(rng.uniform(-math.log(spread), math.log(spread), n_visible))
-
-    def bodyness_at(log_scale: float) -> float:
-        sigma = math.exp(log_scale) * raw
-        return float(np.sum((1.0 - np.exp(-1.0 / (2.0 * sigma**2))) / 2.0))
-
-    # The mean bodyness falls as every bandwidth grows, so bisect the scale.
-    low, high = -20.0, 20.0
-    for _ in range(200):
-        middle = 0.5 * (low + high)
-        if bodyness_at(middle) > target:
-            low = middle
-        else:
-            high = middle
-    return tuple(float(value) for value in math.exp(0.5 * (low + high)) * raw)
 
 
 def _valid_bandwidth(sigma, n_visible: int) -> bool:

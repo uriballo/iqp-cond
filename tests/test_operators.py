@@ -18,7 +18,6 @@ from iqp_cond.operators import (
     expected_bodyness_sigmas,
     mmd_operator_probability,
     operator_bank,
-    random_anisotropic_sigma,
     sample_nonidentity_masks,
     sample_nonidentity_masks_jax,
 )
@@ -465,16 +464,6 @@ def test_equal_per_qubit_bandwidths_reproduce_the_isotropic_law() -> None:
         return np.bincount(hamming, weights=np.asarray(weights), minlength=6)
 
     np.testing.assert_allclose(weight_law(vector), weight_law(scalar), atol=4e-3)
-
-
-def test_random_anisotropic_sigma_is_reproducible_and_keeps_the_bodyness() -> None:
-    first = random_anisotropic_sigma(24, seed=7, spread=2.0)
-    assert first == random_anisotropic_sigma(24, seed=7, spread=2.0)
-    assert first != random_anisotropic_sigma(24, seed=8, spread=2.0)
-    sigma = np.asarray(first)
-    p = (1.0 - np.exp(-1.0 / (2.0 * sigma**2))) / 2.0
-    assert np.sum(p) == pytest.approx(2.0, rel=1e-9)
-    assert sigma.max() / sigma.min() <= 4.0 + 1e-12
 
 
 def test_operator_bank_rejects_a_bandwidth_vector_of_the_wrong_length() -> None:
