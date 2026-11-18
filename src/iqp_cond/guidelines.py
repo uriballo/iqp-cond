@@ -19,10 +19,12 @@ ratio ``gamma`` of every cell, and from them the step's settings:
     The mask count at which the mask and sample terms are equal.  Each update
     draws one cell uniformly, so the sums run over the cells.
 
-The parts come from a two-way analysis of variance of one samples x masks
-table of per-sample, per-mask gradient terms with the centring correction; the
-effective parts at ``S`` are ``1.5 v(S) - 0.5 v(S/2)``, which removes the
-second-order term of the plug-in parts.
+The parts come from a two-way analysis of variance of samples x masks tables
+of per-sample, per-mask gradient terms with the centring correction, averaged
+over 16 independent tables at ``S`` and 16 at ``S/2``; the effective parts at
+``S`` are ``1.5 v(S) - 0.5 v(S/2)``, which removes the second-order term of
+the plug-in parts.  One measurement evaluates about
+``(12288 + 24 S) x masks`` terms per cell.
 """
 
 from __future__ import annotations
@@ -49,10 +51,12 @@ __all__ = ["Measurement", "measure"]
 
 Flag = Literal["estimated", "capped", "kept"]
 
-_COVARIANCE_SAMPLES = 16_384
-_GRADIENT_SAMPLES = 16_384
+_COVARIANCE_SAMPLES = 4_096
+_GRADIENT_SAMPLES = 4_096
 _CHUNK = 1_024
+_TABLES = 16
 _MIN_SAMPLES = 4
+_MAX_SAMPLES = 65_536
 
 
 @dataclass(frozen=True)
@@ -176,23 +180,36 @@ def _cell_gamma(params, generators, encoder, masks, weights, rows, key):
     return float(numerator), float(denominator)
 
 
-@partial(jax.jit, static_argnames="n_samples")
-def _table_parts(params, generators, encoder: Encoder, masks, targets, key, n_samples):
-    samples = encoder.sample(key, n_samples)[0]
-    terms = _gradient_terms(params, generators, encoder, masks, samples)
-    return _table_parts_from_terms(*terms, targets)
+@partial(jax.jit, static_argnames=("n_samples", "n_masks"))
+def _table_parts(
+    params, generators, encoder: Encoder, rows, sigma, keys, n_samples, n_masks
+):
+    """Return the mean parts of one table per key, each with fresh masks."""
+
+    def table(key):
+        mask_key, sample_key = jax.random.split(key)
+        masks, weights = sample_nonidentity_masks_jax(
+            mask_key, n_masks, rows.shape[1], sigma
+        )
+        targets = jnp.mean(1.0 - 2.0 * jnp.mod(rows @ masks.T, 2.0), axis=0)
+        samples = encoder.sample(sample_key, n_samples)[0]
+        terms = _gradient_terms(params, generators, encoder, masks, samples)
+        return _table_parts_from_terms(*terms, targets) * jnp.sum(weights) ** 2
+
+    return jnp.mean(jax.lax.map(table, keys), axis=0)
 
 
-def _cell_parts(params, generators, encoder, masks, weights, rows, key, n_samples):
+def _cell_parts(params, generators, encoder, rows, sigma, key, n_samples, n_masks):
     """Return one cell's effective ``(A, sigma_1^2, B_int)`` at ``n_samples``."""
-    targets = jnp.mean(1.0 - 2.0 * jnp.mod(rows @ masks.T, 2.0), axis=0)
     full, half = (
-        _table_parts(params, generators, encoder, masks, targets, k, size)
-        for k, size in zip(
-            jax.random.split(key), (n_samples, n_samples // 2), strict=True
+        _table_parts(params, generators, encoder, rows, sigma, keys, size, n_masks)
+        for keys, size in zip(
+            jax.random.split(key, (2, _TABLES)),
+            (n_samples, n_samples // 2),
+            strict=True,
         )
     )
-    return np.asarray((1.5 * full - 0.5 * half) * jnp.sum(weights) ** 2)
+    return np.asarray(1.5 * full - 0.5 * half)
 
 
 def _power_of_two(value: float) -> int:
@@ -224,17 +241,19 @@ def _measure(
         mask_key, gamma_key, table_key = jax.random.split(
             jax.random.fold_in(jax.random.fold_in(key, condition), bandwidth), 3
         )
-        cell = (
-            _select_condition(model.encoder, condition),
+        encoder = _select_condition(model.encoder, condition)
+        rows = jnp.asarray(training_targets[condition], dtype=jnp.float64)
+        gammas[:, condition, bandwidth] = _cell_gamma(
+            params,
+            generators,
+            encoder,
             *sample_nonidentity_masks_jax(
                 mask_key, masks, model.visible, sigmas[bandwidth]
             ),
-            jnp.asarray(training_targets[condition], dtype=jnp.float64),
+            rows,
+            gamma_key,
         )
-        gammas[:, condition, bandwidth] = _cell_gamma(
-            params, generators, *cell, gamma_key
-        )
-        cells.append((cell, table_key))
+        cells.append((encoder, rows, sigmas[bandwidth], table_key))
     gamma = float(gammas[0].sum() / gammas[1].sum())
 
     def kept(reason: str, *parts: np.ndarray, ratio: float = math.nan) -> Measurement:
@@ -245,14 +264,14 @@ def _measure(
             *gammas, *(parts or (nan, nan, nan)), gamma, ratio, *previous, "kept"
         )
 
-    if not (math.isfinite(gamma) and gamma > 0.0):
-        return kept(f"gamma must be positive and finite, not {gamma}")
+    if not (math.isfinite(gamma) and 0.0 < gamma * config.batch_size <= _MAX_SAMPLES):
+        return kept(
+            f"gamma * batch_size must be positive and at most {_MAX_SAMPLES}, "
+            f"not {gamma * config.batch_size}"
+        )
     samples = max(_MIN_SAMPLES, _power_of_two(gamma * config.batch_size))
     parts = np.stack(
-        [
-            _cell_parts(params, generators, *cell, table_key, samples)
-            for cell, table_key in cells
-        ],
+        [_cell_parts(params, generators, *cell, samples, masks) for cell in cells],
         axis=-1,
     ).reshape(3, *shape)
     mask_parts, sample_parts, interaction_parts = parts
@@ -266,10 +285,10 @@ def _measure(
     )
     if not (math.isfinite(ratio) and ratio > 0.0):
         return kept(f"R* must be positive and finite, not {ratio}", *parts, ratio=ratio)
-    n_masks = _power_of_two(ratio)
-    flag = "capped" if n_masks > r_cap else "estimated"
+    if ratio > r_cap:
+        return Measurement(*gammas, *parts, gamma, ratio, samples, r_cap, "capped")
     return Measurement(
-        *gammas, *parts, gamma, ratio, samples, min(n_masks, r_cap), flag
+        *gammas, *parts, gamma, ratio, samples, _power_of_two(ratio), "estimated"
     )
 
 
@@ -280,7 +299,7 @@ def measure(
     config: TrainingConfig,
     key: jax.Array,
     *,
-    masks: int = 4096,
+    masks: int = 1024,
     r_cap: int = 65536,
 ) -> Measurement:
     """Measure the step noise at ``params`` and set the samples and masks.
@@ -290,19 +309,24 @@ def measure(
     ``config`` supplies the batch size and the bandwidths.  Every (condition,
     bandwidth) cell draws ``masks`` masks from the library's mask law,
     whatever ``config.n_ops``, and its own reference samples from ``key``; the
-    measurement runs in float64 whatever ``config.precision``.  The returned
-    ``samples`` is ``gamma * batch_size`` rounded to a power of two, at least
-    4, and ``masks`` is ``R*`` rounded to a power of two and capped at
-    ``r_cap``.  A non-positive or non-finite ``gamma``, summed ``sigma_1^2`` or
-    ``R*`` raises :class:`ValueError`.
+    measurement runs in float64 whatever ``config.precision`` and evaluates
+    about ``(12288 + 24 S) x masks`` terms per cell.  The returned ``samples``
+    is ``gamma * batch_size`` rounded to a power of two, at least 4, and
+    ``masks`` is ``R*`` rounded to a power of two and capped at ``r_cap``, a
+    power of two.  A non-positive or non-finite ``gamma``, summed
+    ``sigma_1^2`` or ``R*``, or ``gamma * batch_size`` above 65536, raises
+    :class:`ValueError`.
 
-    The noise changes as the model trains: at initialization ``gamma`` is
-    typically 0.03-0.2 against about 0.5 for trained parameters, and ``R*`` is
-    near 1e4 against hundreds later.  Fixed settings should therefore be
-    measured at trained or warm parameters; :class:`iqp_cond.Adaptation`,
+    The parts move during training, so settings measured at the starting
+    parameters can mislead.  On the 484-805-qubit published models of
+    Armengol et al., ``gamma`` was 0.03-0.2 at their initialization against
+    about 0.5 trained, and on teacher circuits trained from a random start
+    ``R*`` fell from about 1e4 to hundreds.  Fixed settings should therefore
+    be measured at trained or warm parameters; :class:`iqp_cond.Adaptation`,
     which remeasures during training, is the recommended route.  Each update
     draws one cell, so the variance between the cells' gradients is outside
-    the parts.
+    the parts, and the parts use targets from every training row while
+    training uses the batch's moments, which adds variance.
     """
     if isinstance(training_targets, TargetMoments):
         raise ValueError("measure needs raw-sample training targets")
@@ -310,6 +334,6 @@ def measure(
     _validate_training_inputs(model, training_targets, training_targets)
     if masks < 2:
         raise ValueError("masks must be at least two")
-    if r_cap < 1:
-        raise ValueError("r_cap must be positive")
+    if r_cap < 1 or r_cap & (r_cap - 1):
+        raise ValueError("r_cap must be a positive power of two")
     return _measure(model, params, training_targets, config, key, masks, r_cap, None)

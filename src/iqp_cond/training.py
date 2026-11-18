@@ -58,22 +58,23 @@ class Adaptation:
 
     Every ``every`` updates, from the first, :func:`train` measures the step
     noise at the current parameters with :func:`iqp_cond.measure`, on
-    ``masks`` masks per cell, and trains the following updates at its
+    ``masks`` masks per table, and trains the following updates at its
     ``samples`` and ``masks`` in place of ``mc_samples`` and ``n_ops``;
-    ``r_cap`` caps the mask count.  An invalid estimate keeps the previous
-    settings, which start from ``mc_samples`` and ``n_ops``.  The measurements
-    draw from their own random stream, so the training draws are unchanged.
+    ``r_cap``, a power of two, caps the mask count.  An invalid estimate keeps
+    the previous settings, which start from ``mc_samples`` and ``n_ops``.  The
+    measurements draw from their own random stream, so the training draws are
+    unchanged.
     """
 
     every: int = 100
     r_cap: int = 65_536
-    masks: int = 4_096
+    masks: int = 1_024
 
     def __post_init__(self) -> None:
         if self.every < 1:
             raise ValueError("every must be positive")
-        if self.r_cap < 1:
-            raise ValueError("r_cap must be positive")
+        if self.r_cap < 1 or self.r_cap & (self.r_cap - 1):
+            raise ValueError("r_cap must be a positive power of two")
         if self.masks < 2:
             raise ValueError("masks must be at least two")
 

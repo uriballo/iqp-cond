@@ -82,41 +82,53 @@ def test_summed_terms_give_the_cell_loss_gradient(build) -> None:
     np.testing.assert_allclose(weights @ per_mask, expected, rtol=1e-10, atol=1e-13)
 
 
-def test_parts_predict_the_trainer_gradient_variance() -> None:
+def model_rows(model: ciqp.ConditionalModel, params, n_rows: int) -> jnp.ndarray:
+    """Rows drawn from the model's exact visible distribution."""
+    rng = np.random.default_rng(6)
+    states = rng.choice(2**N_QUBITS, size=n_rows, p=probabilities(model, params)[0])
+    return jnp.asarray((states[:, None] >> np.arange(N_QUBITS)) & 1, jnp.float64)
+
+
+@pytest.mark.parametrize(
+    ("data", "settings"),
+    [("random", ((32, 8), (128, 32), (512, 4))), ("model", ((128, 32),))],
+)
+def test_parts_predict_the_trainer_gradient_variance(data, settings) -> None:
     """``A/R + sigma_1^2/S + B_int/(RS)`` matches the trainer's cell gradient.
 
     The empirical trace over 4000 keys has a relative standard error of at
-    most ``sqrt(2/4000)``, about 2%; the mean of eight 4096-mask tables
-    measured within 5% at ``S = 32`` and less at larger ``S``.  A 15%
-    tolerance is three combined standard errors.
+    most ``sqrt(2/4000)``, about 2%.  Across measurement keys the prediction
+    spread by 4% at ``S = 32`` and about 1% at larger ``S`` for random data,
+    and by 5% at ``(128, 32)`` for data drawn from the model, whose
+    prediction sat 6% high; a 15% tolerance covers three combined standard
+    errors.  With model data the prediction is unreliable at small ``S`` and
+    overshoots when the mask part dominates (see the user guide), so only
+    ``(128, 32)`` is checked there.
     """
     model = zero_state_model()
     params = model_params(model)
     generators = jnp.asarray(model.generators, dtype=jnp.float64)
     encoder = _select_condition(model.encoder, 0)
-    pool = jnp.asarray(
-        np.random.default_rng(5).integers(0, 2, (1, 300, N_QUBITS)), dtype=jnp.float64
-    )
+    if data == "model":
+        pool = model_rows(model, params, 4_000)[None]
+    else:
+        pool = jnp.asarray(
+            np.random.default_rng(5).integers(0, 2, (1, 300, N_QUBITS)),
+            dtype=jnp.float64,
+        )
     sigma = 1.0
-    for n_samples, n_masks in ((32, 8), (128, 32), (512, 4)):
-        predictions = []
-        for index in range(8):
-            masks, weights = sample_nonidentity_masks_jax(
-                jax.random.PRNGKey(100 + index), 4096, N_QUBITS, sigma
-            )
-            A, sigma_1, B = guidelines._cell_parts(
-                params,
-                generators,
-                encoder,
-                masks,
-                weights,
-                pool[0],
-                jax.random.PRNGKey(200 + index),
-                n_samples,
-            )
-            predictions.append(
-                A / n_masks + sigma_1 / n_samples + B / (n_masks * n_samples)
-            )
+    for n_samples, n_masks in settings:
+        A, sigma_1, B = guidelines._cell_parts(
+            params,
+            generators,
+            encoder,
+            pool[0],
+            sigma,
+            jax.random.PRNGKey(200),
+            n_samples,
+            1024,
+        )
+        prediction = A / n_masks + sigma_1 / n_samples + B / (n_masks * n_samples)
         gradients = jax.jit(
             jax.vmap(
                 jax.grad(
@@ -136,23 +148,22 @@ def test_parts_predict_the_trainer_gradient_variance() -> None:
             )
         )(params, jax.random.split(jax.random.PRNGKey(7), 4000))
         empirical = float(jnp.var(gradients, axis=0, ddof=1).sum())
-        assert np.mean(predictions) == pytest.approx(empirical, rel=0.15)
+        assert prediction == pytest.approx(empirical, rel=0.15)
 
 
 def test_gamma_matches_the_dense_off_diagonal_ratio() -> None:
     """The cell's gamma equals the dense ratio over pairs of distinct masks.
 
     The data are drawn from the model.  The dense reference uses its own
-    16 384 covariance and two 16 384-sample gradient sets; repeated draws of
-    either estimate spread by about 1%, so 5% is a loose bound.
+    16 384 covariance and two 16 384-sample gradient sets and spreads by about
+    1% over draws; the library's 4096-sample estimate spreads by about 1.5%
+    over keys, so 5% is a loose bound.
     """
     model = zero_state_model()
     params = model_params(model)
     generators = jnp.asarray(model.generators, dtype=jnp.float64)
     encoder = _select_condition(model.encoder, 0)
-    rng = np.random.default_rng(6)
-    states = rng.choice(2**N_QUBITS, size=20_000, p=probabilities(model, params)[0])
-    rows = jnp.asarray((states[:, None] >> np.arange(N_QUBITS)) & 1, jnp.float64)
+    rows = model_rows(model, params, 20_000)
     masks, weights = sample_nonidentity_masks_jax(
         jax.random.PRNGKey(8), 128, N_QUBITS, 1.0
     )
@@ -204,10 +215,16 @@ def test_settings_round_cap_and_keep(monkeypatch: pytest.MonkeyPatch) -> None:
     assert (measured.samples, measured.masks, measured.flag) == (32, 128, "estimated")
     assert measured.gamma == pytest.approx(0.3)
     assert measured.mask_ratio == pytest.approx(96.0)
-    capped = settings(r_cap=100)
-    assert (capped.masks, capped.flag) == (100, "capped")
+    capped = settings(r_cap=64)
+    assert (capped.masks, capped.flag) == (64, "capped")
+    with pytest.raises(ValueError, match="power of two"):
+        settings(r_cap=100)
     cells["gamma"] = (0.01, 1.0)
     assert settings().samples == 4
+    cells["gamma"] = (1_000.0, 1.0)
+    with pytest.raises(ValueError, match="at most 65536"):
+        settings()
+    cells["gamma"] = (0.3, 1.0)
 
     cells["parts"] = (3.0, -1.0, 0.0)
     with pytest.raises(ValueError, match="sigma_1"):
@@ -219,7 +236,7 @@ def test_settings_round_cap_and_keep(monkeypatch: pytest.MonkeyPatch) -> None:
         config,
         jax.random.PRNGKey(0),
         64,
-        100,
+        64,
         (16, 8),
     )
     assert (kept.samples, kept.masks, kept.flag) == (16, 8, "kept")
