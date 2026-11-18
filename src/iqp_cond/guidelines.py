@@ -313,20 +313,18 @@ def measure(
     about ``(12288 + 24 S) x masks`` terms per cell.  The returned ``samples``
     is ``gamma * batch_size`` rounded to a power of two, at least 4, and
     ``masks`` is ``R*`` rounded to a power of two and capped at ``r_cap``, a
-    power of two.  A non-positive or non-finite ``gamma``, summed
-    ``sigma_1^2`` or ``R*``, or ``gamma * batch_size`` above 65536, raises
-    :class:`ValueError`.
+    power of two; ``masks`` must be at least two.  A non-positive or
+    non-finite ``gamma``, summed ``sigma_1^2`` or ``R*``, or
+    ``gamma * batch_size`` above 65536, raises :class:`ValueError`.
 
     The parts move during training, so settings measured at the starting
-    parameters can mislead.  On the 484-805-qubit published models of
-    Armengol et al., ``gamma`` was 0.03-0.2 at their initialization against
-    about 0.5 trained, and on teacher circuits trained from a random start
-    ``R*`` fell from about 1e4 to hundreds.  Fixed settings should therefore
-    be measured at trained or warm parameters; :class:`iqp_cond.Adaptation`,
-    which remeasures during training, is the recommended route.  Each update
-    draws one cell, so the variance between the cells' gradients is outside
-    the parts, and the parts use targets from every training row while
-    training uses the batch's moments, which adds variance.
+    parameters can be far from those trained parameters need.  Fixed settings
+    should therefore be measured at trained or warm parameters;
+    :class:`iqp_cond.Adaptation`, which remeasures during training, is the
+    recommended route.  Each update draws one cell, so the variance between
+    the cells' gradients is outside the parts, and the parts use targets from
+    every training row while training uses the batch's moments, which adds
+    variance.
     """
     if isinstance(training_targets, TargetMoments):
         raise ValueError("measure needs raw-sample training targets")

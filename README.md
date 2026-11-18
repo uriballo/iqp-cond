@@ -44,7 +44,7 @@ draws = model.sample(params, 100, seed=0)
 
 ## Learn the library
 
-Read [`USER_GUIDE.md`](USER_GUIDE.md) for shapes, training, inference, and custom encoders. Then work through the notebooks:
+Read [`USER_GUIDE.md`](USER_GUIDE.md) for shapes, training, setting samples and masks, inference, precision, and custom encoders. Then work through the notebooks:
 
 1. [`examples/train_gaussian.ipynb`](examples/train_gaussian.ipynb) builds and trains a conditional model with the built-in angle encoder.
 2. [`examples/unconditional_fixed_encoder.ipynb`](examples/unconditional_fixed_encoder.ipynb) uses a fixed reference to impose an exact output symmetry.
@@ -52,7 +52,7 @@ Read [`USER_GUIDE.md`](USER_GUIDE.md) for shapes, training, inference, and custo
 
 ## API map
 
-- `iqp_cond`: `Ansatz`, `ConditionalModel`, the encoders `AngleEncoder`, `ParityEncoder`, `TwistedParityEncoder`, `CollectivePhaseEncoder` and `SpinSymmetricEncoder`, `TrainingConfig`, `train`, `check_encoder`, and the precision settings `Precision`, `precision`, `PRECISIONS` and `FORMATS`, accepted by every `precision=` argument.
+- `iqp_cond`: `Ansatz`, `ConditionalModel`, the encoders `AngleEncoder`, `ParityEncoder`, `TwistedParityEncoder`, `CollectivePhaseEncoder` and `SpinSymmetricEncoder`, `TrainingConfig`, `train`, `check_encoder`, `measure` and `Adaptation`, which set the reference samples and masks per update from the step's noise (`measure` returns a `Measurement`), and the precision settings `Precision`, `precision`, `PRECISIONS` and `FORMATS`, accepted by every `precision=` argument.
 - `iqp_cond.encoders`: the `Encoder` and `ExactEncoder` protocols and every built-in encoder, one module per family (`product`, `symmetric`).
 - `model`: moment estimation, MMD evaluation, exact probabilities, and sampling are methods on `ConditionalModel`.
 - `iqp_cond.estimator`, `iqp_cond.initialization`, `iqp_cond.operators`, and `iqp_cond.simulation`: numerical routines and circuit construction for advanced workflows.

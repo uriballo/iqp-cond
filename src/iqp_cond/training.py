@@ -86,14 +86,15 @@ class TrainingConfig:
     the pooled training data by the mean-covariance prescription, checkpoints
     every 25 steps by validation MMD, and a width-aware bandwidth schedule.
     ``sigmas=None`` resolves through :meth:`resolved_sigmas` to the bodyness
-    targets ``(2, n/4, 0.49 n)``.  The mask and Monte Carlo budgets are small,
-    so default runs stay short.  ``n_ops`` and ``validation_n_ops`` default to
-    512 and ``mc_samples`` and ``validation_mc_samples`` to 1000, the smallest
-    calibrated budget passing the estimator gates; raise them toward 2000 masks
-    and 8192 reference draws for full-scale runs.  ``mask_refresh="cache"``
-    retains one mask bank per fit instead of redrawing every step; both refresh
-    modes select one condition-bandwidth objective cell per update.  See
-    :func:`train`.
+    targets ``(2, n/4, 0.49 n)``; explicit ``sigmas`` are scalars or, for the
+    anisotropic kernel, vectors of one bandwidth per visible qubit, all of one
+    shape.  The mask and Monte Carlo budgets are small, so default runs stay
+    short: ``n_ops`` and ``validation_n_ops`` default to 512 and
+    ``mc_samples`` and ``validation_mc_samples`` to 1000.
+    :func:`iqp_cond.measure` and ``adapt`` set the training budgets from the
+    step noise.  ``mask_refresh="cache"`` retains one mask bank per fit
+    instead of redrawing every step; both refresh modes select one
+    condition-bandwidth objective cell per update.  See :func:`train`.
 
     ``n_ops`` and ``validation_n_ops`` give the number of nonidentity operator
     draws per condition and bandwidth. Step refresh uses direct fixed-width
@@ -209,7 +210,9 @@ class TrainingResult:
     ``loss_scales`` holds the loss scale used at each update (1 unless the
     precision is loss-scaled), and ``skipped_steps`` the 1-based updates that
     were skipped because their gradient overflowed.  ``checkpoint_params``
-    holds the parameters at each of ``validation_steps``.  Under
+    holds the parameters at each of ``validation_steps`` and
+    ``selection_scores`` the checkpoint scores, the validation MMD unless
+    ``train`` was given a ``selection_metric``.  Under
     ``config.adapt``, ``measurements`` holds each
     :class:`iqp_cond.Measurement`, taken before the 0-based update in
     ``measurement_steps``; both are empty otherwise.

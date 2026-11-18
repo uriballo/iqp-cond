@@ -130,7 +130,10 @@ def sample_nonidentity_masks_jax(
 
     Returns ``(masks, weights)`` with ``masks`` of shape ``(n_ops, n_visible)``
     and constant weights summing to the nonidentity mass ``1 - (1 - p)**n``,
-    the same law and rescaling as :func:`sample_nonidentity_masks`.
+    the same law and rescaling as :func:`sample_nonidentity_masks`.  A
+    length-``n_visible`` ``sigma`` draws bit ``i`` with probability ``p_i``:
+    the first set bit by inverse CDF, the later bits independently, with
+    weights summing to ``1 - prod (1 - p_i)``.
     """
     if n_ops < 1 or n_visible < 1:
         raise ValueError("n_ops and n_visible must be positive")
@@ -187,6 +190,7 @@ def sample_nonidentity_masks(
     represents duplicate masks once with their exact empirical multiplicity,
     which reproduces the unweighted mean exactly while evaluating fewer masks.
 
+    ``sigma`` may be a length-``n_qubits`` vector of per-qubit bandwidths.
     This function runs outside any JIT, because rejection sampling needs a
     concrete NumPy generator.
     """

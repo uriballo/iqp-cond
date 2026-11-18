@@ -336,7 +336,12 @@ def precision(
     scaling: str = "amax",
     **knobs: str,
 ) -> Precision:
-    """Return a ``Precision`` with every knob in ``base`` except ``knobs``."""
+    """Return a ``Precision`` with every format in ``base`` except ``knobs``.
+
+    ``base`` sets the five forward formats; ``cosines`` and the backward
+    fields stay unset unless given in ``knobs``, which may also set
+    ``accumulation``.
+    """
     return Precision(
         **({knob: base for knob in _KNOBS} | knobs),
         variant=variant,
@@ -628,7 +633,7 @@ class _Arithmetic:
 
         Unlike the GEMM accumulator, the statistics keep their per-sample
         values and block partial sums in the format but reduce the partials in
-        fp32, as the agreed model for sample averages specifies.
+        fp32.
         """
         name = self.precision.statistics
         if name == "fp64":

@@ -401,7 +401,8 @@ def mmd(
     ``key`` always supplies the reference-state randomness.  Pass ``sigmas``
     and ``n_ops`` to draw fresh nonidentity masks from that key, or pass
     ``bank`` to evaluate a prebuilt compressed bank instead; the two mask
-    sources are exclusive.  ``encoders`` must be a JAX pytree whose array
+    sources are exclusive; each bandwidth is a scalar or a vector of one
+    bandwidth per visible qubit.  ``encoders`` must be a JAX pytree whose array
     leaves share a leading condition axis; the conditions are vectorized.
 
     With ``shared_samples=True`` each condition draws one reference sample set
