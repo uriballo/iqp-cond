@@ -320,3 +320,10 @@ def test_forward_and_backward_bits_are_independent_and_fresh_per_site():
     first = arithmetic.round(x, "statistics")
     second = arithmetic.round(x, "statistics")
     assert float(jnp.mean(first == second)) < 0.9
+
+
+@pytest.mark.parametrize("name", ["bf16", "tf32"])
+def test_float32_values_at_the_bottom_of_the_range_round_without_nan(name):
+    # The quantum of these values is a float32 subnormal, which the CPU flushes.
+    x = jnp.array([2e-38, -1.5e-37, 3e-36], jnp.float32)
+    np.testing.assert_allclose(np.asarray(quantize(x, name)), x, rtol=2.0**-7)

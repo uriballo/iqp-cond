@@ -29,13 +29,14 @@ RECIPE = dict(
 
 
 def awkward_values() -> jnp.ndarray:
-    """Magnitudes from 1e-30 to past every format's range, with exact ties.
+    """Magnitudes from float32's smallest normals past every format's range, with ties.
 
-    Below about 1e-36 the emulation's quantum for bf16 is a float32 subnormal,
-    which XLA flushes to zero on the CPU.
+    Below float32's normal range the CPU flushes the emulated result to zero,
+    where the cast keeps bf16's subnormals.
     """
     rng = np.random.default_rng(0)
-    x = rng.standard_normal(50_000) * np.logspace(-30, 38, 50_000)
+    x = rng.standard_normal(50_000) * np.logspace(-37, 38, 50_000)
+    x = np.where(np.abs(x) < np.finfo(np.float32).tiny, 0.0, x)
     ties = np.array([1 + 2.0**-8, 1 + 3 * 2.0**-8, 65520.0, 65519.0, 0.0, -0.0])
     return jnp.asarray(np.concatenate([x, ties, -ties]), jnp.float32)
 

@@ -63,29 +63,46 @@ def _round(
     """Round to nearest, ties to even, including subnormals, in ``x``'s dtype.
 
     Dividing by the power-of-two quantum is exact, so rounding happens once.
-    With ``key``, round stochastically instead: up with probability equal to
-    the distance from the lower neighbour in quanta, so the result is unbiased.
+    The quantum is applied as two normal powers of two, since for bf16 near
+    the bottom of its range it is a float32 subnormal, which the CPU flushes
+    to zero.  With ``key``, round stochastically instead: up with probability
+    equal to the distance from the lower neighbour in quanta, so the result is
+    unbiased.
     """
     magnitude = jnp.abs(x)
     _, exponent = jnp.frexp(magnitude)
-    exponent = jnp.maximum(exponent - 1, fmt.min_exponent)
-    quantum = jnp.ldexp(jnp.ones_like(x), exponent - fmt.mantissa_bits)
-    steps = magnitude / quantum
+    exponent = jnp.maximum(exponent - 1, fmt.min_exponent) - fmt.mantissa_bits
+    # Multiplied rather than divided: XLA rewrites a / b / c as a / (b * c).
+    low = _pow2(exponent // 2, x.dtype)
+    high = _pow2(exponent - exponent // 2, x.dtype)
+    exact = (
+        magnitude
+        * _pow2(-(exponent // 2), x.dtype)
+        * _pow2(exponent // 2 - exponent, x.dtype)
+    )
     if key is None:
-        steps = jnp.round(steps)
+        steps = jnp.round(exact)
     else:
-        lower = jnp.floor(steps)
-        up = jax.random.uniform(key, x.shape, x.dtype) < steps - lower
+        lower = jnp.floor(exact)
+        up = jax.random.uniform(key, x.shape, x.dtype) < exact - lower
         steps = lower + up
-    rounded = steps * quantum
+    rounded = steps * low * high
     if key is not None:
         # A value whose nearest rounding is in range (such as an amax element
         # scaled to just above the largest value) must not round up past it.
-        in_range = jnp.round(magnitude / quantum) * quantum <= fmt.max
+        in_range = jnp.round(exact) * low * high <= fmt.max
         rounded = jnp.where(in_range, jnp.minimum(rounded, fmt.max), rounded)
     overflow = {"inf": jnp.inf, "nan": jnp.nan, "saturate": fmt.max}[fmt.overflow]
     rounded = jnp.where(rounded > fmt.max, overflow, rounded)
     return jnp.copysign(rounded, x)
+
+
+def _pow2(exponent: jnp.ndarray, dtype) -> jnp.ndarray:
+    """``2**exponent`` for a normal result, built from its bits."""
+    info = jnp.finfo(dtype)
+    integer = jnp.int64 if info.bits == 64 else jnp.int32
+    bits = (exponent.astype(integer) + info.maxexp - 1) << info.nmant
+    return jax.lax.bitcast_convert_type(bits, dtype)
 
 
 _MX_FORMATS = {
