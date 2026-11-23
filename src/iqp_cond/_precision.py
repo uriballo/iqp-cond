@@ -8,11 +8,14 @@ input's dtype.
 
 :class:`_Arithmetic` is the seam the estimator and the loss compute through:
 an fp64 knob runs the plain float64 expression, and any other knob rounds to
-its format and computes in float32.
+its format and computes in float32.  With ``arithmetic="native"`` it rounds
+through the formats' hardware types and computes the two phase contractions in
+them, accumulating in fp32.
 """
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, replace
 from functools import cache
 
@@ -85,7 +88,12 @@ def _round(
     return jnp.copysign(rounded, x)
 
 
-_MX_FORMATS = {"mxfp8": "fp8_e4m3", "mxfp4": "fp4_e2m1"}
+_MX_FORMATS = {
+    "mxfp8": "fp8_e4m3",
+    "mxfp6_e2m3": "fp6_e2m3",
+    "mxfp6_e3m2": "fp6_e3m2",
+    "mxfp4": "fp4_e2m1",
+}
 
 
 def _to_blocks(x: jnp.ndarray, size: int) -> jnp.ndarray:
@@ -107,15 +115,20 @@ def _quantize_mx(
     the element format's largest value, and elements saturate.
     """
     blocks = _to_blocks(x, 32)
+    scale = _mx_scale(blocks, element)
+    element = replace(element, overflow="saturate")
+    rounded = _round(blocks / scale, element, key) * scale
+    return _from_blocks(rounded, x.shape[-1])
+
+
+def _mx_scale(blocks: jnp.ndarray, element: _ElementFormat) -> jnp.ndarray:
+    """The power-of-two scale of each block, with a trailing axis of one."""
     amax = jnp.max(jnp.abs(blocks), axis=-1, keepdims=True)
     _, amax_exponent = jnp.frexp(amax)
     _, element_exponent = jnp.frexp(element.max)
     # The shared scale is an E8M0 power of two, limited to 2^-127 ... 2^127.
     exponent = jnp.clip(amax_exponent - element_exponent, -127, 127)
-    scale = jnp.where(amax > 0, jnp.ldexp(jnp.ones_like(amax), exponent), 1.0)
-    element = replace(element, overflow="saturate")
-    rounded = _round(blocks / scale, element, key) * scale
-    return _from_blocks(rounded, x.shape[-1])
+    return jnp.where(amax > 0, jnp.ldexp(jnp.ones_like(amax), exponent), 1.0)
 
 
 def _quantize_nvfp4(x: jnp.ndarray, key: jax.Array | None = None) -> jnp.ndarray:
@@ -125,17 +138,23 @@ def _quantize_nvfp4(x: jnp.ndarray, key: jax.Array | None = None) -> jnp.ndarray
     range; each element is ``x * tensor_scale / block_scale`` rounded to fp4.
     """
     fp4 = _ELEMENT_FORMATS["fp4_e2m1"]
-    e4m3 = replace(_ELEMENT_FORMATS["fp8_e4m3"], overflow="saturate")
     blocks = _to_blocks(x, 16)
-    amax = jnp.max(jnp.abs(blocks))
-    tensor_scale = jnp.where(amax > 0, fp4.max * e4m3.max / amax, 1.0)
-    block_amax = jnp.max(jnp.abs(blocks), axis=-1, keepdims=True)
-    block_scale = _round(block_amax / fp4.max * tensor_scale, e4m3)
-    block_scale = jnp.where(block_scale > 0, block_scale, 1.0)
+    tensor_scale, block_scale = _nvfp4_scales(blocks)
     elements = _round(
         blocks * tensor_scale / block_scale, replace(fp4, overflow="saturate"), key
     )
     return _from_blocks(elements * block_scale / tensor_scale, x.shape[-1])
+
+
+def _nvfp4_scales(blocks: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """The per-tensor scale and the e4m3 scale of each block of 16."""
+    fp4 = _ELEMENT_FORMATS["fp4_e2m1"]
+    e4m3 = replace(_ELEMENT_FORMATS["fp8_e4m3"], overflow="saturate")
+    amax = jnp.max(jnp.abs(blocks))
+    tensor_scale = jnp.where(amax > 0, fp4.max * e4m3.max / amax, 1.0)
+    block_amax = jnp.max(jnp.abs(blocks), axis=-1, keepdims=True)
+    block_scale = _round(block_amax / fp4.max * tensor_scale, e4m3)
+    return tensor_scale, jnp.where(block_scale > 0, block_scale, 1.0)
 
 
 def quantize(
@@ -155,11 +174,17 @@ def quantize(
     fmt = _ELEMENT_FORMATS[name]
     if not fmt.amax_scaled:
         return _round(x, fmt, key)
+    scale = _tensor_scale(x, fmt, scaling)
+    return _round(x * scale, fmt, key) / scale
+
+
+def _tensor_scale(x: jnp.ndarray, fmt: _ElementFormat, scaling: str) -> jnp.ndarray:
+    """The scale mapping ``x``'s largest magnitude onto the format's largest value."""
     amax = jnp.max(jnp.abs(x))
     scale = jnp.where(amax > 0, fmt.max / amax, 1.0)
     if scaling == "pow2":
         scale = jnp.exp2(jnp.floor(jnp.log2(scale)))
-    return _round(x * scale, fmt, key) / scale
+    return scale
 
 
 def accumulate(x: jnp.ndarray, name: str) -> jnp.ndarray:
@@ -189,7 +214,7 @@ _KNOBS = ("gemm_inputs", "gemm_accumulate", "phases", "statistics", "ratios")
 # the variant.
 _OPTIONAL_KNOBS = ("cosines", "phase_gradient", "backward_accumulate")
 _BACKWARD_KNOBS = ("phase_gradient", "backward_accumulate")
-_BLOCK_FORMATS = ("mxfp8", "mxfp4", "nvfp4")
+_BLOCK_FORMATS = (*_MX_FORMATS, "nvfp4")
 FORMATS = ("fp64", "fp32", *_ELEMENT_FORMATS, *_BLOCK_FORMATS)
 
 
@@ -240,6 +265,22 @@ class Precision:
     ``"amax"`` maps each tensor's largest magnitude to the format's largest
     value, and ``"pow2"`` rounds that scale down to a power of two, so the grid
     of normal values does not move with the tensor's largest magnitude.
+
+    ``arithmetic="native"`` computes in the formats' hardware types instead of
+    emulating them, with the same formats and the same rounded values.  Each
+    rounding is XLA's cast to the format's type, and the forward and backward
+    phase contractions multiply in the type of ``gemm_inputs`` and
+    ``phase_gradient`` and accumulate in fp32 (float64 when
+    ``gemm_accumulate`` is fp64).  The formats below 16 bits keep the
+    current-maximum scaling of each tensor; delayed scaling is not
+    implemented.  Block formats multiply through ``jax.nn.scaled_matmul``.
+    Element-wise operations compute in fp32 between roundings, as in
+    emulation, so the variants keep their meaning.  A format without a fast
+    product on the device (fp6, plain fp4 and mxfp6 on any device, tf32 off
+    NVIDIA GPUs), rounds as in emulation and multiplies in fp32, with
+    a warning: exact, but not faster.  Native arithmetic refuses stochastic
+    rounding and the ``"blocked"`` accumulator below fp32, neither of which
+    XLA provides.
     """
 
     gemm_inputs: str = "fp64"
@@ -251,6 +292,7 @@ class Precision:
     accumulation: str = "blocked"
     rounding: str | tuple[str, ...] = "nearest"
     scaling: str = "amax"
+    arithmetic: str = "emulated"
     cosines: str | None = None
     phase_gradient: str | None = None
     backward_accumulate: str | None = None
@@ -302,6 +344,28 @@ class Precision:
                 )
         if self.scaling not in ("amax", "pow2"):
             raise ValueError(f"scaling must be 'amax' or 'pow2', not {self.scaling!r}")
+        if self.arithmetic not in ("emulated", "native"):
+            raise ValueError(
+                f"arithmetic must be 'emulated' or 'native', not {self.arithmetic!r}"
+            )
+        if self.arithmetic == "native":
+            if self.rounding != "nearest":
+                raise ValueError(
+                    "native arithmetic rounds to nearest, as XLA has no stochastic "
+                    "rounding; set rounding='nearest', or arithmetic='emulated'"
+                )
+            for knob in ("gemm_accumulate", "backward_accumulate"):
+                name = self.format_of(knob)
+                if self.accumulation == "blocked" and name not in (
+                    None,
+                    "fp64",
+                    "fp32",
+                ):
+                    raise ValueError(
+                        f"native products accumulate in fp32, so {knob}={name!r} "
+                        "needs accumulation='hardware', which rounds the fp32 sum "
+                        f"to {name}; or set arithmetic='emulated'"
+                    )
 
     @property
     def loss_scaled(self) -> bool:
@@ -334,6 +398,7 @@ def precision(
     variant: str = "uniform",
     rounding: str | tuple[str, ...] = "nearest",
     scaling: str = "amax",
+    arithmetic: str = "emulated",
     **knobs: str,
 ) -> Precision:
     """Return a ``Precision`` with every format in ``base`` except ``knobs``.
@@ -347,6 +412,7 @@ def precision(
         variant=variant,
         rounding=rounding,
         scaling=scaling,
+        arithmetic=arithmetic,
     )
 
 
@@ -371,24 +437,27 @@ def resolve_precision(value: str | Precision) -> Precision:
 
 
 @cache
-def _rounder(name: str, variant: str, scaling: str = "amax"):
-    """``quantize`` with the backward pass of the variant.
+def _rounder(name: str, variant: str, scaling: str = "amax", native: bool = False):
+    """``quantize``, or with ``native`` :func:`_cast`, with the variant's backward.
 
     The uniform variant rounds cotangents to the same format; the split
     variant passes them through unchanged (a straight-through estimator).
     """
 
+    def round_(x):
+        return _cast(x, name, scaling) if native else quantize(x, name, scaling=scaling)
+
     @jax.custom_vjp
     def rounded(x):
-        return quantize(x, name, scaling=scaling)
+        return round_(x)
 
     def forward(x):
-        return quantize(x, name, scaling=scaling), None
+        return round_(x), None
 
     def backward(_, cotangent):
         if variant == "split":
             return (cotangent,)
-        return (quantize(cotangent, name, scaling=scaling),)
+        return (round_(cotangent),)
 
     rounded.defvjp(forward, backward)
     return rounded
@@ -524,6 +593,228 @@ def _accumulating_gemm(name: str, variant: str):
     return gemm
 
 
+# Native arithmetic.  The hardware type of each format XLA can cast to; XLA
+# fails to compile fp6 casts (JAX 0.11.2) and tf32 has no storage type, so
+# those formats round in software.
+_DTYPES = {
+    "bf16": jnp.bfloat16,
+    "fp16": jnp.float16,
+    "fp8_e4m3": jnp.float8_e4m3fn,
+    "fp8_e5m2": jnp.float8_e5m2,
+    "fp4_e2m1": jnp.float4_e2m1fn,
+}
+# The first CUDA compute capability whose tensor cores multiply in each format:
+# Volta for fp16, Ampere for bf16 and tf32, Ada for fp8, Blackwell for the
+# block formats that jax.nn.scaled_matmul fuses.  The formats left out
+# multiply in fp32.
+_FAST_PRODUCT = {
+    "fp16": 7.0,
+    "bf16": 8.0,
+    "tf32": 8.0,
+    "fp8_e4m3": 8.9,
+    "fp8_e5m2": 8.9,
+    "mxfp8": 10.0,
+    "nvfp4": 10.0,
+}
+# The element type, scale type and block size of the block formats that
+# jax.nn.scaled_matmul multiplies.
+_SCALED = {
+    "mxfp8": (jnp.float8_e4m3fn, jnp.float8_e8m0fnu, 32),
+    "nvfp4": (jnp.float4_e2m1fn, jnp.float8_e4m3fn, 16),
+}
+_FORWARD = (((1,), (1,)), ((), ()))  # characters (S, m) with flips (R, m)
+_BACKWARD = (((0,), (0,)), ((), ()))  # characters (S, m) with phase cotangents (S, R)
+
+
+def _cast(x: jnp.ndarray, name: str, scaling: str = "amax") -> jnp.ndarray:
+    """``quantize`` through the format's hardware type, in ``x``'s dtype.
+
+    XLA's cast rounds to nearest, ties to even, as :func:`_round` does, so the
+    values are the emulated ones.  Formats without a type XLA casts to round in
+    software, and so do float64 values, which XLA rounds to bf16 through
+    float32, twice.  XLA casts NaN to fp4 as zero, so NaN passes through.
+    """
+    if name == "fp64":
+        return x
+    if name == "fp32":
+        return x.astype(jnp.float32).astype(x.dtype)
+    if name not in _DTYPES or x.dtype == jnp.float64:
+        return quantize(x, name, scaling=scaling)
+    fmt = _ELEMENT_FORMATS[name]
+    scale = _tensor_scale(x, fmt, scaling) if fmt.amax_scaled else 1.0
+    cast = (x * scale).astype(_DTYPES[name]).astype(x.dtype) / scale
+    return jnp.where(jnp.isnan(x), x, cast)
+
+
+def _has_product(name: str) -> bool:
+    """Whether the default device multiplies in ``name``'s type.
+
+    The CPU computes every type XLA has in software, so the native products
+    run there for tests, apart from tf32, which only NVIDIA GPUs have.  NVIDIA
+    GPUs follow ``_FAST_PRODUCT``; other devices multiply in fp32.
+    """
+    if name not in _FAST_PRODUCT:
+        return False
+    device = jax.devices()[0]
+    if device.platform == "cpu":
+        return name != "tf32"
+    capability = str(getattr(device, "compute_capability", ""))
+    if not capability.replace(".", "", 1).isdigit():
+        return False
+    return float(capability) >= _FAST_PRODUCT[name]
+
+
+def _warn_upcast(knob: str, name: str) -> None:
+    device = jax.devices()[0].device_kind
+    warnings.warn(
+        f"native arithmetic: {knob}={name!r} has no fast product on {device}; it "
+        f"rounds to {name} and multiplies in fp32, exact but not faster",
+        stacklevel=4,
+    )
+
+
+def _native_dot(
+    characters: jnp.ndarray,
+    x: jnp.ndarray,
+    dimensions,
+    name: str,
+    scaling: str,
+    fast: bool,
+) -> jnp.ndarray:
+    """The characters contracted with ``x`` rounded to ``name``, in ``x``'s dtype.
+
+    The characters are exactly ``±1`` in every format.  With ``fast`` the
+    product runs in the format's type and accumulates in fp32; otherwise ``x``
+    rounds to the format and the product runs in its own dtype.
+    """
+    wide = x.dtype
+    if not fast:
+        x = _cast(x, name, scaling)
+        return jax.lax.dot_general(
+            characters.astype(wide), x, dimensions, precision=jax.lax.Precision.HIGHEST
+        )
+    if name in _SCALED:
+        return _scaled_product(characters, x, name)
+    if name == "tf32":
+        # Rounded first, the inputs pass the tensor cores' tf32 conversion as they are.
+        product = jax.lax.dot_general(
+            characters.astype(jnp.float32),
+            quantize(x, name).astype(jnp.float32),
+            dimensions,
+            precision=jax.lax.DotAlgorithmPreset.TF32_TF32_F32,
+        )
+        return product.astype(wide)
+    fmt = _ELEMENT_FORMATS[name]
+    scale = _tensor_scale(x, fmt, scaling) if fmt.amax_scaled else 1.0
+    dtype = _DTYPES[name]
+    product = jax.lax.dot_general(
+        characters.astype(dtype),
+        (x * scale).astype(dtype),
+        dimensions,
+        preferred_element_type=jnp.float32,
+    )
+    return product.astype(wide) / scale
+
+
+def _scaled_operand(
+    x: jnp.ndarray, name: str
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray | float]:
+    """``x``'s elements and block scales in the block format's types.
+
+    The last axis is zero-padded to whole blocks.  The values are the emulated
+    ones: ``quantize(x, name)`` is the elements times their block scale over
+    the per-tensor scale (1 for the MX formats), with the padding cut off.
+    """
+    element, scale_type, size = _SCALED[name]
+    blocks = _to_blocks(x, size)
+    if name == "nvfp4":
+        tensor_scale, scales = _nvfp4_scales(blocks)
+        blocks = blocks * tensor_scale
+    else:
+        tensor_scale = 1.0
+        scales = _mx_scale(blocks, _ELEMENT_FORMATS[_MX_FORMATS[name]])
+    # The elements saturate; clipped first, the cast cannot overflow.
+    limit = float(jnp.finfo(element).max)
+    elements = jnp.clip(blocks / scales, -limit, limit).astype(element)
+    return (
+        elements.reshape(*x.shape[:-1], -1),
+        scales[..., 0].astype(scale_type),
+        tensor_scale,
+    )
+
+
+def _scaled_product(
+    characters: jnp.ndarray, flips: jnp.ndarray, name: str
+) -> jnp.ndarray:
+    """``characters @ flips.T`` with the flips in a block format.
+
+    The characters are exact with unit scales; the padding of the contracted
+    axis is zero in both operands.
+    """
+    elements, scales, tensor_scale = _scaled_operand(flips, name)
+    width = elements.shape[-1]
+    signs = jnp.pad(characters, ((0, 0), (0, width - characters.shape[-1])))
+    element, scale_type, _ = _SCALED[name]
+    ones = jnp.ones((signs.shape[0], scales.shape[-1]), scale_type)
+    product = jax.nn.scaled_matmul(
+        signs.astype(element)[None],
+        elements[None],
+        ones[None],
+        scales[None],
+        preferred_element_type=jnp.float32,
+    )[0]
+    # fp4 elements cannot hold NaN; a NaN flip makes its phases NaN, as emulated.
+    return jnp.where(jnp.isnan(flips).any(axis=-1), jnp.nan, product / tensor_scale)
+
+
+@cache
+def _native_contraction(
+    inputs: str,
+    phase_gradient: str | None,
+    backward_accumulate: str | None,
+    variant: str,
+    scaling: str,
+    forward_fast: bool,
+    backward_fast: bool,
+):
+    """The phase contraction in hardware types, with the emulation's backward.
+
+    The forward multiplies the characters by the flips in ``inputs``.  The
+    backward rounds the gradient with respect to the phases to
+    ``phase_gradient`` and multiplies in its type (``None`` leaves it
+    unrounded), rounds the fp32 sum to ``backward_accumulate``, and under the
+    uniform variant rounds the gradient leaving the input rounding to
+    ``inputs``, as :class:`Precision` describes.
+    """
+
+    def product(characters, flips):
+        return _native_dot(characters, flips, _FORWARD, inputs, scaling, forward_fast)
+
+    @jax.custom_vjp
+    def contract(characters, flips):
+        return product(characters, flips)
+
+    def forward(characters, flips):
+        return product(characters, flips), characters
+
+    def backward(characters, cotangent):
+        gradient = _native_dot(
+            characters,
+            cotangent,
+            _BACKWARD,
+            phase_gradient or "fp64",
+            scaling,
+            backward_fast,
+        ).T
+        gradient = _cast(gradient, backward_accumulate or "fp64", scaling)
+        if variant == "uniform":
+            gradient = _cast(gradient, inputs, scaling)
+        return jnp.zeros_like(characters), gradient
+
+    contract.defvjp(forward, backward)
+    return contract
+
+
 # Folded into a loss's or estimator's key to give the stochastic-rounding bits,
 # leaving every draw already made from that key unchanged.
 _ROUNDING_TAG = 0x5EED
@@ -549,6 +840,7 @@ class _Arithmetic:
             )
         self._key = key
         self._sites = 0
+        self._native = self.precision.arithmetic == "native"
 
     def dtype(self, knob: str) -> jnp.dtype:
         """float64 for an fp64 knob, float32 otherwise."""
@@ -574,6 +866,8 @@ class _Arithmetic:
         if name == "fp32":
             return x.astype(jnp.float32)
         variant, scaling = self.precision.variant, self.precision.scaling
+        if self._native:
+            return _rounder(name, variant, scaling, native=True)(x)
         key = self._site_key(knob)
         if key is None:
             return _rounder(name, variant, scaling)(x)
@@ -581,6 +875,8 @@ class _Arithmetic:
 
     def gemm(self, characters: jnp.ndarray, flips: jnp.ndarray) -> jnp.ndarray:
         """Return ``characters @ flips.T`` with rounded inputs and accumulation."""
+        if self._native:
+            return self._native_gemm(characters, flips)
         if any(getattr(self.precision, knob) is not None for knob in _BACKWARD_KNOBS):
             return self._gemm_with_backward(characters, flips)
         flips = self.round(flips, "gemm_inputs")
@@ -593,6 +889,32 @@ class _Arithmetic:
             return _accumulating_gemm(name, self.precision.variant)(characters, flips)
         product = jnp.matmul(characters, flips.T, precision=jax.lax.Precision.HIGHEST)
         return product if name == "fp32" else self.round(product, "gemm_accumulate")
+
+    def _native_gemm(self, characters: jnp.ndarray, flips: jnp.ndarray) -> jnp.ndarray:
+        """:meth:`gemm` in hardware types; below fp32 the sum rounds to the format."""
+        precision = self.precision
+        dtype = self.dtype("gemm_accumulate")
+        # An fp64 accumulator multiplies the rounded values in float64.
+        fast = {}
+        for knob in ("gemm_inputs", "phase_gradient"):
+            name = precision.format_of(knob)
+            low = dtype == jnp.float32 and name not in (None, "fp64", "fp32")
+            fast[knob] = low and _has_product(name)
+            if low and not fast[knob]:
+                _warn_upcast(knob, name)
+        contract = _native_contraction(
+            precision.gemm_inputs,
+            precision.phase_gradient,
+            precision.backward_accumulate,
+            precision.variant,
+            precision.scaling,
+            fast["gemm_inputs"],
+            fast["phase_gradient"],
+        )
+        product = contract(characters.astype(dtype), flips.astype(dtype))
+        if precision.gemm_accumulate in ("fp64", "fp32"):
+            return product
+        return self.round(product, "gemm_accumulate")
 
     def _gemm_with_backward(
         self, characters: jnp.ndarray, flips: jnp.ndarray
