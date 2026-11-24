@@ -11,7 +11,7 @@ import pytest
 from fp64_golden import inputs
 
 from iqp_cond import precision
-from iqp_cond._precision import _DTYPES, _SCALED, _cast, _scaled_operand, quantize
+from iqp_cond._precision import _DTYPES, _SCALED, _cast, _has_product, _scaled_operand, quantize
 from iqp_cond.loss import mmd
 
 RECIPE = dict(
@@ -160,7 +160,12 @@ def test_native_arithmetic_refuses_what_xla_cannot_do_and_names_the_fix(knobs, f
 
 
 @pytest.mark.parametrize(
-    "name", ["fp4_e2m1", "fp6_e2m3", "mxfp6_e2m3", "mxfp4", "tf32"]
+    "name",
+    [
+        n
+        for n in ("fp4_e2m1", "fp6_e2m3", "mxfp6_e2m3", "mxfp4", "tf32")
+        if not _has_product(n)
+    ],
 )
 def test_a_format_without_a_native_product_warns_and_stays_exact(data, name):
     knobs = RECIPE | dict(gemm_inputs=name)
