@@ -198,7 +198,10 @@ def _product_log_ratios(
     angle = jnp.angle(local) if is_complex else (local < 0.0)
     real = log_magnitude.dtype
     features = jnp.stack([log_magnitude, angle.astype(real), vanishing.astype(real)])
-    totals = jnp.einsum("kcsn,rn->kcsr", features, masks.astype(real))
+    # Pinned, since fp32 contractions on NVIDIA GPUs default to tf32.
+    totals = jnp.einsum(
+        "kcsn,rn->kcsr", features, masks.astype(real), precision=jax.lax.Precision.HIGHEST
+    )
     return jnp.where(totals[2] > 0.0, -jnp.inf, totals[0]), totals[1]
 
 

@@ -522,7 +522,7 @@ def _contraction(
         if name in (None, "fp64"):
             return x
         if name == "fp32":
-            return x.astype(jnp.float32).astype(x.dtype)
+            return _fp32(x).astype(x.dtype)
         return quantize(x, name, key, scaling)
 
     def product(characters, flips):
@@ -643,23 +643,36 @@ _FORWARD = (((1,), (1,)), ((), ()))  # characters (S, m) with flips (R, m)
 _BACKWARD = (((0,), (0,)), ((), ()))  # characters (S, m) with phase cotangents (S, R)
 
 
+def _fp32(x: jnp.ndarray) -> jnp.ndarray:
+    """``x`` rounded to float32; a barrier keeps a float64 ``x`` from skipping it.
+
+    XLA's GPU compiler drops a cast to float32 and back to float64 as excess
+    precision (``SimplifyFPConversions``) unless the narrow value is fenced.
+    """
+    y = x.astype(jnp.float32)
+    return jax.lax.optimization_barrier(y) if x.dtype == jnp.float64 else y
+
+
 def _cast(x: jnp.ndarray, name: str, scaling: str = "amax") -> jnp.ndarray:
     """``quantize`` through the format's hardware type, in ``x``'s dtype.
 
     XLA's cast rounds to nearest, ties to even, as :func:`_round` does, so the
     values are the emulated ones.  Formats without a type XLA casts to round in
     software, and so do float64 values, which XLA rounds to bf16 through
-    float32, twice.  XLA casts NaN to fp4 as zero, so NaN passes through.
+    float32, twice.  XLA casts NaN to fp4 as zero, so NaN passes through.  A
+    barrier keeps the narrow value, which XLA's GPU compiler otherwise drops
+    as excess precision (``SimplifyFPConversions``).
     """
     if name == "fp64":
         return x
     if name == "fp32":
-        return x.astype(jnp.float32).astype(x.dtype)
+        return _fp32(x).astype(x.dtype)
     if name not in _DTYPES or x.dtype == jnp.float64:
         return quantize(x, name, scaling=scaling)
     fmt = _ELEMENT_FORMATS[name]
     scale = _tensor_scale(x, fmt, scaling) if fmt.amax_scaled else 1.0
-    cast = (x * scale).astype(_DTYPES[name]).astype(x.dtype) / scale
+    narrow = jax.lax.optimization_barrier((x * scale).astype(_DTYPES[name]))
+    cast = narrow.astype(x.dtype) / scale
     return jnp.where(jnp.isnan(x), x, cast)
 
 
@@ -881,7 +894,7 @@ class _Arithmetic:
         if name == "fp64":
             return x.astype(jnp.float64)
         if name == "fp32":
-            return x.astype(jnp.float32)
+            return _fp32(x)
         variant, scaling = self.precision.variant, self.precision.scaling
         if self._native:
             return _rounder(name, variant, scaling, native=True)(x)
